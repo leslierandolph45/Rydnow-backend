@@ -19,7 +19,11 @@ SECRET_KEY = 'django-insecure-0_*)!yzmt^(4*agf254^=cjqo0wbh!rz36ir_z71k=t_)='
 DEBUG = True
 
 
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost']
+ALLOWED_HOSTS = [
+    '127.0.0.1',
+    'localhost',
+    'rydnow-backend-production.up.railway.app'
+]
 
 
 INSTALLED_APPS = [
