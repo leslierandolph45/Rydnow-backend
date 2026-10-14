@@ -19,7 +19,11 @@ SECRET_KEY = 'django-insecure-0_*)!yzmt^(4*agf254^=cjqo0wbh!rz36ir_z71k=t_)='
 DEBUG = True
 
 
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost']
+ALLOWED_HOSTS = [
+    '127.0.0.1',
+    'localhost',
+    'rydnow-backend-production.up.railway.app'
+]
 
 
 INSTALLED_APPS = [
@@ -70,12 +74,22 @@ TEMPLATES = [
 WSGI_APPLICATION = 'rydnow.wsgi.application'
 
 
+# ─── DATABASE ───
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
+
+
+# Use PostgreSQL in production
+if 'DATABASE_URL' in os.environ:
+    import dj_database_url
+    DATABASES['default'] = dj_database_url.config(
+        conn_max_age=600,
+        ssl_require=True
+    )
 
 
 AUTH_PASSWORD_VALIDATORS = [

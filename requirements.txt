@@ -3,3 +3,4 @@ djangorestframework
 django-cors-headers
 Pillow
 gunicorn
+dj-database-url==2.2.0
