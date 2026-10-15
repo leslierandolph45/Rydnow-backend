@@ -5,7 +5,8 @@ from .views import (
     RiderViewSet, BookingViewSet, customer_profile,
     customer_register, user_login, rider_register, rider_submit_documents,
     update_rider_location, get_nearby_riders,
-    get_rider_wallet, rider_transactions, record_job_payment, request_withdrawal
+    get_rider_wallet, rider_transactions, record_job_payment, request_withdrawal,
+    create_booking, list_bookings  # ✅ ADDED
 )
 
 
@@ -15,6 +16,10 @@ router.register(r'bookings', BookingViewSet)
 
 
 urlpatterns = [
+    # ✅ BOOKING ENDPOINTS — THE MISSING ONES!
+    path('booking/create/', create_booking, name='create-booking'),
+    path('bookings/list/', list_bookings, name='list-bookings'),
+    
     # ✅ AUTH ENDPOINTS
     path('auth/register/', customer_register, name='customer-register'),
     path('auth/login/', user_login, name='user-login'),
@@ -25,7 +30,7 @@ urlpatterns = [
     path('rider/update-location/', update_rider_location, name='update-rider-location'),
     path('riders/nearby/', get_nearby_riders, name='nearby-riders'),
     
-    # ✅ 💰 WALLET, COMMISSION & WITHDRAWALS — NEW!
+    # ✅ 💰 WALLET, COMMISSION & WITHDRAWALS
     path('wallet/balance/', get_rider_wallet, name='rider-wallet'),
     path('wallet/transactions/', rider_transactions, name='rider-transactions'),
     path('payments/record/', record_job_payment, name='record-payment'),
