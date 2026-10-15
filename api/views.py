@@ -7,6 +7,7 @@ from django.contrib.auth.models import User
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, Transaction, WithdrawalRequest
+from .serializers import BookingSerializer
 import uuid
 
 
@@ -281,10 +282,92 @@ def rider_submit_documents(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 📋 YOUR ORIGINAL VIEWSETS — Riders, Bookings, Profile
+# 🆕 CREATE BOOKING — THE MISSING ENDPOINT! ✅
 # ═══════════════════════════════════════════════════════
 
 
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def create_booking(request):
+    """Customer creates a new booking — called from frontend on 'Confirm & Pay'"""
+    try:
+        data = request.data.copy()
+        
+        # Extract customer info
+        customer_name = data.pop('customer_name', 'Guest')
+        customer_phone = data.pop('customer_phone', '')
+        customer_email = data.pop('customer_email', '')
+        
+        # Try to find or create a CustomerProfile
+        customer = None
+        if customer_phone:
+            customer, _ = CustomerProfile.objects.get_or_create(
+                phone=customer_phone,
+                defaults={
+                    'full_name': customer_name,
+                    'email': customer_email
+                }
+            )
+        
+        # Prepare booking data
+        booking_data = {
+            'service_type': data.pop('service_type', 'okada'),
+            'pickup': data.pop('pickup', ''),
+            'pickup_lat': data.pop('pickup_lat', None),
+            'pickup_lng': data.pop('pickup_lng', None),
+            'destination': data.pop('destination', ''),
+            'destination_lat': data.pop('destination_lat', None),
+            'destination_lng': data.pop('destination_lng', None),
+            'distance_km': data.pop('distance_km', None),
+            'price': data.pop('fare', data.pop('price', None)),
+            'customer': customer.id if customer else None,
+            'customer_name': customer_name,
+            'customer_phone': customer_phone,
+            'customer_email': customer_email,
+            'parcel_details': data.pop('parcel_details', ''),
+            'payment_method': data.pop('payment_method', ''),
+            'status': 'pending'
+        }
+        
+        serializer = BookingSerializer(data=booking_data)
+        if serializer.is_valid():
+            booking = serializer.save()
+            return Response({
+                'message': '✅ Booking created successfully!',
+                'booking_id': booking.id,
+                'booking': serializer.data
+            }, status=status.HTTP_201_CREATED)
+        else:
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+    except Exception as e:
+        return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+@csrf_exempt
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def list_bookings(request):
+    """List all bookings — optionally filter by customer phone"""
+    phone = request.GET.get('phone')
+    if phone:
+        bookings = Booking.objects.filter(customer_phone=phone).order_by('-created_at')
+    else:
+        bookings = Booking.objects.all().order_by('-created_at')
+    
+    serializer = BookingSerializer(bookings, many=True)
+    return Response({'bookings': serializer.data})
+
+
+
+
+# ═══════════════════════════════════════════════════════
+# 📋 YOUR ORIGINAL VIEWSETS — Riders, Bookings, Profile
+# ═══════════════════════════════════════════════════════
 
 
 class RiderViewSet(viewsets.ReadOnlyModelViewSet):
@@ -292,13 +375,10 @@ class RiderViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Rider.objects.all()
 
 
-
-
 class BookingViewSet(viewsets.ModelViewSet):
     """Full CRUD for bookings"""
     queryset = Booking.objects.all()
-
-
+    serializer_class = BookingSerializer
 
 
 @api_view(['GET'])
@@ -319,10 +399,8 @@ def customer_profile(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 📍 LIVE RIDER LOCATION — NEW ENDPOINTS
+# 📍 LIVE RIDER LOCATION
 # ═══════════════════════════════════════════════════════
-
-
 
 
 @csrf_exempt
@@ -340,7 +418,6 @@ def update_rider_location(request):
             return Response({'detail': 'Missing required fields'}, status=status.HTTP_400_BAD_REQUEST)
 
 
-        # Try RiderProfile first, fall back to Rider
         try:
             rider = RiderProfile.objects.get(id=rider_id)
             rider.current_lat = lat
@@ -375,21 +452,17 @@ def update_rider_location(request):
 def get_nearby_riders(request):
     """Customer dashboard & Admin panel get all online riders with live locations"""
     try:
-        # Get RiderProfile riders who are online
         profile_riders = list(RiderProfile.objects.filter(
             is_online=True,
             status='approved'
         ).values(
             'id', 'full_name', 'phone', 'current_lat', 'current_lng', 'is_online'
         ))
-        
-        # Rename full_name → name for consistency
         profile_riders = [
             {**r, 'name': r.pop('full_name')} for r in profile_riders
         ]
 
 
-        # Also get legacy Rider objects that are online
         legacy_riders = list(Rider.objects.filter(
             is_online=True,
             verification_status='approved'
@@ -408,13 +481,11 @@ def get_nearby_riders(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 💰 WALLET, COMMISSION & WITHDRAWAL SYSTEM — NEW!
+# 💰 WALLET, COMMISSION & WITHDRAWAL SYSTEM
 # ═══════════════════════════════════════════════════════
 
 
-COMMISSION_RATE = 0.15  # ✅ 15% PLATFORM COMMISSION
-
-
+COMMISSION_RATE = 0.15
 
 
 @csrf_exempt
@@ -428,13 +499,9 @@ def get_rider_wallet(request):
         return Response({'detail': 'rider_id is required'}, status=status.HTTP_400_BAD_REQUEST)
     
     try:
-        # Try RiderProfile first
         try:
             wallet = RiderWallet.objects.get(rider__id=rider_id)
         except RiderWallet.DoesNotExist:
-            # Check if it's a legacy Rider instead
-            rider = Rider.objects.get(id=rider_id)
-            # For legacy Rider, return basic info
             return Response({
                 'balance': 0.00,
                 'total_earned': 0.00,
@@ -502,12 +569,10 @@ def record_job_payment(request):
             return Response({'detail': 'Missing required fields'}, status=status.HTTP_400_BAD_REQUEST)
 
 
-        # ✅ Calculate split
         commission = round(total_amount * COMMISSION_RATE, 2)
         rider_amount = round(total_amount - commission, 2)
 
 
-        # ✅ Get booking and update payment info
         booking = Booking.objects.get(id=booking_id)
         booking.total_amount = total_amount
         booking.platform_commission = commission
@@ -519,15 +584,11 @@ def record_job_payment(request):
         booking.save()
 
 
-        # ✅ Get rider and their wallet
         rider = RiderProfile.objects.get(id=rider_id)
         wallet, _ = RiderWallet.objects.get_or_create(rider=rider)
-        
-        # ✅ Add rider's share to wallet
         wallet.deposit(rider_amount)
 
 
-        # ✅ Record transaction history
         Transaction.objects.create(
             rider=rider,
             booking=booking,
@@ -579,12 +640,10 @@ def request_withdrawal(request):
             return Response({'detail': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
 
 
-        # ✅ Get rider & wallet
         rider = RiderProfile.objects.get(id=rider_id)
         wallet, _ = RiderWallet.objects.get_or_create(rider=rider)
 
 
-        # ✅ Check balance
         if float(wallet.balance) < amount:
             return Response({
                 'detail': 'Insufficient balance',
@@ -592,13 +651,11 @@ def request_withdrawal(request):
             }, status=status.HTTP_400_BAD_REQUEST)
 
 
-        # ✅ Deduct from wallet
         success = wallet.withdraw(amount)
         if not success:
             return Response({'detail': 'Withdrawal failed'}, status=status.HTTP_400_BAD_REQUEST)
 
 
-        # ✅ Create withdrawal request record
         withdrawal = WithdrawalRequest.objects.create(
             rider=rider,
             amount=amount,
@@ -608,7 +665,6 @@ def request_withdrawal(request):
         )
 
 
-        # ✅ Record transaction
         Transaction.objects.create(
             rider=rider,
             transaction_type='withdrawal',
