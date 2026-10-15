@@ -22,12 +22,15 @@ DEBUG = True
 ALLOWED_HOSTS = [
     '127.0.0.1',
     'localhost',
-    'rydnow-backend-production.up.railway.app'
+    'rydnow-backend-production.up.railway.app',
+    '.railway.app',
 ]
 
 
 CSRF_TRUSTED_ORIGINS = [
     'https://rydnow-backend-production.up.railway.app',
+    'https://rydnow.app',
+    'https://www.rydnow.app',
 ]
 
 
@@ -109,7 +112,7 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-    }
+    },
 ]
 
 
