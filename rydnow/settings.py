@@ -93,7 +93,6 @@ TEMPLATES = [
 WSGI_APPLICATION = 'rydnow.wsgi.application'
 
 
-# ─── DATABASE ───
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
@@ -102,7 +101,6 @@ DATABASES = {
 }
 
 
-# Use PostgreSQL in production
 if 'DATABASE_URL' in os.environ:
     import dj_database_url
     DATABASES['default'] = dj_database_url.config(
@@ -112,18 +110,10 @@ if 'DATABASE_URL' in os.environ:
 
 
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-    },
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
 
@@ -136,7 +126,6 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 
-# ─── FILE UPLOADS FOR DOCUMENTS ───
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
@@ -144,7 +133,6 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
-# ─── REST FRAMEWORK ───
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
