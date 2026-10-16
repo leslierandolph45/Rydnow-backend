@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.models import User
 from django.utils import timezone
+from django.utils.html import format_html
 from .models import (
     Rider, Booking, CustomerProfile, RiderProfile,
     RiderWallet, Transaction, WithdrawalRequest, RiderComplaint
@@ -48,27 +49,55 @@ admin.site.register(User, CustomUserAdmin)
 # ══════════════════════════════════════════════════════════
 @admin.register(Rider)
 class RiderAdmin(admin.ModelAdmin):
-    list_display = ('name', 'phone', 'email', 'verification_status', 
+    list_display = ('name', 'phone', 'email', 'verification_status',
                    'is_online', 'is_restricted', 'created_at')
     list_filter = ('verification_status', 'is_online', 'is_restricted', 'created_at')
     search_fields = ('name', 'phone', 'email')
     list_per_page = 30
-   
+    
+    # 🖼️ Helper to show clickable image links
+    def id_card_preview(self, obj):
+        if obj.id_card and hasattr(obj.id_card, 'url'):
+            return format_html('<a href="{}" target="_blank">📷 View ID Card</a>', obj.id_card.url)
+        return '—'
+    id_card_preview.short_description = 'ID Card'
+
+
+    def license_preview(self, obj):
+        if obj.driver_license and hasattr(obj.driver_license, 'url'):
+            return format_html('<a href="{}" target="_blank">📷 View License</a>', obj.driver_license.url)
+        return '—'
+    license_preview.short_description = 'Driver License'
+
+
+    def vehicle_reg_preview(self, obj):
+        if obj.vehicle_registration and hasattr(obj.vehicle_registration, 'url'):
+            return format_html('<a href="{}" target="_blank">📷 View Vehicle Reg</a>', obj.vehicle_registration.url)
+        return '—'
+    vehicle_reg_preview.short_description = 'Vehicle Registration'
+
+
+    def insurance_preview(self, obj):
+        if obj.insurance and hasattr(obj.insurance, 'url'):
+            return format_html('<a href="{}" target="_blank">📷 View Insurance</a>', obj.insurance.url)
+        return '—'
+    insurance_preview.short_description = 'Insurance'
+    
     fieldsets = (
         ('Personal Info', {'fields': ('name', 'email', 'phone', 'location', 'user')}),
         ('Status', {'fields': ('verification_status', 'is_online')}),
-        ('📋 Submitted Documents', {'fields': ('id_card', 'driver_license', 'vehicle_registration', 'insurance')}),
+        ('📋 Submitted Documents', {'fields': ('id_card_preview', 'license_preview', 'vehicle_reg_preview', 'insurance_preview')}),
         ('🛡️ Restriction Control', {'fields': ('is_restricted', 'restriction_reason', 'restriction_details', 'restricted_until')}),
         ('Admin Notes', {'fields': ('admin_notes',)}),
     )
-   
+    
     actions = ['approve_rider', 'reject_rider', 'mark_online', 'mark_offline',
                'restrict_riders', 'remove_restriction']
-   
+    
     def approve_rider(self, request, queryset):
         queryset.update(verification_status='approved')
     approve_rider.short_description = "✅ Mark selected as APPROVED"
-   
+    
     def reject_rider(self, request, queryset):
         queryset.update(verification_status='rejected')
     reject_rider.short_description = "❌ Mark selected as REJECTED"
@@ -86,7 +115,7 @@ class RiderAdmin(admin.ModelAdmin):
     restrict_riders.short_description = "🚫 Restrict selected riders"
     
     def remove_restriction(self, request, queryset):
-        queryset.update(is_restricted=False, restriction_reason='', 
+        queryset.update(is_restricted=False, restriction_reason='',
                         restriction_details='', restricted_until=None)
     remove_restriction.short_description = "✅ Remove Restriction"
 
@@ -99,6 +128,35 @@ class RiderProfileAdmin(admin.ModelAdmin):
     list_filter = ('status', 'is_online', 'is_restricted', 'created_at')
     search_fields = ('full_name', 'phone', 'email')
     readonly_fields = ('created_at',)
+    
+    # 🖼️ Clickable links for RiderProfile documents
+    def ghana_card_link(self, obj):
+        if obj.ghana_card_doc:
+            return format_html('<a href="/media/documents/ids/{}" target="_blank">📷 View Ghana Card</a>', obj.ghana_card_doc)
+        return '—'
+    ghana_card_link.short_description = 'Ghana Card'
+
+
+    def passport_photo_link(self, obj):
+        if obj.passport_photo:
+            return format_html('<a href="/media/profiles/{}" target="_blank">📷 View Passport</a>', obj.passport_photo)
+        return '—'
+    passport_photo_link.short_description = 'Passport Photo'
+
+
+    def license_doc_link(self, obj):
+        if obj.license_doc:
+            return format_html('<a href="/media/documents/licenses/{}" target="_blank">📷 View License</a>', obj.license_doc)
+        return '—'
+    license_doc_link.short_description = 'License Document'
+    
+    fieldsets = (
+        ('Personal Info', {'fields': ('user', 'full_name', 'email', 'phone', 'motorbike_model', 'license_number')}),
+        ('📍 Location', {'fields': ('current_lat', 'current_lng', 'last_location_update')}),
+        ('📋 Submitted Documents', {'fields': ('ghana_card_link', 'passport_photo_link', 'license_doc_link')}),
+        ('Status', {'fields': ('status', 'is_online')}),
+        ('🛡️ Restriction', {'fields': ('is_restricted', 'restriction_notes', 'restricted_until')}),
+    )
     
     actions = ['restrict_profiles', 'remove_profile_restriction']
     
@@ -118,21 +176,21 @@ class RiderProfileAdmin(admin.ModelAdmin):
 # ══════════════════════════════════════════════════════════
 @admin.register(Booking)
 class BookingAdmin(admin.ModelAdmin):
-    list_display = ('service_type', 'customer_name', 'pickup', 'destination', 
+    list_display = ('service_type', 'customer_name', 'pickup', 'destination',
                    'status', 'rider', 'total_amount', 'payment_status', 'created_at')
     list_filter = ('service_type', 'status', 'payment_status', 'created_at')
     search_fields = ('customer_name', 'customer_phone', 'pickup', 'destination')
-    readonly_fields = ('created_at', 'updated_at', 'total_amount', 
+    readonly_fields = ('created_at', 'updated_at', 'total_amount',
                       'platform_commission', 'rider_amount', 'paid_at')
     
     fieldsets = (
-        ('Trip Info', {'fields': ('service_type', 'pickup', 'destination', 
+        ('Trip Info', {'fields': ('service_type', 'pickup', 'destination',
                                  'pickup_lat', 'pickup_lng', 'destination_lat', 'destination_lng',
                                  'distance_km', 'price')}),
         ('Customer', {'fields': ('customer', 'customer_name', 'customer_phone', 'customer_email')}),
         ('Rider', {'fields': ('rider', 'status')}),
-        ('💰 Payment Details', {'fields': ('total_amount', 'platform_commission', 
-                                           'rider_amount', 'payment_status', 
+        ('💰 Payment Details', {'fields': ('total_amount', 'platform_commission',
+                                           'rider_amount', 'payment_status',
                                            'payment_method', 'transaction_reference', 'paid_at')}),
         ('Parcel/Waste Details', {'fields': ('parcel_details',)}),
     )
@@ -168,7 +226,7 @@ class RiderWalletAdmin(admin.ModelAdmin):
 
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
-    list_display = ('rider_name', 'transaction_type', 'amount', 'commission', 
+    list_display = ('rider_name', 'transaction_type', 'amount', 'commission',
                    'rider_amount', 'status', 'created_at')
     list_filter = ('transaction_type', 'status', 'created_at')
     search_fields = ('rider__name', 'description')
@@ -183,7 +241,7 @@ class TransactionAdmin(admin.ModelAdmin):
 
 @admin.register(WithdrawalRequest)
 class WithdrawalRequestAdmin(admin.ModelAdmin):
-    list_display = ('rider_name', 'amount', 'mobile_money_number', 
+    list_display = ('rider_name', 'amount', 'mobile_money_number',
                    'status', 'created_at', 'processed_at')
     list_filter = ('status', 'created_at')
     search_fields = ('rider__name', 'mobile_money_number', 'network')
@@ -211,14 +269,14 @@ class WithdrawalRequestAdmin(admin.ModelAdmin):
 # ══════════════════════════════════════════════════════════
 @admin.register(RiderComplaint)
 class RiderComplaintAdmin(admin.ModelAdmin):
-    list_display = ('subject_rider', 'complaint_type', 'status', 
+    list_display = ('subject_rider', 'complaint_type', 'status',
                    'reporter_name', 'created_at')
     list_filter = ('complaint_type', 'status', 'created_at')
     search_fields = ('rider__name', 'reporter_name', 'description')
     readonly_fields = ('created_at', 'resolved_at')
     
     fieldsets = (
-        ('Complaint Info', {'fields': ('rider', 'rider_profile', 'booking', 
+        ('Complaint Info', {'fields': ('rider', 'rider_profile', 'booking',
                                        'complaint_type', 'description')}),
         ('Reporter', {'fields': ('reporter_name', 'reporter_phone')}),
         ('Status & Action', {'fields': ('status', 'admin_notes', 'action_taken', 'resolved_at')}),
