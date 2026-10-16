@@ -34,12 +34,11 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 
 
-# ✅ YOUR FRONTEND DOMAINS — ALLOWED TO TALK TO BACKEND
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://rydnow.app",
-    "https://www.rydnow.app",
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'https://rydnow.app',
+    'https://www.rydnow.app',
 ]
 
 
@@ -61,7 +60,7 @@ INSTALLED_APPS = [
 
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',  # ✅ Keep this FIRST in the list!
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
