@@ -127,7 +127,8 @@ class RiderProfileAdmin(admin.ModelAdmin):
     list_display = ('full_name', 'phone', 'status', 'is_online', 'is_restricted', 'created_at')
     list_filter = ('status', 'is_online', 'is_restricted', 'created_at')
     search_fields = ('full_name', 'phone', 'email')
-    readonly_fields = ('created_at',)
+    # ✅ FIX: Added the 3 link functions to readonly_fields so Django recognizes them
+    readonly_fields = ('created_at', 'ghana_card_link', 'passport_photo_link', 'license_doc_link')
     
     # 🖼️ Clickable links for RiderProfile documents
     def ghana_card_link(self, obj):
