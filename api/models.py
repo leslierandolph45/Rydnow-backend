@@ -69,7 +69,6 @@ WITHDRAWAL_STATUS = [
 ]
 
 
-# 🛡️ COMPLAINT & RESTRICTION CHOICES
 COMPLAINT_STATUS = [
     ('pending', '🔄 Under Review'),
     ('resolved', '✅ Resolved — No Action'),
@@ -263,9 +262,7 @@ class Booking(models.Model):
 
 
 
-# ══════════════════════════════════════════════════════════
-# 💰 RIDER WALLET — Tracks earnings & available balance
-# ══════════════════════════════════════════════════════════
+# 💰 RIDER WALLET
 class RiderWallet(models.Model):
     """Each Rider has one wallet — holds their 85% earnings"""
     rider = models.OneToOneField(Rider, on_delete=models.CASCADE, related_name='wallet')
@@ -300,9 +297,7 @@ class RiderWallet(models.Model):
 
 
 
-# ══════════════════════════════════════════════════════════
-# 📝 TRANSACTION HISTORY — Every payment & withdrawal
-# ══════════════════════════════════════════════════════════
+# 📝 TRANSACTION HISTORY
 class Transaction(models.Model):
     """Full history of all money movements"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -327,9 +322,7 @@ class Transaction(models.Model):
 
 
 
-# ══════════════════════════════════════════════════════════
-# 💳 WITHDRAWAL REQUEST — When rider taps "Withdraw"
-# ══════════════════════════════════════════════════════════
+# 💳 WITHDRAWAL REQUEST
 class WithdrawalRequest(models.Model):
     """Rider requests payout → admin can see & process"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -348,9 +341,7 @@ class WithdrawalRequest(models.Model):
 
 
 
-# ══════════════════════════════════════════════════════════
-# 🛡️ RIDER COMPLAINTS & RESTRICTIONS — NEW!
-# ══════════════════════════════════════════════════════════
+# 🛡️ RIDER COMPLAINTS & RESTRICTIONS
 class RiderComplaint(models.Model):
     """Customers report issues → tracked in admin → you can restrict riders"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
