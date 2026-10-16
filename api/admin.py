@@ -1,5 +1,5 @@
 from django.contrib import admin
-from django.contrib.auth.admin import BaseUserAdmin
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.models import User
 from django.utils import timezone
 from django.utils.html import format_html
@@ -59,28 +59,28 @@ class RiderAdmin(admin.ModelAdmin):
     def id_card_preview(self, obj):
         if obj.id_card and hasattr(obj.id_card, 'url'):
             return format_html('<a href="{}" target="_blank">📷 View ID Card</a>', obj.id_card.url)
-        return '—'
+        return '-'
     id_card_preview.short_description = 'ID Card'
 
 
     def license_preview(self, obj):
         if obj.driver_license and hasattr(obj.driver_license, 'url'):
             return format_html('<a href="{}" target="_blank">📷 View License</a>', obj.driver_license.url)
-        return '—'
+        return '-'
     license_preview.short_description = 'Driver License'
 
 
     def vehicle_reg_preview(self, obj):
         if obj.vehicle_registration and hasattr(obj.vehicle_registration, 'url'):
             return format_html('<a href="{}" target="_blank">📷 View Vehicle Reg</a>', obj.vehicle_registration.url)
-        return '—'
+        return '-'
     vehicle_reg_preview.short_description = 'Vehicle Registration'
 
 
     def insurance_preview(self, obj):
         if obj.insurance and hasattr(obj.insurance, 'url'):
             return format_html('<a href="{}" target="_blank">📷 View Insurance</a>', obj.insurance.url)
-        return '—'
+        return '-'
     insurance_preview.short_description = 'Insurance'
 
 
@@ -141,21 +141,21 @@ class RiderProfileAdmin(admin.ModelAdmin):
     def ghana_card_link(self, obj):
         if obj.ghana_card_doc and hasattr(obj.ghana_card_doc, 'url'):
             return format_html('<a href="{}" target="_blank">📷 View Ghana Card</a>', obj.ghana_card_doc.url)
-        return '—'
+        return '-'
     ghana_card_link.short_description = 'Ghana Card'
 
 
     def passport_photo_link(self, obj):
         if obj.passport_photo and hasattr(obj.passport_photo, 'url'):
             return format_html('<a href="{}" target="_blank">📷 View Passport</a>', obj.passport_photo.url)
-        return '—'
+        return '-'
     passport_photo_link.short_description = 'Passport Photo'
 
 
     def license_doc_link(self, obj):
         if obj.license_doc and hasattr(obj.license_doc, 'url'):
             return format_html('<a href="{}" target="_blank">📷 View License</a>', obj.license_doc.url)
-        return '—'
+        return '-'
     license_doc_link.short_description = 'License Document'
 
 
