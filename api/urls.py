@@ -12,9 +12,13 @@ from .views import (
 )
 
 
+
+
 router = DefaultRouter()
 router.register(r'riders', RiderViewSet)
 router.register(r'bookings', BookingViewSet)
+
+
 
 
 urlpatterns = [
@@ -46,6 +50,8 @@ urlpatterns = [
     path('auth/token/', obtain_auth_token, name='api_token_auth'),
     path('profile/', customer_profile, name='customer_profile'),
 ]
+
+
 
 
 # ✅ SERVE UPLOADED IMAGES & FILES
