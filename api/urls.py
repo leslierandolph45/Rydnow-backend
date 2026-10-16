@@ -6,7 +6,7 @@ from .views import (
     customer_register, user_login, rider_register, rider_submit_documents,
     update_rider_location, get_nearby_riders,
     get_rider_wallet, rider_transactions, record_job_payment, request_withdrawal,
-    create_booking, list_bookings  # ✅ ADDED
+    create_booking, list_bookings, accept_booking  # ✅ ADDED accept_booking
 )
 
 
@@ -16,9 +16,10 @@ router.register(r'bookings', BookingViewSet)
 
 
 urlpatterns = [
-    # ✅ BOOKING ENDPOINTS — THE MISSING ONES!
+    # ✅ BOOKING ENDPOINTS
     path('booking/create/', create_booking, name='create-booking'),
     path('bookings/list/', list_bookings, name='list-bookings'),
+    path('bookings/accept/', accept_booking, name='accept-booking'),  # ✅ NEW
     
     # ✅ AUTH ENDPOINTS
     path('auth/register/', customer_register, name='customer-register'),
