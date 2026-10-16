@@ -700,7 +700,7 @@ def request_withdrawal(request):
 
 
 # ═══════════════════════════════════════════════════════
-# ✅ RIDER ACCEPTS BOOKING — NEW ENDPOINT
+# ✅ RIDER ACCEPTS BOOKING
 # ═══════════════════════════════════════════════════════
 
 
@@ -721,11 +721,9 @@ def accept_booking(request):
             )
 
 
-        # Get the booking
         booking = Booking.objects.get(id=booking_id)
 
 
-        # Check if still available
         if booking.status != 'searching_rider':
             return Response(
                 {'detail': 'Booking already taken or no longer available.'},
@@ -733,11 +731,9 @@ def accept_booking(request):
             )
 
 
-        # Get the rider
         rider = RiderProfile.objects.get(id=rider_id)
 
 
-        # Assign!
         booking.rider = rider
         booking.status = 'assigned'
         booking.assigned_at = timezone.now()
@@ -756,5 +752,95 @@ def accept_booking(request):
         return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
     except RiderProfile.DoesNotExist:
         return Response({'detail': 'Rider not found.'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+# ═══════════════════════════════════════════════════════
+# ✅ START RIDE
+# ═══════════════════════════════════════════════════════
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def start_ride(request):
+    """Rider marks ride as started — en route to destination"""
+    try:
+        booking_id = request.data.get('booking_id')
+
+
+        booking = Booking.objects.get(id=booking_id)
+
+
+        if booking.status != 'assigned':
+            return Response(
+                {'detail': 'Booking must be accepted first.'},
+                status=status.HTTP_409_CONFLICT
+            )
+
+
+        booking.status = 'in_progress'
+        booking.started_at = timezone.now()
+        booking.save()
+
+
+        return Response({
+            'message': '🛵 Ride started',
+            'booking_id': str(booking.id),
+            'status': 'in_progress',
+            'started_at': booking.started_at
+        }, status=status.HTTP_200_OK)
+
+
+    except Booking.DoesNotExist:
+        return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+# ═══════════════════════════════════════════════════════
+# ✅ COMPLETE RIDE
+# ═══════════════════════════════════════════════════════
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def complete_ride(request):
+    """Rider marks ride as completed — updates status"""
+    try:
+        booking_id = request.data.get('booking_id')
+
+
+        booking = Booking.objects.get(id=booking_id)
+
+
+        if booking.status != 'in_progress':
+            return Response(
+                {'detail': 'Ride must be in progress first.'},
+                status=status.HTTP_409_CONFLICT
+            )
+
+
+        booking.status = 'completed'
+        booking.completed_at = timezone.now()
+        booking.save()
+
+
+        return Response({
+            'message': '✅ Ride completed!',
+            'booking_id': str(booking.id),
+            'status': 'completed',
+            'completed_at': booking.completed_at
+        }, status=status.HTTP_200_OK)
+
+
+    except Booking.DoesNotExist:
+        return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
