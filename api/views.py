@@ -199,6 +199,7 @@ def rider_register(request):
         )
 
 
+        # ✅ Create RiderProfile
         rider_profile = RiderProfile.objects.create(
             user=user,
             full_name=full_name,
@@ -210,8 +211,18 @@ def rider_register(request):
         )
 
 
-        # ✅ Create WALLET automatically when rider registers
-        RiderWallet.objects.create(rider=rider_profile)
+        # ✅ Create Rider instance (needed for Wallet!)
+        rider = Rider.objects.create(
+            user=user,
+            name=full_name,
+            email=email,
+            phone=phone,
+            verification_status='pending'
+        )
+
+
+        # ✅ NOW create wallet — link to RIDER, NOT RiderProfile!
+        RiderWallet.objects.create(rider=rider)
 
 
         return Response({
@@ -219,7 +230,7 @@ def rider_register(request):
             'user': {
                 'id': user.id,
                 'username': user.username,
-                'email': user.email
+                'email': email
             }
         }, status=status.HTTP_201_CREATED)
 
@@ -252,9 +263,15 @@ def rider_submit_documents(request):
 
         try:
             rider_profile = RiderProfile.objects.get(user__username=username)
+            rider = Rider.objects.get(user__username=username)
         except RiderProfile.DoesNotExist:
             return Response(
                 {'detail': 'Rider profile not found. Please register first.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Rider.DoesNotExist:
+            return Response(
+                {'detail': 'Rider record not found. Please register first.'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
@@ -264,6 +281,11 @@ def rider_submit_documents(request):
         rider_profile.license_doc = documents.get('licenseDoc', '')
         rider_profile.status = 'pending_review'
         rider_profile.save()
+
+
+        # Also update Rider verification status
+        rider.verification_status = 'submitted'
+        rider.save()
 
 
         return Response({
@@ -284,6 +306,8 @@ def rider_submit_documents(request):
 # ═══════════════════════════════════════════════════════
 # 🆕 CREATE BOOKING — NOW AUTO = searching_rider ✅
 # ═══════════════════════════════════════════════════════
+
+
 
 
 @csrf_exempt
@@ -370,6 +394,8 @@ def list_bookings(request):
 # ═══════════════════════════════════════════════════════
 
 
+
+
 class RiderViewSet(viewsets.ReadOnlyModelViewSet):
     """List and view all registered riders"""
     queryset = Rider.objects.all()
@@ -407,6 +433,8 @@ def customer_profile(request):
 # ═══════════════════════════════════════════════════════
 
 
+
+
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -422,18 +450,22 @@ def update_rider_location(request):
             return Response({'detail': 'Missing required fields'}, status=status.HTTP_400_BAD_REQUEST)
 
 
+        # Try Rider first, fall back to RiderProfile
         try:
-            rider = RiderProfile.objects.get(id=rider_id)
-            rider.current_lat = lat
-            rider.current_lng = lng
-            rider.last_location_update = timezone.now()
-            rider.save()
-        except RiderProfile.DoesNotExist:
             rider = Rider.objects.get(id=rider_id)
             rider.current_lat = lat
             rider.current_lng = lng
             rider.last_location_update = timezone.now()
             rider.save()
+        except Rider.DoesNotExist:
+            try:
+                rider_profile = RiderProfile.objects.get(id=rider_id)
+                rider_profile.current_lat = lat
+                rider_profile.current_lng = lng
+                rider_profile.last_location_update = timezone.now()
+                rider_profile.save()
+            except RiderProfile.DoesNotExist:
+                return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
 
 
         return Response({
@@ -443,8 +475,6 @@ def update_rider_location(request):
             'longitude': lng,
             'updated_at': timezone.now()
         })
-    except (RiderProfile.DoesNotExist, Rider.DoesNotExist):
-        return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -454,20 +484,10 @@ def update_rider_location(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_nearby_riders(request):
-    """Customer dashboard & Admin panel get all online riders with live locations"""
+    """Customer dashboard & Admin panel get all approved riders with live locations"""
     try:
-        profile_riders = list(RiderProfile.objects.filter(
-            is_online=True,
-            status='approved'
-        ).values(
-            'id', 'full_name', 'phone', 'current_lat', 'current_lng', 'is_online'
-        ))
-        profile_riders = [
-            {**r, 'name': r.pop('full_name')} for r in profile_riders
-        ]
-
-
-        legacy_riders = list(Rider.objects.filter(
+        # Get RIDER objects (primary source)
+        riders = list(Rider.objects.filter(
             is_online=True,
             verification_status='approved'
         ).values(
@@ -476,7 +496,7 @@ def get_nearby_riders(request):
 
 
         return Response({
-            'riders': profile_riders + legacy_riders
+            'riders': riders
         })
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -487,6 +507,8 @@ def get_nearby_riders(request):
 # ═══════════════════════════════════════════════════════
 # 💰 WALLET, COMMISSION & WITHDRAWAL SYSTEM
 # ═══════════════════════════════════════════════════════
+
+
 
 
 COMMISSION_RATE = 0.15
@@ -505,20 +527,18 @@ def get_rider_wallet(request):
         return Response({'detail': 'rider_id is required'}, status=status.HTTP_400_BAD_REQUEST)
     
     try:
-        try:
-            wallet = RiderWallet.objects.get(rider__id=rider_id)
-        except RiderWallet.DoesNotExist:
-            return Response({
-                'balance': 0.00,
-                'total_earned': 0.00,
-                'total_withdrawn': 0.00,
-                'commission_rate': f"{int(COMMISSION_RATE * 100)}%"
-            })
-        
+        wallet = RiderWallet.objects.get(rider__id=rider_id)
         return Response({
             'balance': float(wallet.balance),
             'total_earned': float(wallet.total_earned),
             'total_withdrawn': float(wallet.total_withdrawn),
+            'commission_rate': f"{int(COMMISSION_RATE * 100)}%"
+        })
+    except RiderWallet.DoesNotExist:
+        return Response({
+            'balance': 0.00,
+            'total_earned': 0.00,
+            'total_withdrawn': 0.00,
             'commission_rate': f"{int(COMMISSION_RATE * 100)}%"
         })
     except Exception as e:
@@ -558,6 +578,22 @@ def rider_transactions(request):
 
 
 
+def get_rider_object(rider_id):
+    """Helper: Get Rider from either RiderProfile.id or Rider.id"""
+    try:
+        # First try: it's a Rider ID
+        return Rider.objects.get(id=rider_id)
+    except Rider.DoesNotExist:
+        try:
+            # Second try: it's a RiderProfile ID — find the linked Rider
+            profile = RiderProfile.objects.get(id=rider_id)
+            return Rider.objects.get(user=profile.user)
+        except (RiderProfile.DoesNotExist, Rider.DoesNotExist):
+            return None
+
+
+
+
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -590,7 +626,12 @@ def record_job_payment(request):
         booking.save()
 
 
-        rider = RiderProfile.objects.get(id=rider_id)
+        # ✅ Get the actual RIDER object
+        rider = get_rider_object(rider_id)
+        if not rider:
+            return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
         wallet, _ = RiderWallet.objects.get_or_create(rider=rider)
         wallet.deposit(rider_amount)
 
@@ -618,8 +659,6 @@ def record_job_payment(request):
 
     except Booking.DoesNotExist:
         return Response({'detail': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
-    except RiderProfile.DoesNotExist:
-        return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -646,7 +685,12 @@ def request_withdrawal(request):
             return Response({'detail': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
 
 
-        rider = RiderProfile.objects.get(id=rider_id)
+        # ✅ Get the actual RIDER object
+        rider = get_rider_object(rider_id)
+        if not rider:
+            return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
         wallet, _ = RiderWallet.objects.get_or_create(rider=rider)
 
 
@@ -691,8 +735,6 @@ def request_withdrawal(request):
         }, status=status.HTTP_201_CREATED)
 
 
-    except RiderProfile.DoesNotExist:
-        return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -702,6 +744,8 @@ def request_withdrawal(request):
 # ═══════════════════════════════════════════════════════
 # ✅ RIDER ACCEPTS BOOKING
 # ═══════════════════════════════════════════════════════
+
+
 
 
 @csrf_exempt
@@ -731,7 +775,10 @@ def accept_booking(request):
             )
 
 
-        rider = RiderProfile.objects.get(id=rider_id)
+        # ✅ Get the actual RIDER object
+        rider = get_rider_object(rider_id)
+        if not rider:
+            return Response({'detail': 'Rider not found.'}, status=status.HTTP_404_NOT_FOUND)
 
 
         booking.rider = rider
@@ -744,14 +791,12 @@ def accept_booking(request):
             'message': '✅ Booking accepted!',
             'booking_id': str(booking.id),
             'status': 'assigned',
-            'rider_name': rider.full_name
+            'rider_name': rider.name
         }, status=status.HTTP_200_OK)
 
 
     except Booking.DoesNotExist:
         return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
-    except RiderProfile.DoesNotExist:
-        return Response({'detail': 'Rider not found.'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -761,6 +806,8 @@ def accept_booking(request):
 # ═══════════════════════════════════════════════════════
 # ✅ START RIDE
 # ═══════════════════════════════════════════════════════
+
+
 
 
 @csrf_exempt
@@ -806,6 +853,8 @@ def start_ride(request):
 # ═══════════════════════════════════════════════════════
 # ✅ COMPLETE RIDE
 # ═══════════════════════════════════════════════════════
+
+
 
 
 @csrf_exempt
