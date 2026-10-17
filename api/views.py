@@ -7,8 +7,22 @@ from django.contrib.auth.models import User
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, Transaction, WithdrawalRequest
-from .serializers import BookingSerializer
+from .serializers import BookingSerializer, CustomerProfileSerializer
 import uuid
+
+
+
+
+# ═══════════════════════════════════════════════════════
+# 📋 CUSTOMER PROFILE VIEWSET — List all customers for Admin
+# ═══════════════════════════════════════════════════════
+
+
+class CustomerProfileViewSet(viewsets.ReadOnlyModelViewSet):
+    """List and view all customer profiles — used by admin dashboard"""
+    queryset = CustomerProfile.objects.all()
+    serializer_class = CustomerProfileSerializer
+    permission_classes = [AllowAny]
 
 
 
@@ -507,8 +521,6 @@ def get_nearby_riders(request):
 # ═══════════════════════════════════════════════════════
 # 💰 WALLET, COMMISSION & WITHDRAWAL SYSTEM
 # ═══════════════════════════════════════════════════════
-
-
 
 
 COMMISSION_RATE = 0.15
