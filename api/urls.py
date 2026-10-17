@@ -4,7 +4,7 @@ from django.conf.urls.static import static
 from rest_framework.routers import DefaultRouter
 from rest_framework.authtoken.views import obtain_auth_token
 from .views import (
-    RiderViewSet, BookingViewSet, customer_profile,
+    RiderViewSet, BookingViewSet, customer_profile, CustomerProfileViewSet,  # ✅ Add CustomerProfileViewSet here
     customer_register, user_login, rider_register, rider_submit_documents,
     update_rider_location, get_nearby_riders,
     get_rider_wallet, rider_transactions, record_job_payment, request_withdrawal,
@@ -17,6 +17,7 @@ from .views import (
 router = DefaultRouter()
 router.register(r'riders', RiderViewSet)
 router.register(r'bookings', BookingViewSet)
+router.register(r'customerprofiles', CustomerProfileViewSet)  # ✅ ADD THIS LINE
 
 
 
@@ -54,6 +55,5 @@ urlpatterns = [
 
 
 
-# ✅ SERVE UPLOADED IMAGES & FILES
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
