@@ -7,7 +7,7 @@ from django.contrib.auth.models import User
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, Transaction, WithdrawalRequest
-from .serializers import BookingSerializer, CustomerProfileSerializer
+from .serializers import BookingSerializer, CustomerProfileSerializer, RiderSerializer
 import uuid
 
 
