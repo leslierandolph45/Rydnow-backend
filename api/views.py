@@ -32,8 +32,6 @@ class CustomerProfileViewSet(viewsets.ReadOnlyModelViewSet):
 # ═══════════════════════════════════════════════════════
 
 
-
-
 # ─── HELPER: GET OR CREATE CUSTOMER PROFILE ───
 def get_or_create_customer_profile(user):
     profile, created = CustomerProfile.objects.get_or_create(
@@ -84,7 +82,7 @@ def customer_register(request):
 
 
         first_name = full_name.split()[0] if full_name else ''
-        last_name = ' '.join(full_name.split()[1:]) if len(full_name.split()) > 1 else ''
+        last_name = ' '.join(full_name.split()[1:]) if full_name and len(full_name.split()) > 1 else ''
         
         user = User.objects.create_user(
             username=username,
@@ -202,7 +200,7 @@ def rider_register(request):
 
 
         first_name = full_name.split()[0] if full_name else ''
-        last_name = ' '.join(full_name.split()[1:]) if len(full_name.split()) > 1 else ''
+        last_name = ' '.join(full_name.split()[1:]) if full_name and len(full_name.split()) > 1 else ''
         
         user = User.objects.create_user(
             username=username,
@@ -213,7 +211,6 @@ def rider_register(request):
         )
 
 
-        # ✅ Create RiderProfile
         rider_profile = RiderProfile.objects.create(
             user=user,
             full_name=full_name,
@@ -225,7 +222,6 @@ def rider_register(request):
         )
 
 
-        # ✅ Create Rider instance (needed for Wallet!)
         rider = Rider.objects.create(
             user=user,
             name=full_name,
@@ -235,7 +231,6 @@ def rider_register(request):
         )
 
 
-        # ✅ NOW create wallet — link to RIDER, NOT RiderProfile!
         RiderWallet.objects.create(rider=rider)
 
 
@@ -297,7 +292,6 @@ def rider_submit_documents(request):
         rider_profile.save()
 
 
-        # Also update Rider verification status
         rider.verification_status = 'submitted'
         rider.save()
 
@@ -322,8 +316,6 @@ def rider_submit_documents(request):
 # ═══════════════════════════════════════════════════════
 
 
-
-
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -332,12 +324,10 @@ def create_booking(request):
     try:
         data = request.data.copy()
         
-        # Extract customer info
         customer_name = data.pop('customer_name', 'Guest')
         customer_phone = data.pop('customer_phone', '')
         customer_email = data.pop('customer_email', '')
         
-        # Try to find or create a CustomerProfile
         customer = None
         if customer_phone:
             customer, _ = CustomerProfile.objects.get_or_create(
@@ -348,7 +338,6 @@ def create_booking(request):
                 }
             )
         
-        # Prepare booking data — ✅ AUTO-SET TO searching_rider!
         booking_data = {
             'service_type': data.pop('service_type', 'okada'),
             'pickup': data.pop('pickup', ''),
@@ -408,11 +397,11 @@ def list_bookings(request):
 # ═══════════════════════════════════════════════════════
 
 
-
-
 class RiderViewSet(viewsets.ReadOnlyModelViewSet):
     """List and view all registered riders"""
     queryset = Rider.objects.all()
+    serializer_class = RiderSerializer
+    permission_classes = [AllowAny]
 
 
 
@@ -421,6 +410,7 @@ class BookingViewSet(viewsets.ModelViewSet):
     """Full CRUD for bookings"""
     queryset = Booking.objects.all()
     serializer_class = BookingSerializer
+    permission_classes = [AllowAny]
 
 
 
@@ -447,8 +437,6 @@ def customer_profile(request):
 # ═══════════════════════════════════════════════════════
 
 
-
-
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -464,7 +452,6 @@ def update_rider_location(request):
             return Response({'detail': 'Missing required fields'}, status=status.HTTP_400_BAD_REQUEST)
 
 
-        # Try Rider first, fall back to RiderProfile
         try:
             rider = Rider.objects.get(id=rider_id)
             rider.current_lat = lat
@@ -500,7 +487,6 @@ def update_rider_location(request):
 def get_nearby_riders(request):
     """Customer dashboard & Admin panel get all approved riders with live locations"""
     try:
-        # Get RIDER objects (primary source)
         riders = list(Rider.objects.filter(
             is_online=True,
             verification_status='approved'
@@ -593,11 +579,9 @@ def rider_transactions(request):
 def get_rider_object(rider_id):
     """Helper: Get Rider from either RiderProfile.id or Rider.id"""
     try:
-        # First try: it's a Rider ID
         return Rider.objects.get(id=rider_id)
     except Rider.DoesNotExist:
         try:
-            # Second try: it's a RiderProfile ID — find the linked Rider
             profile = RiderProfile.objects.get(id=rider_id)
             return Rider.objects.get(user=profile.user)
         except (RiderProfile.DoesNotExist, Rider.DoesNotExist):
@@ -638,7 +622,6 @@ def record_job_payment(request):
         booking.save()
 
 
-        # ✅ Get the actual RIDER object
         rider = get_rider_object(rider_id)
         if not rider:
             return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -697,7 +680,6 @@ def request_withdrawal(request):
             return Response({'detail': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
 
 
-        # ✅ Get the actual RIDER object
         rider = get_rider_object(rider_id)
         if not rider:
             return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -758,8 +740,6 @@ def request_withdrawal(request):
 # ═══════════════════════════════════════════════════════
 
 
-
-
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -787,7 +767,6 @@ def accept_booking(request):
             )
 
 
-        # ✅ Get the actual RIDER object
         rider = get_rider_object(rider_id)
         if not rider:
             return Response({'detail': 'Rider not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -818,8 +797,6 @@ def accept_booking(request):
 # ═══════════════════════════════════════════════════════
 # ✅ START RIDE
 # ═══════════════════════════════════════════════════════
-
-
 
 
 @csrf_exempt
@@ -865,8 +842,6 @@ def start_ride(request):
 # ═══════════════════════════════════════════════════════
 # ✅ COMPLETE RIDE
 # ═══════════════════════════════════════════════════════
-
-
 
 
 @csrf_exempt
