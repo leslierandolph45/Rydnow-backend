@@ -46,6 +46,11 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = True
 
 
+# ✅ ADDED: Temporarily allow all origins for easy testing
+# Remove this line in production if you want tighter security
+CORS_ALLOW_ALL_ORIGINS = True
+
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -61,7 +66,7 @@ INSTALLED_APPS = [
 
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # ✅ Keep at the TOP
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
