@@ -46,7 +46,7 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = True
 
 
-# ✅ ADDED: Temporarily allow all origins for easy testing
+# ✅ Temporarily allow all origins for easy testing
 # Remove this line in production if you want tighter security
 CORS_ALLOW_ALL_ORIGINS = True
 
@@ -150,5 +150,8 @@ REST_FRAMEWORK = {
 }
 
 
-# ✅ NEW: Google Maps API Key — set in Railway environment variables
+# ═══════════════════════════════════════════════════════
+# ✅ GOOGLE MAPS & AI (GEMINI) CONFIG — Pulls from Railway/Local env
+# ═══════════════════════════════════════════════════════
 GOOGLE_MAPS_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY', '')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
