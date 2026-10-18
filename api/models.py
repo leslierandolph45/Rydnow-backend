@@ -14,7 +14,8 @@ COMMISSION_RATE = 0.15  # ✅ YOUR 15% COMMISSION
 
 # ─── CHOICES ───
 SERVICE_CHOICES = [
-    ('okada', 'Okada'),
+    ('okada', 'Okada Ride'),
+    ('delivery', 'Parcel Delivery'),  # ✅ Added to match frontend
     ('parcel', 'Parcel Delivery'),
     ('waste-bin', 'Waste Collection'),
 ]
@@ -222,8 +223,8 @@ class Booking(models.Model):
 
 
     customer = models.ForeignKey(CustomerProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
-    customer_name = models.CharField(max_length=100)
-    customer_phone = models.CharField(max_length=20)
+    customer_name = models.CharField(max_length=100, blank=True)  # ✅ Made optional
+    customer_phone = models.CharField(max_length=20, blank=True)  # ✅ Made optional
     customer_email = models.EmailField(blank=True, null=True)
 
 
@@ -234,7 +235,7 @@ class Booking(models.Model):
     parcel_details = models.TextField(blank=True, null=True)
 
 
-    # 💰 ESCROW PAYMENT — NEW FIELDS
+    # 💰 ESCROW PAYMENT
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='pending')
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     platform_commission = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -249,7 +250,7 @@ class Booking(models.Model):
 
 
     def __str__(self):
-        return f"{self.get_service_type_display()} — {self.customer_name}"
+        return f"{self.get_service_type_display()} — {self.customer_name or 'No Name'}"
 
 
     def split_payment(self):
