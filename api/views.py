@@ -4,6 +4,7 @@ from rest_framework import status, viewsets
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
+from django.db import transaction  # ✅ ADDED for atomic operations
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.conf import settings
@@ -884,7 +885,7 @@ def request_withdrawal(request):
 
 
 # ═══════════════════════════════════════════════════════
-# ✅ BOOKING FLOW — Accept / Start / Complete
+# ✅ BOOKING FLOW — Accept / Start / Complete — WITH RACE PROTECTION
 # ═══════════════════════════════════════════════════════
 
 
@@ -892,44 +893,48 @@ def request_withdrawal(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def accept_booking(request):
+    """
+    Atomic job acceptance — PREVENTS TWO RIDERS GETTING THE SAME JOB
+    Uses database row locking so only ONE rider can succeed
+    """
+    booking_id = request.data.get('booking_id')
+    rider_id = request.data.get('rider_id')
+
+
+    if not booking_id or not rider_id:
+        return Response(
+            {'detail': 'Booking ID and Rider ID are required.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
     try:
-        booking_id = request.data.get('booking_id')
-        rider_id = request.data.get('rider_id')
-
-
-        if not booking_id or not rider_id:
-            return Response(
-                {'detail': 'Booking ID and Rider ID are required.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-
-        booking = Booking.objects.get(id=booking_id)
-
-
-        if booking.status != 'searching_rider':
-            return Response(
-                {'detail': 'Booking already taken or no longer available.'},
-                status=status.HTTP_409_CONFLICT
-            )
-
-
-        rider = get_rider_object(rider_id)
-        if not rider:
-            return Response({'detail': 'Rider not found.'}, status=status.HTTP_404_NOT_FOUND)
-
-
-        booking.rider = rider
-        booking.status = 'assigned'
-        booking.assigned_at = timezone.now()
-        booking.save()
+        with transaction.atomic():  # ✅ ALL OR NOTHING — prevents race conditions
+            booking = Booking.objects.select_for_update().get(id=booking_id)
+            
+            if booking.status != 'searching_rider':
+                return Response(
+                    {'detail': 'Booking already taken or no longer available.', 'error_code': 'BOOKING_NOT_AVAILABLE'},
+                    status=status.HTTP_409_CONFLICT
+                )
+            
+            rider = get_rider_object(rider_id)
+            if not rider:
+                return Response({'detail': 'Rider not found.'}, status=status.HTTP_404_NOT_FOUND)
+            
+            booking.rider = rider
+            booking.status = 'assigned'
+            booking.assigned_at = timezone.now()
+            booking.accepted_at = timezone.now()
+            booking.save()
 
 
         return Response({
             'message': '✅ Booking accepted!',
             'booking_id': str(booking.id),
             'status': 'assigned',
-            'rider_name': rider.name
+            'rider_name': rider.name,
+            'assigned_at': booking.assigned_at
         }, status=status.HTTP_200_OK)
 
 
@@ -1015,6 +1020,117 @@ def complete_ride(request):
         return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+# ═══════════════════════════════════════════════════════
+# 📡 NEW: REAL-TIME & ADMIN ENDPOINTS
+# ═══════════════════════════════════════════════════════
+
+
+@csrf_exempt
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def available_jobs_for_rider(request):
+    """
+    Returns ONLY jobs that are searching for riders
+    Rider dashboard polls this to see new bookings
+    """
+    try:
+        bookings = Booking.objects.filter(
+            status='searching_rider'
+        ).order_by('-created_at')[:20]
+        
+        serializer = BookingSerializer(bookings, many=True)
+        return Response({
+            'count': bookings.count(),
+            'bookings': serializer.data
+        })
+    except Exception as e:
+        return Response({'detail': str(e)}, status=500)
+
+
+
+
+@csrf_exempt
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def poll_booking_updates(request):
+    """
+    Customer & Rider call this every 3–5 seconds
+    Returns bookings that changed since last_check
+    """
+    last_check_str = request.GET.get('last_check')
+    booking_id = request.GET.get('booking_id')
+    
+    if last_check_str:
+        try:
+            last_check = timezone.datetime.fromisoformat(last_check_str)
+        except ValueError:
+            last_check = timezone.now() - timezone.timedelta(minutes=60)
+    else:
+        last_check = timezone.now() - timezone.timedelta(minutes=60)
+    
+    if booking_id:
+        bookings = Booking.objects.filter(
+            id=booking_id,
+            updated_at__gte=last_check
+        )
+    else:
+        bookings = Booking.objects.filter(
+            updated_at__gte=last_check
+        ).exclude(status__in=['completed', 'cancelled'])
+    
+    serializer = BookingSerializer(bookings, many=True)
+    return Response({
+        'updated_at': timezone.now().isoformat(),
+        'bookings': serializer.data
+    })
+
+
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def admin_reassign_booking(request):
+    """
+    Admin manual dispatch — override/reassign any booking
+    """
+    booking_id = request.data.get('booking_id')
+    new_rider_id = request.data.get('new_rider_id')
+    admin_note = request.data.get('note', '')
+    
+    if not booking_id or not new_rider_id:
+        return Response({'detail': 'Booking ID and Rider ID required'}, status=400)
+    
+    try:
+        with transaction.atomic():
+            booking = Booking.objects.select_for_update().get(id=booking_id)
+            new_rider = get_rider_object(new_rider_id)
+            
+            if not new_rider:
+                return Response({'detail': 'Rider not found'}, status=404)
+            
+            old_rider_name = booking.rider.name if booking.rider else None
+            
+            booking.rider = new_rider
+            booking.status = 'assigned'
+            booking.assigned_at = timezone.now()
+            booking.save()
+        
+        return Response({
+            'message': f'✅ Booking reassigned from {old_rider_name or "unassigned"} to {new_rider.name}',
+            'booking_id': str(booking.id),
+            'new_rider': new_rider.name,
+            'status': 'assigned'
+        }, status=200)
+    
+    except Booking.DoesNotExist:
+        return Response({'detail': 'Booking not found'}, status=404)
+    except Exception as e:
+        return Response({'detail': str(e)}, status=500)
 
 
 
