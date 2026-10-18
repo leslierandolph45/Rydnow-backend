@@ -1,5 +1,3 @@
-api_key=
-settings.GOOGLE_MAPS_API_KEYS
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status, viewsets
@@ -15,6 +13,8 @@ import uuid
 import json
 import os
 from urllib import request, parse
+
+
 
 
 # ─── AI & MAPS IMPORTS ───
@@ -35,12 +35,14 @@ except ImportError:
 
 
 def get_distance_and_duration(pickup_address, dest_address):
-    """Call Google Maps API using Django's built-in urllib"""
-    api_key = settings.GOOGLE_MAPS_API_KEY
+    """Call Google Maps Distance Matrix API and return distance + duration"""
+    api_key = getattr(settings, 'GOOGLE_MAPS_API_KEY', '') or os.environ.get('GOOGLE_MAPS_API_KEY', '')
     
     if not api_key:
         print("⚠️ GOOGLE_MAPS_API_KEY not set — using fallback estimate")
         return None, None, 1.0
+    
+    print(f"✅ Google Maps API key loaded (prefix): {api_key[:10]}...")
     
     base_url = "https://maps.googleapis.com/maps/api/distancematrix/json"
     params = {
@@ -56,15 +58,20 @@ def get_distance_and_duration(pickup_address, dest_address):
         with request.urlopen(full_url, timeout=10) as resp:
             data = json.loads(resp.read().decode())
         
-        if data["status"] == "OK" and data["rows"][0]["elements"][0]["status"] == "OK":
+        print(f"🔍 Google API Response Status: {data.get('status')}")
+        
+        if data.get("status") == "OK" and data["rows"][0]["elements"][0]["status"] == "OK":
             element = data["rows"][0]["elements"][0]
             distance_km = element["distance"]["value"] / 1000
             duration_mins = round(element["duration_in_traffic"]["value"] / 60)
             duration_normal = element["duration"]["value"] / 60
             traffic_factor = duration_mins / duration_normal if duration_normal > 0 else 1.0
             return round(distance_km, 2), duration_mins, round(traffic_factor, 2)
+        else:
+            error_msg = data.get("error_message", "No error message provided")
+            print(f"⚠️ Google API Error: {error_msg}")
     except Exception as e:
-        print(f"⚠️ Google Maps error: {e}")
+        print(f"⚠️ Network/Request Error: {str(e)}")
     
     return None, None, 1.0
 
@@ -77,7 +84,7 @@ def get_distance_and_duration(pickup_address, dest_address):
 
 
 def calculate_fare(service_type, distance_km):
-    """Secure pricing — frontend can't change these prices"""
+    """Calculate fare — all pricing controlled on backend only"""
     PRICING = {
         "okada": {"base": 5.0, "per_km": 1.5},
         "parcel": {"base": 8.0, "per_km": 2.0},
@@ -114,7 +121,7 @@ class CustomerProfileViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 # ═══════════════════════════════════════════════════════
-# 🆕 AUTHENTICATION ENDPOINTS
+# 🆕 HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════
 
 
@@ -130,6 +137,11 @@ def get_or_create_customer_profile(user):
     return profile
 
 
+
+
+# ═══════════════════════════════════════════════════════
+# 🔐 AUTHENTICATION — Customer Registration
+# ═══════════════════════════════════════════════════════
 
 
 @csrf_exempt
@@ -244,6 +256,11 @@ def user_login(request):
         )
 
 
+
+
+# ═══════════════════════════════════════════════════════
+# 🏍️ RIDER REGISTRATION & DOCUMENTS
+# ═══════════════════════════════════════════════════════
 
 
 @csrf_exempt
@@ -393,7 +410,7 @@ def rider_submit_documents(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 🆕 CREATE BOOKING
+# 📦 BOOKING — Create, List, Estimate Fare
 # ═══════════════════════════════════════════════════════
 
 
@@ -492,16 +509,11 @@ def list_bookings(request):
 
 
 
-# ═══════════════════════════════════════════════════════
-# 💰 ESTIMATE FARE
-# ═══════════════════════════════════════════════════════
-
-
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def estimate_fare(request):
-    """Secure fare estimation — calculated on backend only"""
+    """Get estimated fare without creating a booking"""
     try:
         pickup = request.data.get('pickup')
         destination = request.data.get('destination')
@@ -642,11 +654,13 @@ def get_nearby_riders(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 💰 WALLET & PAYMENT SYSTEM
+# 💰 RIDER WALLET & PAYMENTS
 # ═══════════════════════════════════════════════════════
 
 
 COMMISSION_RATE = 0.15
+
+
 
 
 @csrf_exempt
@@ -870,7 +884,7 @@ def request_withdrawal(request):
 
 
 # ═══════════════════════════════════════════════════════
-# ✅ BOOKING FLOW — ACCEPT / START / COMPLETE
+# ✅ BOOKING FLOW — Accept / Start / Complete
 # ═══════════════════════════════════════════════════════
 
 
@@ -1006,13 +1020,15 @@ def complete_ride(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 🧠 AI-POWERED FARE CALCULATOR — NEW ENDPOINT
+# 🧠 AI-POWERED FARE CALCULATOR
 # ═══════════════════════════════════════════════════════
 
 
 if GOOGLE_SDK_AVAILABLE and hasattr(settings, 'GEMINI_API_KEY') and settings.GEMINI_API_KEY:
     gmaps = googlemaps.Client(key=settings.GOOGLE_MAPS_API_KEY)
     genai.configure(api_key=settings.GEMINI_API_KEY)
+
+
 
 
 @csrf_exempt
