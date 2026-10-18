@@ -9,14 +9,15 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.conf import settings
 from rest_framework.authtoken.models import Token
-from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, Transaction, WithdrawalRequest
+from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, Transaction, WithdrawalRequest, Payment
 from .serializers import BookingSerializer, CustomerProfileSerializer, RiderSerializer
 import uuid
 import json
 import os
+import hmac
+import hashlib
+import requests
 from urllib import request, parse
-
-
 
 
 # ─── AI & MAPS IMPORTS ───
@@ -29,12 +30,9 @@ except ImportError:
     print("⚠️ google-generativeai or googlemaps not installed — using fallback pricing only")
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 📍 HELPER: GET DISTANCE FROM GOOGLE MAPS
 # ═══════════════════════════════════════════════════════
-
 
 def get_distance_and_duration(pickup_address, dest_address):
     """Call Google Maps Distance Matrix API and return distance + duration"""
@@ -78,12 +76,9 @@ def get_distance_and_duration(pickup_address, dest_address):
     return None, None, 1.0
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 💰 HELPER: BACKEND-ONLY PRICING ENGINE
 # ═══════════════════════════════════════════════════════
-
 
 def calculate_fare(service_type, distance_km):
     """Calculate fare — all pricing controlled on backend only"""
@@ -107,19 +102,14 @@ def calculate_fare(service_type, distance_km):
     return round(total, 2)
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 📋 CUSTOMER PROFILE VIEWSET & ENDPOINTS
 # ═══════════════════════════════════════════════════════
-
 
 class CustomerProfileViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = CustomerProfile.objects.all()
     serializer_class = CustomerProfileSerializer
     permission_classes = [AllowAny]
-
-
 
 
 @csrf_exempt
@@ -172,7 +162,7 @@ def customer_profile_detail(request):
             'username': user.username,
             'email': user.email,
             'full_name': profile.full_name or user.get_full_name(),
-            'phone': profile.phone or '',
+            'phone': profile.phone,
         })
     
     # PUT/PATCH request — update profile
@@ -208,12 +198,9 @@ def customer_profile_detail(request):
         })
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 🆕 HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════
-
 
 def get_or_create_customer_profile(user):
     profile, created = CustomerProfile.objects.get_or_create(
@@ -227,12 +214,9 @@ def get_or_create_customer_profile(user):
     return profile
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 🔐 AUTHENTICATION — Customer Registration
 # ═══════════════════════════════════════════════════════
-
 
 @csrf_exempt
 @api_view(['POST'])
@@ -245,13 +229,11 @@ def customer_register(request):
         full_name = request.data.get('full_name')
         phone = request.data.get('phone')
 
-
         if not all([username, email, password]):
             return Response(
                 {'detail': 'Username, email and password are required.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
 
         if User.objects.filter(username=username).exists():
             return Response(
@@ -259,13 +241,11 @@ def customer_register(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-
         if User.objects.filter(email=email).exists():
             return Response(
                 {'email': 'Email already registered.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
 
         first_name = full_name.split()[0] if full_name else ''
         last_name = ' '.join(full_name.split()[1:]) if full_name and len(full_name.split()) > 1 else ''
@@ -278,7 +258,6 @@ def customer_register(request):
             last_name=last_name
         )
 
-
         CustomerProfile.objects.create(
             user=user,
             full_name=full_name,
@@ -286,10 +265,8 @@ def customer_register(request):
             phone=phone
         )
 
-
         # Create auth token for immediate login
         token, _ = Token.objects.get_or_create(user=user)
-
 
         return Response({
             'message': 'Customer account created successfully!',
@@ -302,14 +279,11 @@ def customer_register(request):
             }
         }, status=status.HTTP_201_CREATED)
 
-
     except Exception as e:
         return Response(
             {'detail': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
-
 
 
 @csrf_exempt
@@ -320,9 +294,7 @@ def user_login(request):
         username = request.data.get('username')
         password = request.data.get('password')
 
-
         user = authenticate(username=username, password=password)
-
 
         if not user:
             return Response(
@@ -330,10 +302,8 @@ def user_login(request):
                 status=status.HTTP_401_UNAUTHORIZED
             )
 
-
         # Create or get DRF Auth token
         token, created = Token.objects.get_or_create(user=user)
-
 
         return Response({
             'token': token.key,
@@ -345,7 +315,6 @@ def user_login(request):
             }
         })
 
-
     except Exception as e:
         return Response(
             {'detail': str(e)},
@@ -353,12 +322,9 @@ def user_login(request):
         )
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 🏍️ RIDER REGISTRATION & DOCUMENTS
 # ═══════════════════════════════════════════════════════
-
 
 @csrf_exempt
 @api_view(['POST'])
@@ -373,13 +339,11 @@ def rider_register(request):
         motorbike_model = request.data.get('motorbike_model')
         license_number = request.data.get('license_number')
 
-
         if not all([username, email, password, full_name, phone]):
             return Response(
                 {'detail': 'Please fill in all required fields.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
 
         if User.objects.filter(username=username).exists():
             return Response(
@@ -387,13 +351,11 @@ def rider_register(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-
         if User.objects.filter(email=email).exists():
             return Response(
                 {'email': 'Email already registered.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
 
         first_name = full_name.split()[0] if full_name else ''
         last_name = ' '.join(full_name.split()[1:]) if full_name and len(full_name.split()) > 1 else ''
@@ -406,7 +368,6 @@ def rider_register(request):
             last_name=last_name
         )
 
-
         rider_profile = RiderProfile.objects.create(
             user=user,
             full_name=full_name,
@@ -417,7 +378,6 @@ def rider_register(request):
             status='pending'
         )
 
-
         rider = Rider.objects.create(
             user=user,
             name=full_name,
@@ -426,9 +386,7 @@ def rider_register(request):
             verification_status='pending'
         )
 
-
         RiderWallet.objects.create(rider=rider)
-
 
         return Response({
             'message': 'Rider account created! Please upload your documents.',
@@ -439,14 +397,11 @@ def rider_register(request):
             }
         }, status=status.HTTP_201_CREATED)
 
-
     except Exception as e:
         return Response(
             {'detail': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
-
 
 
 @csrf_exempt
@@ -457,13 +412,11 @@ def rider_submit_documents(request):
         username = request.data.get('username')
         documents = request.data.get('documents', {})
 
-
         if not username:
             return Response(
                 {'detail': 'Username is required.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
 
         try:
             rider_profile = RiderProfile.objects.get(user__username=username)
@@ -479,23 +432,19 @@ def rider_submit_documents(request):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-
         rider_profile.ghana_card_doc = documents.get('ghanaCard', '')
         rider_profile.passport_photo = documents.get('passportPhoto', '')
         rider_profile.license_doc = documents.get('licenseDoc', '')
         rider_profile.status = 'pending_review'
         rider_profile.save()
 
-
         rider.verification_status = 'submitted'
         rider.save()
-
 
         return Response({
             'message': '✅ Documents submitted successfully!',
             'status': 'pending_review'
         })
-
 
     except Exception as e:
         return Response(
@@ -504,12 +453,9 @@ def rider_submit_documents(request):
         )
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 📦 BOOKING — Create, List, Estimate Fare
 # ═══════════════════════════════════════════════════════
-
 
 @csrf_exempt
 @api_view(['POST'])
@@ -525,17 +471,14 @@ def create_booking(request):
         customer_phone = request.data.get('customer_phone', '')
         payment_method = request.data.get('payment_method', 'cash')
 
-
         if not pickup or not destination:
             return Response(
                 {'error': 'Pickup and destination are required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-
         distance_km, duration_mins, _ = get_distance_and_duration(pickup, destination)
         final_price = calculate_fare(service_type, distance_km)
-
 
         customer = None
         if customer_phone:
@@ -546,7 +489,6 @@ def create_booking(request):
                     'email': ''
                 }
             )
-
 
         booking_data = {
             'service_type': service_type,
@@ -563,7 +505,6 @@ def create_booking(request):
             'payment_method': payment_method,
             'status': 'searching_rider'
         }
-
 
         serializer = BookingSerializer(data=booking_data)
         if serializer.is_valid():
@@ -583,11 +524,8 @@ def create_booking(request):
         else:
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 
 
 @csrf_exempt
@@ -610,8 +548,6 @@ def list_bookings(request):
     
     serializer = BookingSerializer(bookings, many=True)
     return Response({'bookings': serializer.data})
-
-
 
 
 @csrf_exempt
@@ -651,12 +587,9 @@ def estimate_fare(request):
         return Response({'error': str(e)}, status=500)
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 📋 VIEWSETS
 # ═══════════════════════════════════════════════════════
-
 
 class RiderViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Rider.objects.all()
@@ -664,14 +597,10 @@ class RiderViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]
 
 
-
-
 class BookingViewSet(viewsets.ModelViewSet):
     queryset = Booking.objects.all()
     serializer_class = BookingSerializer
     permission_classes = [AllowAny]
-
-
 
 
 @api_view(['GET'])
@@ -688,12 +617,9 @@ def customer_profile(request):
     })
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 📍 LIVE RIDER LOCATION
 # ═══════════════════════════════════════════════════════
-
 
 @csrf_exempt
 @api_view(['POST'])
@@ -704,10 +630,8 @@ def update_rider_location(request):
         lat = request.data.get('latitude')
         lng = request.data.get('longitude')
 
-
         if not all([rider_id, lat, lng]):
             return Response({'detail': 'Missing required fields'}, status=status.HTTP_400_BAD_REQUEST)
-
 
         try:
             rider = Rider.objects.get(id=rider_id)
@@ -725,7 +649,6 @@ def update_rider_location(request):
             except RiderProfile.DoesNotExist:
                 return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
 
-
         return Response({
             'message': 'Location updated',
             'rider_id': rider_id,
@@ -735,8 +658,6 @@ def update_rider_location(request):
         })
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 
 
 @api_view(['GET'])
@@ -750,22 +671,16 @@ def get_nearby_riders(request):
             'id', 'name', 'phone', 'current_lat', 'current_lng', 'is_online'
         ))
 
-
         return Response({'riders': riders})
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 
 
 # ═══════════════════════════════════════════════════════
 # 💰 RIDER WALLET & PAYMENTS
 # ═══════════════════════════════════════════════════════
 
-
 COMMISSION_RATE = 0.15
-
-
 
 
 @csrf_exempt
@@ -796,8 +711,6 @@ def get_rider_wallet(request):
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-
-
 @csrf_exempt
 @api_view(['GET'])
 @permission_classes([AllowAny])
@@ -826,8 +739,6 @@ def rider_transactions(request):
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-
-
 def get_rider_object(rider_id):
     try:
         return Rider.objects.get(id=rider_id)
@@ -837,8 +748,6 @@ def get_rider_object(rider_id):
             return Rider.objects.get(user=profile.user)
         except (RiderProfile.DoesNotExist, Rider.DoesNotExist):
             return None
-
-
 
 
 @csrf_exempt
@@ -852,14 +761,11 @@ def record_job_payment(request):
         payment_method = request.data.get('payment_method', 'mobile_money')
         reference = request.data.get('reference', '')
 
-
         if not all([booking_id, rider_id, total_amount]):
             return Response({'detail': 'Missing required fields'}, status=status.HTTP_400_BAD_REQUEST)
 
-
         commission = round(total_amount * COMMISSION_RATE, 2)
         rider_amount = round(total_amount - commission, 2)
-
 
         booking = Booking.objects.get(id=booking_id)
         booking.total_amount = total_amount
@@ -871,15 +777,12 @@ def record_job_payment(request):
         booking.paid_at = timezone.now()
         booking.save()
 
-
         rider = get_rider_object(rider_id)
         if not rider:
             return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
 
-
         wallet, _ = RiderWallet.objects.get_or_create(rider=rider)
         wallet.deposit(rider_amount)
-
 
         Transaction.objects.create(
             rider=rider,
@@ -892,7 +795,6 @@ def record_job_payment(request):
             description=f"Payment — {booking.pickup} → {booking.destination}"
         )
 
-
         return Response({
             'message': '✅ Payment recorded & split',
             'total_amount': total_amount,
@@ -901,13 +803,10 @@ def record_job_payment(request):
             'wallet_balance': float(wallet.balance)
         }, status=status.HTTP_201_CREATED)
 
-
     except Booking.DoesNotExist:
         return Response({'detail': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 
 
 @csrf_exempt
@@ -920,26 +819,21 @@ def request_withdrawal(request):
         mobile_money_number = request.data.get('mobile_money_number', '')
         network = request.data.get('network', '')
 
-
         if not all([rider_id, amount, mobile_money_number]):
             return Response({
                 'detail': 'Amount and mobile money number required'
             }, status=status.HTTP_400_BAD_REQUEST)
-
 
         if amount <= 0:
             return Response({
                 'detail': 'Invalid amount'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-
         rider = get_rider_object(rider_id)
         if not rider:
             return Response({'detail': 'Rider not found'}, status=status.HTTP_404_NOT_FOUND)
 
-
         wallet, _ = RiderWallet.objects.get_or_create(rider=rider)
-
 
         if float(wallet.balance) < amount:
             return Response({
@@ -947,11 +841,9 @@ def request_withdrawal(request):
                 'balance': float(wallet.balance)
             }, status=status.HTTP_400_BAD_REQUEST)
 
-
         success = wallet.withdraw(amount)
         if not success:
             return Response({'detail': 'Withdrawal failed'}, status=status.HTTP_400_BAD_REQUEST)
-
 
         withdrawal = WithdrawalRequest.objects.create(
             rider=rider,
@@ -960,7 +852,6 @@ def request_withdrawal(request):
             network=network,
             status='pending'
         )
-
 
         Transaction.objects.create(
             rider=rider,
@@ -972,7 +863,6 @@ def request_withdrawal(request):
             description=f"Withdrawal to {mobile_money_number}"
         )
 
-
         return Response({
             'message': '✅ Withdrawal request submitted!',
             'withdrawal_id': str(withdrawal.id),
@@ -981,17 +871,13 @@ def request_withdrawal(request):
             'status': 'pending'
         }, status=status.HTTP_201_CREATED)
 
-
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 
 
 # ═══════════════════════════════════════════════════════
 # ✅ BOOKING FLOW — Accept / Start / Complete
 # ═══════════════════════════════════════════════════════
-
 
 @csrf_exempt
 @api_view(['POST'])
@@ -1000,13 +886,11 @@ def accept_booking(request):
     booking_id = request.data.get('booking_id')
     rider_id = request.data.get('rider_id')
 
-
     if not booking_id or not rider_id:
         return Response(
             {'detail': 'Booking ID and Rider ID are required.'},
             status=status.HTTP_400_BAD_REQUEST
         )
-
 
     try:
         with transaction.atomic():
@@ -1028,7 +912,6 @@ def accept_booking(request):
             booking.accepted_at = timezone.now()
             booking.save()
 
-
         return Response({
             'message': '✅ Booking accepted!',
             'booking_id': str(booking.id),
@@ -1037,13 +920,10 @@ def accept_booking(request):
             'assigned_at': booking.assigned_at
         }, status=status.HTTP_200_OK)
 
-
     except Booking.DoesNotExist:
         return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 
 
 @csrf_exempt
@@ -1054,18 +934,15 @@ def start_ride(request):
         booking_id = request.data.get('booking_id')
         booking = Booking.objects.get(id=booking_id)
 
-
         if booking.status != 'assigned':
             return Response(
                 {'detail': 'Booking must be accepted first.'},
                 status=status.HTTP_409_CONFLICT
             )
 
-
         booking.status = 'in_progress'
         booking.started_at = timezone.now()
         booking.save()
-
 
         return Response({
             'message': '🛵 Ride started',
@@ -1074,13 +951,10 @@ def start_ride(request):
             'started_at': booking.started_at
         }, status=status.HTTP_200_OK)
 
-
     except Booking.DoesNotExist:
         return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 
 
 @csrf_exempt
@@ -1091,18 +965,15 @@ def complete_ride(request):
         booking_id = request.data.get('booking_id')
         booking = Booking.objects.get(id=booking_id)
 
-
         if booking.status != 'in_progress':
             return Response(
                 {'detail': 'Ride must be in progress first.'},
                 status=status.HTTP_409_CONFLICT
             )
 
-
         booking.status = 'completed'
         booking.completed_at = timezone.now()
         booking.save()
-
 
         return Response({
             'message': '✅ Ride completed!',
@@ -1111,19 +982,15 @@ def complete_ride(request):
             'completed_at': booking.completed_at
         }, status=status.HTTP_200_OK)
 
-
     except Booking.DoesNotExist:
         return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 📡 REAL-TIME & ADMIN ENDPOINTS
 # ═══════════════════════════════════════════════════════
-
 
 @csrf_exempt
 @api_view(['GET'])
@@ -1141,8 +1008,6 @@ def available_jobs_for_rider(request):
         })
     except Exception as e:
         return Response({'detail': str(e)}, status=500)
-
-
 
 
 @csrf_exempt
@@ -1175,8 +1040,6 @@ def poll_booking_updates(request):
         'updated_at': timezone.now().isoformat(),
         'bookings': serializer.data
     })
-
-
 
 
 @csrf_exempt
@@ -1218,18 +1081,13 @@ def admin_reassign_booking(request):
         return Response({'detail': str(e)}, status=500)
 
 
-
-
 # ═══════════════════════════════════════════════════════
 # 🧠 AI-POWERED FARE CALCULATOR
 # ═══════════════════════════════════════════════════════
 
-
 if GOOGLE_SDK_AVAILABLE and hasattr(settings, 'GEMINI_API_KEY') and settings.GEMINI_API_KEY:
     gmaps = googlemaps.Client(key=settings.GOOGLE_MAPS_API_KEY)
     genai.configure(api_key=settings.GEMINI_API_KEY)
-
-
 
 
 @csrf_exempt
@@ -1335,3 +1193,204 @@ def calculate_fare_with_ai(request):
                 "explanation": "Estimate — using standard pricing"
             }
         })
+
+
+# ═══════════════════════════════════════════════════════
+# 💳 PAYSTACK PAYMENT INTEGRATION — NEW
+# ═══════════════════════════════════════════════════════
+
+PAYSTACK_SECRET_KEY = getattr(settings, 'PAYSTACK_SECRET_KEY', '')
+PAYSTACK_BASE_URL = getattr(settings, 'PAYSTACK_BASE_URL', 'https://api.paystack.co')
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def initialize_payment(request):
+    """Initialize a Paystack payment for a booking — amount calculated on backend"""
+    try:
+        booking_id = request.data.get('booking_id')
+        payment_method = request.data.get('payment_method')
+        momo_number = request.data.get('momo_number')
+
+        if not booking_id:
+            return Response({'error': 'booking_id is required'}, status=400)
+
+        booking = Booking.objects.get(id=booking_id)
+
+        # ✅ BACKEND calculates — NEVER trust frontend amount
+        amount_ghs = float(booking.price) if booking.price else 0
+        if amount_ghs <= 0:
+            return Response({'error': 'Invalid booking amount'}, status=400)
+        
+        amount_pesewas = int(round(amount_ghs * 100))
+
+        # Generate unique reference
+        reference = f"rydnow_{uuid.uuid4().hex[:16]}"
+
+        # Create Payment record first
+        payment = Payment.objects.create(
+            booking=booking,
+            customer=request.user,
+            amount=amount_pesewas,
+            currency='GHS',
+            reference=reference,
+            payment_method=payment_method,
+            mobile_money_number=momo_number if payment_method == 'mobile_money' else None
+        )
+
+        # Prepare metadata
+        metadata = {
+            'booking_id': str(booking.id),
+            'customer_id': request.user.id,
+            'payment_id': str(payment.id),
+        }
+
+        # Paystack checkout data
+        checkout_data = {
+            'amount': amount_pesewas,
+            'email': request.user.email or f"{request.user.username}@rydnow.app",
+            'currency': 'GHS',
+            'reference': reference,
+            'metadata': metadata,
+        }
+
+        # Add mobile money details if needed
+        if payment_method == 'mobile_money' and momo_number:
+            checkout_data['mobile_money'] = {
+                'phone': momo_number,
+                'provider': 'mtn' if momo_number.startswith(('054', '055')) else
+                           'telecel' if momo_number.startswith(('056', '057')) else 'tigo'
+            }
+
+        # Call Paystack API to get access code
+        headers = {
+            'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}',
+            'Content-Type': 'application/json'
+        }
+        resp = requests.post(f'{PAYSTACK_BASE_URL}/transaction/initialize',
+                              json=checkout_data, headers=headers, timeout=30)
+        
+        if resp.status_code != 200:
+            payment.status = 'failed'
+            payment.save()
+            return Response({'error': 'Failed to initialize payment'}, status=400)
+
+        result = resp.json()
+        authorization_url = result['data']['authorization_url']
+        access_code = result['data']['access_code']
+
+        return Response({
+            'status': 'success',
+            'authorization_url': authorization_url,
+            'access_code': access_code,
+            'reference': reference,
+            'amount_ghs': amount_ghs,
+            'payment_id': str(payment.id)
+        })
+
+    except Booking.DoesNotExist:
+        return Response({'error': 'Booking not found'}, status=404)
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def verify_payment(request):
+    """Check payment status from Paystack"""
+    reference = request.GET.get('reference')
+    if not reference:
+        return Response({'error': 'Reference required'}, status=400)
+
+    try:
+        payment = Payment.objects.get(reference=reference)
+    except Payment.DoesNotExist:
+        return Response({'error': 'Payment not found'}, status=404)
+
+    # If already verified successfully, return cached result
+    if payment.status == 'success' and payment.paystack_transaction_id:
+        return Response({
+            'status': 'success',
+            'payment_status': payment.status,
+            'amount_ghs': payment.amount_ghs,
+            'message': 'Payment verified'
+        })
+
+    # Check with Paystack
+    headers = {'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}'}
+    resp = requests.get(f'{PAYSTACK_BASE_URL}/transaction/verify/{reference}',
+                         headers=headers, timeout=30)
+
+    if resp.status_code != 200:
+        return Response({'error': 'Verification failed', 'payment_status': payment.status}, status=400)
+
+    data = resp.json()['data']
+    paystack_status = data['status']
+
+    # Update payment record
+    payment.paystack_transaction_id = data['id']
+    payment.payment_method = data.get('channel', payment.payment_method)
+    
+    if paystack_status == 'success':
+        # Validate amount and currency match — SECURITY CHECK
+        expected_amount = payment.amount
+        actual_amount = data['amount']
+        actual_currency = data['currency']
+        
+        if actual_amount != expected_amount or actual_currency != 'GHS':
+            payment.status = 'failed'
+            payment.save()
+            return Response({
+                'error': 'Amount or currency mismatch',
+                'payment_status': 'failed'
+            }, status=400)
+
+        payment.status = 'success'
+        payment.verified_at = timezone.now()
+        
+        # ✅ Update booking — ONLY AFTER VERIFICATION
+        booking = payment.booking
+        booking.payment_status = 'released'
+        booking.status = 'searching_rider'
+        booking.paid_at = timezone.now()
+        booking.save()
+
+    elif paystack_status in ['failed', 'reversed']:
+        payment.status = 'failed'
+    elif paystack_status == 'abandoned':
+        payment.status = 'abandoned'
+    else:
+        payment.status = paystack_status
+
+    payment.save()
+
+    return Response({
+        'status': paystack_status,
+        'payment_status': payment.status,
+        'amount_ghs': payment.amount_ghs,
+        'message': f'Payment {payment.status}'
+    })
+
+
+@csrf_exempt
+def paystack_webhook(request):
+    """Receive Paystack webhook — secure verification required"""
+    signature = request.headers.get('X-Paystack-Signature', '')
+    webhook_secret = getattr(settings, 'PAYSTACK_WEBHOOK_SECRET', '')
+
+    # Verify signature — SECURITY
+    if not signature or not webhook_secret:
+        return HttpResponse(status=403)
+    
+    computed_signature = hmac.new(
+        webhook_secret.encode('utf-8'),
+        request.body,
+        hashlib.sha512
+    ).hexdigest()
+
+    if computed_signature != signature:
+        return HttpResponse(status=403)
+
+    # Parse event
+  
