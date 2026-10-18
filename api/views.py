@@ -11,18 +11,19 @@ from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, 
 from .serializers import BookingSerializer, CustomerProfileSerializer, RiderSerializer
 import uuid
 import json
+import os
 from urllib import request, parse
 
 
 
 
 # ═══════════════════════════════════════════════════════
-# 📍 HELPER: GET DISTANCE FROM GOOGLE MAPS — NO requests package!
+# 📍 HELPER: GET DISTANCE FROM GOOGLE MAPS
 # ═══════════════════════════════════════════════════════
 
 
 def get_distance_and_duration(pickup_address, dest_address):
-    """Call Google Maps API using Django's built-in urllib — no extra packages needed ✅"""
+    """Call Google Maps API using Django's built-in urllib"""
     api_key = settings.GOOGLE_MAPS_API_KEY
     
     if not api_key:
@@ -61,7 +62,7 @@ def get_distance_and_duration(pickup_address, dest_address):
 
 
 def calculate_fare(service_type, distance_km):
-    """NO ONE can edit these prices from the frontend! Secure ✅"""
+    """Secure pricing — frontend can't change these prices"""
     PRICING = {
         "okada": {"base": 5.0, "per_km": 1.5},
         "parcel": {"base": 8.0, "per_km": 2.0},
@@ -85,12 +86,11 @@ def calculate_fare(service_type, distance_km):
 
 
 # ═══════════════════════════════════════════════════════
-# 📋 CUSTOMER PROFILE VIEWSET — List all customers for Admin
+# 📋 CUSTOMER PROFILE VIEWSET
 # ═══════════════════════════════════════════════════════
 
 
 class CustomerProfileViewSet(viewsets.ReadOnlyModelViewSet):
-    """List and view all customer profiles — used by admin dashboard"""
     queryset = CustomerProfile.objects.all()
     serializer_class = CustomerProfileSerializer
     permission_classes = [AllowAny]
@@ -99,11 +99,10 @@ class CustomerProfileViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 # ═══════════════════════════════════════════════════════
-# 🆕 AUTHENTICATION ENDPOINTS — Customer & Rider Registration
+# 🆕 AUTHENTICATION ENDPOINTS
 # ═══════════════════════════════════════════════════════
 
 
-# ─── HELPER: GET OR CREATE CUSTOMER PROFILE ───
 def get_or_create_customer_profile(user):
     profile, created = CustomerProfile.objects.get_or_create(
         user=user,
@@ -118,7 +117,6 @@ def get_or_create_customer_profile(user):
 
 
 
-# ─── CUSTOMER REGISTER ───
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -191,7 +189,6 @@ def customer_register(request):
 
 
 
-# ─── LOGIN ───
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -234,7 +231,6 @@ def user_login(request):
 
 
 
-# ─── RIDER REGISTER ───
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -324,7 +320,6 @@ def rider_register(request):
 
 
 
-# ─── RIDER DOCUMENT SUBMISSION ───
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -383,7 +378,7 @@ def rider_submit_documents(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 🆕 CREATE BOOKING — SECURE VERSION ✅
+# 🆕 CREATE BOOKING
 # ═══════════════════════════════════════════════════════
 
 
@@ -391,13 +386,6 @@ def rider_submit_documents(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def create_booking(request):
-    """
-    ✅ NEW SECURE FLOW:
-    1. Frontend sends: pickup, destination, service_type only
-    2. Backend gets distance from Google Maps
-    3. Backend calculates fare — frontend CANNOT edit it
-    4. Backend saves everything with verified price
-    """
     try:
         pickup = request.data.get('pickup')
         destination = request.data.get('destination')
@@ -416,15 +404,10 @@ def create_booking(request):
             )
 
 
-        # Step 1: Get distance from Google Maps (backend only)
         distance_km, duration_mins = get_distance_and_duration(pickup, destination)
-
-
-        # Step 2: Calculate fare — BACKEND ONLY, secure ✅
         final_price = calculate_fare(service_type, distance_km)
 
 
-        # Step 3: Create customer record if phone provided
         customer = None
         if customer_phone:
             customer, _ = CustomerProfile.objects.get_or_create(
@@ -436,7 +419,6 @@ def create_booking(request):
             )
 
 
-        # Step 4: Save booking — with VERIFIED calculated price
         booking_data = {
             'service_type': service_type,
             'pickup': pickup,
@@ -483,7 +465,6 @@ def create_booking(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def list_bookings(request):
-    """List all bookings — optionally filter by customer phone"""
     phone = request.GET.get('phone')
     if phone:
         bookings = Booking.objects.filter(customer_phone=phone).order_by('-created_at')
@@ -497,12 +478,55 @@ def list_bookings(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 📋 YOUR ORIGINAL VIEWSETS — Riders, Bookings, Profile
+# 💰 ESTIMATE FARE — FIXED ✅ NO DUPLICATE
+# ═══════════════════════════════════════════════════════
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def estimate_fare(request):
+    """Secure fare estimation — calculated on backend only"""
+    try:
+        pickup = request.data.get('pickup')
+        destination = request.data.get('destination')
+        service_type = request.data.get('service_type', 'okada')
+        
+        if not pickup or not destination:
+            return Response({'error': 'Pickup and destination required'}, status=400)
+        
+        PRICING = {
+            'okada': {'basePrice': 5.0, 'pricePerKm': 1.5, 'name': 'Okada Ride'},
+            'delivery': {'basePrice': 8.0, 'pricePerKm': 2.0, 'name': 'Delivery'},
+            'waste': {'basePrice': 15.0, 'pricePerKm': 0.0, 'name': 'Waste Collection'},
+        }
+        
+        pricing = PRICING.get(service_type, PRICING['okada'])
+        distance_km, duration_mins = get_distance_and_duration(pickup, destination)
+        
+        if not distance_km:
+            distance_km = 5.0
+        
+        fare = pricing['basePrice'] + (distance_km * pricing['pricePerKm'])
+        
+        return Response({
+            'service_name': pricing['name'],
+            'distance_km': round(distance_km, 2),
+            'estimated_fare': round(fare, 2),
+            'currency': 'GH₵'
+        })
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
+
+
+
+
+# ═══════════════════════════════════════════════════════
+# 📋 VIEWSETS
 # ═══════════════════════════════════════════════════════
 
 
 class RiderViewSet(viewsets.ReadOnlyModelViewSet):
-    """List and view all registered riders"""
     queryset = Rider.objects.all()
     serializer_class = RiderSerializer
     permission_classes = [AllowAny]
@@ -511,7 +535,6 @@ class RiderViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class BookingViewSet(viewsets.ModelViewSet):
-    """Full CRUD for bookings"""
     queryset = Booking.objects.all()
     serializer_class = BookingSerializer
     permission_classes = [AllowAny]
@@ -522,7 +545,6 @@ class BookingViewSet(viewsets.ModelViewSet):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def customer_profile(request):
-    """Return the logged-in customer's profile info"""
     profile, created = CustomerProfile.objects.get_or_create(
         user=request.user,
         defaults={'full_name': request.user.get_full_name()}
@@ -545,7 +567,6 @@ def customer_profile(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def update_rider_location(request):
-    """Rider app sends this to update their current location"""
     try:
         rider_id = request.data.get('rider_id')
         lat = request.data.get('latitude')
@@ -589,7 +610,6 @@ def update_rider_location(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_nearby_riders(request):
-    """Customer dashboard & Admin panel get all approved riders with live locations"""
     try:
         riders = list(Rider.objects.filter(
             is_online=True,
@@ -599,9 +619,7 @@ def get_nearby_riders(request):
         ))
 
 
-        return Response({
-            'riders': riders
-        })
+        return Response({'riders': riders})
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -609,7 +627,7 @@ def get_nearby_riders(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 💰 WALLET, COMMISSION & WITHDRAWAL SYSTEM
+# 💰 WALLET & PAYMENT SYSTEM
 # ═══════════════════════════════════════════════════════
 
 
@@ -622,7 +640,6 @@ COMMISSION_RATE = 0.15
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_rider_wallet(request):
-    """Rider checks their balance from dashboard"""
     rider_id = request.GET.get('rider_id')
     
     if not rider_id:
@@ -653,7 +670,6 @@ def get_rider_wallet(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def rider_transactions(request):
-    """Rider sees payment history & withdrawals"""
     rider_id = request.GET.get('rider_id')
     
     if not rider_id:
@@ -681,7 +697,6 @@ def rider_transactions(request):
 
 
 def get_rider_object(rider_id):
-    """Helper: Get Rider from either RiderProfile.id or Rider.id"""
     try:
         return Rider.objects.get(id=rider_id)
     except Rider.DoesNotExist:
@@ -698,7 +713,6 @@ def get_rider_object(rider_id):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def record_job_payment(request):
-    """Customer pays → AUTO SPLIT: 15% US, 85% RIDER"""
     try:
         booking_id = request.data.get('booking_id')
         rider_id = request.data.get('rider_id')
@@ -768,7 +782,6 @@ def record_job_payment(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def request_withdrawal(request):
-    """Rider taps 'Withdraw' → money moves from wallet to their mobile money"""
     try:
         rider_id = request.data.get('rider_id')
         amount = float(request.data.get('amount', 0))
@@ -844,7 +857,7 @@ def request_withdrawal(request):
 
 
 # ═══════════════════════════════════════════════════════
-# ✅ RIDER ACCEPTS BOOKING
+# ✅ BOOKING FLOW — ACCEPT / START / COMPLETE
 # ═══════════════════════════════════════════════════════
 
 
@@ -852,7 +865,6 @@ def request_withdrawal(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def accept_booking(request):
-    """Rider accepts a booking — assigns it to them"""
     try:
         booking_id = request.data.get('booking_id')
         rider_id = request.data.get('rider_id')
@@ -902,16 +914,10 @@ def accept_booking(request):
 
 
 
-# ═══════════════════════════════════════════════════════
-# ✅ START RIDE
-# ═══════════════════════════════════════════════════════
-
-
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def start_ride(request):
-    """Rider marks ride as started — en route to destination"""
     try:
         booking_id = request.data.get('booking_id')
 
@@ -947,16 +953,10 @@ def start_ride(request):
 
 
 
-# ═══════════════════════════════════════════════════════
-# ✅ COMPLETE RIDE
-# ═══════════════════════════════════════════════════════
-
-
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def complete_ride(request):
-    """Rider marks ride as completed — updates status"""
     try:
         booking_id = request.data.get('booking_id')
 
@@ -988,95 +988,3 @@ def complete_ride(request):
         return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def estimate_fare(request):
-    """Secure fare estimation — calculated on backend, never trusted from frontend"""
-    try:
-        pickup = request.data.get('pickup')
-        destination = request.data.get('destination')
-        service_type = request.data.get('service_type', 'okada')
-        
-        if not pickup or not destination:
-            return Response({'error': 'Pickup and destination required'}, status=400)
-        
-        # Pricing rules — defined ONLY here on backend
-        PRICING = {
-            'okada': {'basePrice': 5.0, 'pricePerKm': 1.5, 'name': 'Okada Ride'},
-            'delivery': {'basePrice': 8.0, 'pricePerKm': 2.0, 'name': 'Delivery'},
-            'waste': {'basePrice': 15.0, 'pricePerKm': 0.0, 'name': 'Waste Collection'},
-        }
-        
-        pricing = PRICING.get(service_type, PRICING['okada'])
-        
-        # TODO: Call Google Maps Distance Matrix API here
-        # For now — straight-line estimate; replace with actual API call
-        # In production: distance = get_distance_from_google_maps(pickup, destination)
-        estimated_distance_km = 5.0  # placeholder — replace with real Google Maps data
-        
-        fare = pricing['basePrice'] + (estimated_distance_km * pricing['pricePerKm'])
-        
-        return Response({
-            'service_name': pricing['name'],
-            'distance_km': round(estimated_distance_km, 2),
-            'estimated_fare': round(fare, 2),
-            'currency': 'GH₵'
-        })
-    except Exception as e:
-        return Response({'error': str(e)}, status=500)
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def estimate_fare(request):
-    """Secure fare estimation — backend calculates everything"""
-    try:
-        pickup = request.data.get('pickup')
-        destination = request.data.get('destination')
-        service_type = request.data.get('service_type', 'okada')
-        
-        if not pickup or not destination:
-            return Response({'error': 'Pickup and destination required'}, status=400)
-        
-        # Pricing rules — ONLY defined here on the backend
-        PRICING = {
-            'okada': {'basePrice': 5.0, 'pricePerKm': 1.5, 'name': 'Okada Ride'},
-            'delivery': {'basePrice': 8.0, 'pricePerKm': 2.0, 'name': 'Delivery'},
-            'waste': {'basePrice': 15.0, 'pricePerKm': 0.0, 'name': 'Waste Collection'},
-        }
-        
-        pricing = PRICING.get(service_type, PRICING['okada'])
-        
-        # ─── GET REAL DISTANCE FROM GOOGLE MAPS ───
-        google_api_key = os.environ.get('GOOGLE_MAPS_API_KEY', '')
-        distance_km = 5.0  # fallback if Google fails
-        
-        if google_api_key:
-            google_url = (
-                f"https://maps.googleapis.com/maps/api/distancematrix/json"
-                f"?origins={pickup}"
-                f"&destinations={destination}"
-                f"&units=metric"
-                f"&key={google_api_key}"
-            )
-            
-            import requests
-            google_response = requests.get(google_url, timeout=10)
-            google_data = google_response.json()
-            
-            if (
-                google_data.get('status') == 'OK'
-                and google_data['rows'][0]['elements'][0]['status'] == 'OK'
-            ):
-                distance_meters = google_data['rows'][0]['elements'][0]['distance']['value']
-                distance_km = distance_meters / 1000
-        
-        # Calculate fare
-        fare = pricing['basePrice'] + (distance_km * pricing['pricePerKm'])
-        
-        return Response({
-            'service_name': pricing['name'],
-            'distance_km': round(distance_km, 2),
-            'estimated_fare': round(fare, 2),
-            'currency': 'GH₵'
-        })
-    except Exception as e:
-        return Response({'error': str(e)}, status=500)
