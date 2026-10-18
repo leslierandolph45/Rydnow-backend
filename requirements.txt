@@ -4,3 +4,4 @@ django-cors-headers
 dj-database-url
 gunicorn
 Pillow>=10.0.0
+git status
