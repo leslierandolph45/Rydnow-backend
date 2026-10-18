@@ -8,6 +8,7 @@ from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.conf import settings
+from rest_framework.authtoken.models import Token
 from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, Transaction, WithdrawalRequest
 from .serializers import BookingSerializer, CustomerProfileSerializer, RiderSerializer
 import uuid
@@ -109,7 +110,7 @@ def calculate_fare(service_type, distance_km):
 
 
 # ═══════════════════════════════════════════════════════
-# 📋 CUSTOMER PROFILE VIEWSET
+# 📋 CUSTOMER PROFILE VIEWSET & ENDPOINTS
 # ═══════════════════════════════════════════════════════
 
 
@@ -117,6 +118,94 @@ class CustomerProfileViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = CustomerProfile.objects.all()
     serializer_class = CustomerProfileSerializer
     permission_classes = [AllowAny]
+
+
+
+
+@csrf_exempt
+@api_view(['GET', 'PUT', 'PATCH'])
+@permission_classes([AllowAny])
+def customer_profile_detail(request):
+    """
+    GET: Load customer profile by username or token
+    PUT/PATCH: Save/update profile to database
+    """
+    username = request.data.get('username') or request.GET.get('username')
+    auth_header = request.headers.get('Authorization', '')
+    token = auth_header.replace('Token ', '').replace('Bearer ', '')
+    
+    user = None
+    
+    # Try finding user by username first
+    if username:
+        try:
+            user = User.objects.get(username=username)
+        except User.DoesNotExist:
+            pass
+    
+    # Try finding user by auth token
+    if not user and token:
+        try:
+            token_obj = Token.objects.get(key=token)
+            user = token_obj.user
+        except Token.DoesNotExist:
+            pass
+    
+    if not user:
+        return Response(
+            {'detail': 'User not found. Please log in first.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    # GET request — return profile data
+    if request.method == 'GET':
+        profile, created = CustomerProfile.objects.get_or_create(
+            user=user,
+            defaults={
+                'full_name': user.get_full_name() or user.username,
+                'email': user.email,
+                'phone': ''
+            }
+        )
+        return Response({
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'full_name': profile.full_name or user.get_full_name(),
+            'phone': profile.phone or '',
+        })
+    
+    # PUT/PATCH request — update profile
+    if request.method in ['PUT', 'PATCH']:
+        profile, created = CustomerProfile.objects.get_or_create(
+            user=user,
+            defaults={
+                'full_name': user.get_full_name() or user.username,
+                'email': user.email,
+                'phone': ''
+            }
+        )
+        
+        full_name = request.data.get('full_name')
+        phone = request.data.get('phone')
+        
+        if full_name is not None:
+            profile.full_name = full_name
+            name_parts = full_name.split()
+            user.first_name = name_parts[0] if name_parts else ''
+            user.last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+            user.save()
+        
+        if phone is not None:
+            profile.phone = phone
+        
+        profile.save()
+        
+        return Response({
+            'message': '✅ Profile saved successfully!',
+            'full_name': profile.full_name,
+            'phone': profile.phone,
+        })
 
 
 
@@ -198,12 +287,18 @@ def customer_register(request):
         )
 
 
+        # Create auth token for immediate login
+        token, _ = Token.objects.get_or_create(user=user)
+
+
         return Response({
             'message': 'Customer account created successfully!',
+            'token': token.key,
             'user': {
                 'id': user.id,
                 'username': user.username,
-                'email': user.email
+                'email': user.email,
+                'full_name': user.get_full_name()
             }
         }, status=status.HTTP_201_CREATED)
 
@@ -236,11 +331,12 @@ def user_login(request):
             )
 
 
-        token = str(uuid.uuid4())
+        # Create or get DRF Auth token
+        token, created = Token.objects.get_or_create(user=user)
 
 
         return Response({
-            'token': token,
+            'token': token.key,
             'user': {
                 'id': user.id,
                 'username': user.username,
@@ -499,8 +595,16 @@ def create_booking(request):
 @permission_classes([AllowAny])
 def list_bookings(request):
     phone = request.GET.get('phone')
+    username = request.GET.get('username')
+    
     if phone:
         bookings = Booking.objects.filter(customer_phone=phone).order_by('-created_at')
+    elif username:
+        try:
+            profile = CustomerProfile.objects.get(user__username=username)
+            bookings = Booking.objects.filter(customer_phone=profile.phone).order_by('-created_at')
+        except CustomerProfile.DoesNotExist:
+            bookings = Booking.objects.none()
     else:
         bookings = Booking.objects.all().order_by('-created_at')
     
@@ -885,7 +989,7 @@ def request_withdrawal(request):
 
 
 # ═══════════════════════════════════════════════════════
-# ✅ BOOKING FLOW — Accept / Start / Complete — WITH RACE PROTECTION
+# ✅ BOOKING FLOW — Accept / Start / Complete
 # ═══════════════════════════════════════════════════════
 
 
@@ -893,10 +997,6 @@ def request_withdrawal(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def accept_booking(request):
-    """
-    Atomic job acceptance — PREVENTS TWO RIDERS GETTING THE SAME JOB
-    Uses database row locking so only ONE rider can succeed
-    """
     booking_id = request.data.get('booking_id')
     rider_id = request.data.get('rider_id')
 
@@ -952,8 +1052,6 @@ def accept_booking(request):
 def start_ride(request):
     try:
         booking_id = request.data.get('booking_id')
-
-
         booking = Booking.objects.get(id=booking_id)
 
 
@@ -991,8 +1089,6 @@ def start_ride(request):
 def complete_ride(request):
     try:
         booking_id = request.data.get('booking_id')
-
-
         booking = Booking.objects.get(id=booking_id)
 
 
@@ -1025,7 +1121,7 @@ def complete_ride(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 📡 NEW: REAL-TIME & ADMIN ENDPOINTS
+# 📡 REAL-TIME & ADMIN ENDPOINTS
 # ═══════════════════════════════════════════════════════
 
 
@@ -1033,10 +1129,6 @@ def complete_ride(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def available_jobs_for_rider(request):
-    """
-    Returns ONLY jobs that are searching for riders
-    Rider dashboard polls this to see new bookings
-    """
     try:
         bookings = Booking.objects.filter(
             status='searching_rider'
@@ -1057,10 +1149,6 @@ def available_jobs_for_rider(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def poll_booking_updates(request):
-    """
-    Customer & Rider call this every 3–5 seconds
-    Returns bookings that changed since last_check
-    """
     last_check_str = request.GET.get('last_check')
     booking_id = request.GET.get('booking_id')
     
@@ -1095,9 +1183,6 @@ def poll_booking_updates(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def admin_reassign_booking(request):
-    """
-    Admin manual dispatch — override/reassign any booking
-    """
     booking_id = request.data.get('booking_id')
     new_rider_id = request.data.get('new_rider_id')
     admin_note = request.data.get('note', '')
