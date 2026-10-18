@@ -10,7 +10,7 @@ from .views import (
     update_rider_location, get_nearby_riders,
     get_rider_wallet, rider_transactions, record_job_payment, request_withdrawal,
     create_booking, list_bookings, accept_booking, start_ride, complete_ride,
-    estimate_fare  # ✅ NEW — added import
+    estimate_fare, calculate_fare_with_ai  # ✅ Added new AI fare calculator
 )
 
 
@@ -31,24 +31,29 @@ urlpatterns = [
     path('bookings/accept/', accept_booking, name='accept-booking'),
     path('bookings/start/', start_ride, name='start-ride'),
     path('bookings/complete/', complete_ride, name='complete-ride'),
-    path('estimate-fare/', estimate_fare, name='estimate-fare'),  # ✅ NEW
-    
+    path('estimate-fare/', estimate_fare, name='estimate-fare'),
+    path('calculate-fare/', calculate_fare_with_ai, name='calculate-fare'),  # ✅ NEW AI endpoint
+
+
     # ✅ AUTH ENDPOINTS
     path('auth/register/', customer_register, name='customer-register'),
     path('auth/login/', user_login, name='user-login'),
     path('auth/rider-register/', rider_register, name='rider-register'),
     path('auth/rider-submit/', rider_submit_documents, name='rider-submit'),
-    
+
+
     # ✅ 📍 LIVE LOCATION
     path('rider/update-location/', update_rider_location, name='update-rider-location'),
     path('riders/nearby/', get_nearby_riders, name='nearby-riders'),
-    
+
+
     # ✅ 💰 WALLET, COMMISSION & WITHDRAWALS
     path('wallet/balance/', get_rider_wallet, name='rider-wallet'),
     path('wallet/transactions/', rider_transactions, name='rider-transactions'),
     path('payments/record/', record_job_payment, name='record-payment'),
     path('withdrawals/request/', request_withdrawal, name='request-withdrawal'),
-    
+
+
     # ✅ EXISTING ENDPOINTS
     path('', include(router.urls)),
     path('auth/token/', obtain_auth_token, name='api_token_auth'),
