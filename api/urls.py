@@ -9,7 +9,8 @@ from .views import (
     customer_register, user_login, rider_register, rider_submit_documents,
     update_rider_location, get_nearby_riders,
     get_rider_wallet, rider_transactions, record_job_payment, request_withdrawal,
-    create_booking, list_bookings, accept_booking, start_ride, complete_ride
+    create_booking, list_bookings, accept_booking, start_ride, complete_ride,
+    estimate_fare  # ✅ NEW — added import
 )
 
 
@@ -30,6 +31,7 @@ urlpatterns = [
     path('bookings/accept/', accept_booking, name='accept-booking'),
     path('bookings/start/', start_ride, name='start-ride'),
     path('bookings/complete/', complete_ride, name='complete-ride'),
+    path('estimate-fare/', estimate_fare, name='estimate-fare'),  # ✅ NEW
     
     # ✅ AUTH ENDPOINTS
     path('auth/register/', customer_register, name='customer-register'),
