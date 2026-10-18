@@ -4,12 +4,8 @@ import uuid
 from django.utils import timezone
 
 
-
-
 # ─── CONFIG ───
 COMMISSION_RATE = 0.15  # ✅ YOUR 15% COMMISSION
-
-
 
 
 # ─── CHOICES ───
@@ -20,7 +16,6 @@ SERVICE_CHOICES = [
     ('waste-bin', 'Waste Collection'),
 ]
 
-
 STATUS_CHOICES = [
     ('pending', 'Pending'),
     ('searching_rider', 'Searching Rider'),
@@ -30,14 +25,12 @@ STATUS_CHOICES = [
     ('cancelled', 'Cancelled'),
 ]
 
-
 VERIFICATION_STATUS = [
     ('pending', 'Pending Review'),
     ('submitted', 'Documents Submitted'),
     ('approved', '✅ Approved'),
     ('rejected', '❌ Rejected'),
 ]
-
 
 RIDER_STATUS_CHOICES = [
     ('pending', 'Pending'),
@@ -48,13 +41,11 @@ RIDER_STATUS_CHOICES = [
     ('inactive', 'Inactive'),
 ]
 
-
 PAYMENT_STATUS = [
     ('pending', 'Held in Escrow'),
     ('released', 'Released'),
     ('cancelled', 'Cancelled/Refunded'),
 ]
-
 
 TRANSACTION_TYPES = [
     ('job_payment', 'Job Payment'),
@@ -62,13 +53,11 @@ TRANSACTION_TYPES = [
     ('commission', 'Platform Commission'),
 ]
 
-
 WITHDRAWAL_STATUS = [
     ('pending', 'Processing'),
     ('completed', 'Sent'),
     ('failed', 'Failed'),
 ]
-
 
 COMPLAINT_STATUS = [
     ('pending', '🔄 Under Review'),
@@ -77,7 +66,6 @@ COMPLAINT_STATUS = [
     ('restricted', '🚫 Restricted'),
     ('banned', '❌ Banned'),
 ]
-
 
 COMPLAINT_TYPE = [
     ('late_arrival', 'Late Arrival'),
@@ -89,16 +77,12 @@ COMPLAINT_TYPE = [
     ('other', 'Other'),
 ]
 
-
 RESTRICTION_REASON = [
     ('too_many_complaints', 'Too Many Complaints'),
     ('payment_issue', 'Payment Issue'),
     ('fraud_suspected', 'Suspected Fraud'),
-    ('safety_concerns', 'Safety Concerns'),
     ('admin_initiated', 'Admin Decision'),
 ]
-
-
 
 
 # ─── CUSTOMER PROFILE ───
@@ -109,21 +93,16 @@ class CustomerProfile(models.Model):
     phone = models.CharField(max_length=20, blank=True, null=True)
     profile_photo = models.ImageField(upload_to='profiles/', blank=True, null=True)
 
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
 
     def __str__(self):
         return self.user.username
 
 
-
-
 # ─── RIDER PROFILE ───
 class RiderProfile(models.Model):
     STATUS_CHOICES = RIDER_STATUS_CHOICES
-
 
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     full_name = models.CharField(max_length=200)
@@ -132,35 +111,28 @@ class RiderProfile(models.Model):
     motorbike_model = models.CharField(max_length=200, blank=True)
     license_number = models.CharField(max_length=100, blank=True)
 
-
     # 📍 LIVE LOCATION
     current_lat = models.FloatField(null=True, blank=True, help_text="Current latitude")
     current_lng = models.FloatField(null=True, blank=True, help_text="Current longitude")
     last_location_update = models.DateTimeField(null=True, blank=True, help_text="Last time location was updated")
-
 
     # Document upload fields
     ghana_card_doc = models.CharField(max_length=500, blank=True)
     passport_photo = models.CharField(max_length=500, blank=True)
     license_doc = models.CharField(max_length=500, blank=True)
 
-
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='pending')
     is_online = models.BooleanField(default=False)
-    
+
     # 🛡️ RESTRICTION FLAG
     is_restricted = models.BooleanField(default=False, help_text="If checked, rider cannot accept bookings")
     restriction_notes = models.TextField(blank=True, help_text="Why was this rider restricted?")
     restricted_until = models.DateTimeField(null=True, blank=True, help_text="Leave blank for permanent restriction")
 
-
     created_at = models.DateTimeField(auto_now_add=True)
-
 
     def __str__(self):
         return self.full_name
-
-
 
 
 # ─── RIDER ───
@@ -171,25 +143,21 @@ class Rider(models.Model):
     phone = models.CharField(max_length=20)
     location = models.CharField(max_length=255, blank=True, null=True)
 
-
     # 📍 LIVE LOCATION
     current_lat = models.FloatField(null=True, blank=True, help_text="Current latitude")
     current_lng = models.FloatField(null=True, blank=True, help_text="Current longitude")
     last_location_update = models.DateTimeField(null=True, blank=True, help_text="Last time location was updated")
 
-
     is_online = models.BooleanField(default=False)
     verification_status = models.CharField(max_length=20, choices=VERIFICATION_STATUS, default='pending')
-
 
     id_card = models.ImageField(upload_to='documents/ids/', null=True, blank=True)
     driver_license = models.ImageField(upload_to='documents/licenses/', null=True, blank=True)
     vehicle_registration = models.ImageField(upload_to='documents/vehicles/', null=True, blank=True)
     insurance = models.ImageField(upload_to='documents/insurance/', null=True, blank=True)
 
-
     admin_notes = models.TextField(blank=True, null=True, help_text="Notes for approval/rejection")
-    
+
     # 🛡️ RESTRICTION FLAG
     is_restricted = models.BooleanField(default=False, help_text="If checked, rider cannot accept bookings")
     restriction_reason = models.CharField(max_length=50, choices=RESTRICTION_REASON, blank=True)
@@ -198,15 +166,11 @@ class Rider(models.Model):
     restricted_until = models.DateTimeField(null=True, blank=True, help_text="Leave blank for permanent restriction")
     restricted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='restricted_by_admin')
 
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-
     def __str__(self):
         return f"{self.name} — {self.get_verification_status_display()}"
-
-
 
 
 # ─── BOOKING ───
@@ -219,28 +183,25 @@ class Booking(models.Model):
     destination_lat = models.FloatField(null=True, blank=True)
     destination_lng = models.FloatField(null=True, blank=True)
     distance_km = models.FloatField(null=True, blank=True)
-    duration_mins = models.IntegerField(null=True, blank=True)  # ✅ ADDED
+    duration_mins = models.IntegerField(null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
 
     customer = models.ForeignKey(CustomerProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
     customer_name = models.CharField(max_length=100, blank=True)
     customer_phone = models.CharField(max_length=20, blank=True)
     customer_email = models.EmailField(blank=True, null=True)
 
-
     rider = models.ForeignKey(Rider, on_delete=models.SET_NULL, null=True, blank=True)
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='pending')
-    
+
     # ✅ ADDED — Booking timeline for real-time tracking
     assigned_at = models.DateTimeField(null=True, blank=True)
     accepted_at = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
-    
-    delivery_category = models.CharField(max_length=100, blank=True, null=True)  # ✅ ADDED
-    parcel_details = models.TextField(blank=True, null=True)
 
+    delivery_category = models.CharField(max_length=100, blank=True, null=True)
+    parcel_details = models.TextField(blank=True, null=True)
 
     # 💰 ESCROW PAYMENT
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='pending')
@@ -251,14 +212,11 @@ class Booking(models.Model):
     transaction_reference = models.CharField(max_length=255, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
 
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-
     def __str__(self):
         return f"{self.get_service_type_display()} — {self.customer_name or 'No Name'}"
-
 
     def split_payment(self):
         """Auto-calculate commission when payment is made"""
@@ -266,8 +224,6 @@ class Booking(models.Model):
             self.platform_commission = round(self.total_amount * COMMISSION_RATE, 2)
             self.rider_amount = round(self.total_amount - self.platform_commission, 2)
             self.save()
-
-
 
 
 # 💰 RIDER WALLET
@@ -279,14 +235,12 @@ class RiderWallet(models.Model):
     total_withdrawn = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     updated_at = models.DateTimeField(auto_now=True)
 
-
     def deposit(self, amount):
         """Add money to rider's wallet when job completes"""
         amount = round(float(amount), 2)
         self.balance = round(float(self.balance) + amount, 2)
         self.total_earned = round(float(self.total_earned) + amount, 2)
         self.save()
-
 
     def withdraw(self, amount):
         """Subtract money when rider withdraws"""
@@ -298,11 +252,8 @@ class RiderWallet(models.Model):
             return True
         return False
 
-
     def __str__(self):
         return f"{self.rider.name} — GH₵{self.balance}"
-
-
 
 
 # 📝 TRANSACTION HISTORY
@@ -319,15 +270,11 @@ class Transaction(models.Model):
     description = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
-
     class Meta:
         ordering = ['-created_at']
 
-
     def __str__(self):
         return f"{self.rider.name} — {self.get_transaction_type_display()} — GH₵{self.amount}"
-
-
 
 
 # 💳 WITHDRAWAL REQUEST
@@ -342,46 +289,92 @@ class WithdrawalRequest(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     processed_at = models.DateTimeField(null=True, blank=True)
 
-
     def __str__(self):
         return f"Withdrawal — {self.rider.name} — GH₵{self.amount} — {self.status}"
-
-
 
 
 # 🛡️ RIDER COMPLAINTS & RESTRICTIONS
 class RiderComplaint(models.Model):
     """Customers report issues → tracked in admin → you can restrict riders"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    
+
     # Who the complaint is about
     rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='complaints', null=True, blank=True)
     rider_profile = models.ForeignKey(RiderProfile, on_delete=models.CASCADE, related_name='complaints', null=True, blank=True)
-    
+
     # Which booking
     booking = models.ForeignKey(Booking, on_delete=models.SET_NULL, null=True, blank=True, related_name='complaints')
-    
+
     # Who reported
     reporter_name = models.CharField(max_length=200, blank=True)
     reporter_phone = models.CharField(max_length=20, blank=True)
-    
+
     # Complaint details
     complaint_type = models.CharField(max_length=50, choices=COMPLAINT_TYPE)
     description = models.TextField(help_text="What happened?")
     status = models.CharField(max_length=20, choices=COMPLAINT_STATUS, default='pending')
-    
+
     # Admin action
     admin_notes = models.TextField(blank=True, help_text="Your notes on this complaint")
     action_taken = models.CharField(max_length=100, blank=True)
-    
+
     created_at = models.DateTimeField(auto_now_add=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
-
 
     class Meta:
         ordering = ['-created_at']
 
-
     def __str__(self):
         rider_name = self.rider.name if self.rider else (self.rider_profile.full_name if self.rider_profile else "Unknown Rider")
         return f"{rider_name} — {self.get_complaint_type_display()} — {self.get_status_display()}"
+
+
+# ──────────────────────────────────────────────────────────────────
+# 💳 PAYSTACK PAYMENT MODEL — NEW
+# ──────────────────────────────────────────────────────────────────
+class Payment(models.Model):
+    PAYMENT_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+        ('cancelled', 'Cancelled'),
+        ('abandoned', 'Abandoned'),
+        ('expired', 'Expired'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    booking = models.OneToOneField(Booking, on_delete=models.CASCADE, related_name='paystack_payment')
+    customer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='paystack_payments')
+
+    # Amount in pesewas (Paystack uses smallest unit: GH₵1 = 100 pesewas)
+    amount = models.IntegerField(help_text='Amount in pesewas: GH₵1 = 100')
+    currency = models.CharField(max_length=10, default='GHS')
+
+    # Paystack transaction reference
+    reference = models.CharField(max_length=100, unique=True)
+    paystack_transaction_id = models.CharField(max_length=100, blank=True, null=True)
+    status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending')
+
+    # Payment method info
+    payment_method = models.CharField(max_length=50, blank=True, null=True,
+        help_text='mobile_money, card')
+    mobile_money_number = models.CharField(max_length=20, blank=True, null=True)
+    card_last4 = models.CharField(max_length=4, blank=True, null=True)
+
+    # Timestamps
+    initialized_at = models.DateTimeField(auto_now_add=True)
+    verified_at = models.DateTimeField(blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Webhook idempotency
+    event_received_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['-initialized_at']
+
+    def __str__(self):
+        return f"{self.reference} — GH₵{self.amount/100:.2f} — {self.status}"
+
+    @property
+    def amount_ghs(self):
+        return self.amount / 100
