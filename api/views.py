@@ -15,6 +15,16 @@ import os
 from urllib import request, parse
 
 
+# ─── AI & MAPS IMPORTS ───
+try:
+    import google.generativeai as genai
+    import googlemaps
+    GOOGLE_SDK_AVAILABLE = True
+except ImportError:
+    GOOGLE_SDK_AVAILABLE = False
+    print("⚠️ google-generativeai or googlemaps not installed — using fallback pricing only")
+
+
 
 
 # ═══════════════════════════════════════════════════════
@@ -28,14 +38,15 @@ def get_distance_and_duration(pickup_address, dest_address):
     
     if not api_key:
         print("⚠️ GOOGLE_MAPS_API_KEY not set — using fallback estimate")
-        return None, None
+        return None, None, 1.0
     
     base_url = "https://maps.googleapis.com/maps/api/distancematrix/json"
     params = {
         "origins": pickup_address,
         "destinations": dest_address,
         "key": api_key,
-        "units": "metric"
+        "units": "metric",
+        "departure_time": "now"
     }
     full_url = f"{base_url}?{parse.urlencode(params)}"
     
@@ -46,12 +57,14 @@ def get_distance_and_duration(pickup_address, dest_address):
         if data["status"] == "OK" and data["rows"][0]["elements"][0]["status"] == "OK":
             element = data["rows"][0]["elements"][0]
             distance_km = element["distance"]["value"] / 1000
-            duration_mins = round(element["duration"]["value"] / 60)
-            return round(distance_km, 2), duration_mins
+            duration_mins = round(element["duration_in_traffic"]["value"] / 60)
+            duration_normal = element["duration"]["value"] / 60
+            traffic_factor = duration_mins / duration_normal if duration_normal > 0 else 1.0
+            return round(distance_km, 2), duration_mins, round(traffic_factor, 2)
     except Exception as e:
         print(f"⚠️ Google Maps error: {e}")
     
-    return None, None
+    return None, None, 1.0
 
 
 
@@ -404,7 +417,7 @@ def create_booking(request):
             )
 
 
-        distance_km, duration_mins = get_distance_and_duration(pickup, destination)
+        distance_km, duration_mins, _ = get_distance_and_duration(pickup, destination)
         final_price = calculate_fare(service_type, distance_km)
 
 
@@ -478,7 +491,7 @@ def list_bookings(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 💰 ESTIMATE FARE — FIXED ✅ NO DUPLICATE
+# 💰 ESTIMATE FARE
 # ═══════════════════════════════════════════════════════
 
 
@@ -502,7 +515,7 @@ def estimate_fare(request):
         }
         
         pricing = PRICING.get(service_type, PRICING['okada'])
-        distance_km, duration_mins = get_distance_and_duration(pickup, destination)
+        distance_km, duration_mins, _ = get_distance_and_duration(pickup, destination)
         
         if not distance_km:
             distance_km = 5.0
@@ -632,8 +645,6 @@ def get_nearby_riders(request):
 
 
 COMMISSION_RATE = 0.15
-
-
 
 
 @csrf_exempt
@@ -988,3 +999,120 @@ def complete_ride(request):
         return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+# ═══════════════════════════════════════════════════════
+# 🧠 AI-POWERED FARE CALCULATOR — NEW ENDPOINT
+# ═══════════════════════════════════════════════════════
+
+
+if GOOGLE_SDK_AVAILABLE and hasattr(settings, 'GEMINI_API_KEY') and settings.GEMINI_API_KEY:
+    gmaps = googlemaps.Client(key=settings.GOOGLE_MAPS_API_KEY)
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+
+
+@csrf_exempt
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def calculate_fare_with_ai(request):
+    """Calculate smart fare using Google Maps + Gemini AI"""
+    pickup = request.GET.get('pickup')
+    destination = request.GET.get('destination')
+    service_type = request.GET.get('service_type', 'okada')
+    
+    if not pickup or not destination:
+        return Response({"error": "Pickup and destination required"}, status=400)
+    
+    try:
+        distance_km, duration_mins, traffic_factor = get_distance_and_duration(pickup, destination)
+        
+        if not distance_km:
+            raise Exception("Could not get distance data")
+        
+        traffic_level = "High" if traffic_factor > 1.3 else "Normal" if traffic_factor > 1.1 else "Low"
+        
+        ai_fare = None
+        explanation = "Standard rate"
+        
+        if GOOGLE_SDK_AVAILABLE and hasattr(settings, 'GEMINI_API_KEY') and settings.GEMINI_API_KEY:
+            try:
+                prompt = f"""
+                Calculate a fair price in Ghana Cedis (GH₵).
+                Service: {service_type}
+                Distance: {distance_km:.2f} km
+                Travel time with traffic: {duration_mins:.0f} mins
+                Traffic level: {traffic_level} ({round((traffic_factor - 1) * 100)}% busier than normal)
+                
+                Pricing rules:
+                - Okada Ride: GH₵5 base + GH₵1.50 per km
+                - Delivery: GH₵8 base + GH₵2.00 per km
+                - Waste Collection: GH₵15 flat rate
+                
+                Return ONLY valid JSON like this:
+                {{
+                  "base_price": 5.00,
+                  "distance_cost": 7.50,
+                  "traffic_adjustment": 0.00,
+                  "total_fare": 12.50,
+                  "explanation": "Clear short explanation"
+                }}
+                """
+                model = genai.GenerativeModel("gemini-2.0-flash")
+                response = model.generate_content(prompt)
+                result_text = response.text.replace("```json", "").replace("```", "").strip()
+                fare_data = json.loads(result_text)
+                ai_fare = fare_data
+                explanation = fare_data.get("explanation", "AI-calculated fare")
+            except Exception as ai_err:
+                print(f"⚠️ AI unavailable, using standard pricing: {ai_err}")
+        
+        if not ai_fare:
+            rates = {
+                'okada': {'base': 5.00, 'per_km': 1.50},
+                'delivery': {'base': 8.00, 'per_km': 2.00},
+                'waste': {'base': 15.00, 'per_km': 0},
+                'parcel': {'base': 8.00, 'per_km': 2.00},
+                'waste-bin': {'base': 15.00, 'per_km': 0},
+            }
+            rate = rates.get(service_type, rates['okada'])
+            base_price = rate['base']
+            distance_cost = round(distance_km * rate['per_km'], 2)
+            traffic_adjustment = round((traffic_factor - 1.0) * 2, 2) if traffic_factor > 1.1 else 0.00
+            total_fare = round(base_price + distance_cost + traffic_adjustment, 2)
+            
+            ai_fare = {
+                "base_price": base_price,
+                "distance_cost": distance_cost,
+                "traffic_adjustment": traffic_adjustment,
+                "total_fare": total_fare,
+                "explanation": explanation
+            }
+        
+        return Response({
+            "success": True,
+            "pickup": pickup,
+            "destination": destination,
+            "distance_km": distance_km,
+            "duration_mins": duration_mins,
+            "traffic_level": traffic_level,
+            "fare": ai_fare
+        })
+        
+    except Exception as e:
+        print(f"⚠️ Fare calculation error: {e}")
+        base_fare = calculate_fare(service_type, 5.0)
+        return Response({
+            "success": True,
+            "distance_km": 5.0,
+            "duration_mins": 15,
+            "traffic_level": "Normal",
+            "fare": {
+                "base_price": base_fare,
+                "distance_cost": 0,
+                "traffic_adjustment": 0,
+                "total_fare": base_fare,
+                "explanation": "Estimate — using standard pricing"
+            }
+        })
