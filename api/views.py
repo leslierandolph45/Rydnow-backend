@@ -1024,3 +1024,59 @@ def estimate_fare(request):
         })
     except Exception as e:
         return Response({'error': str(e)}, status=500)
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def estimate_fare(request):
+    """Secure fare estimation — backend calculates everything"""
+    try:
+        pickup = request.data.get('pickup')
+        destination = request.data.get('destination')
+        service_type = request.data.get('service_type', 'okada')
+        
+        if not pickup or not destination:
+            return Response({'error': 'Pickup and destination required'}, status=400)
+        
+        # Pricing rules — ONLY defined here on the backend
+        PRICING = {
+            'okada': {'basePrice': 5.0, 'pricePerKm': 1.5, 'name': 'Okada Ride'},
+            'delivery': {'basePrice': 8.0, 'pricePerKm': 2.0, 'name': 'Delivery'},
+            'waste': {'basePrice': 15.0, 'pricePerKm': 0.0, 'name': 'Waste Collection'},
+        }
+        
+        pricing = PRICING.get(service_type, PRICING['okada'])
+        
+        # ─── GET REAL DISTANCE FROM GOOGLE MAPS ───
+        google_api_key = os.environ.get('GOOGLE_MAPS_API_KEY', '')
+        distance_km = 5.0  # fallback if Google fails
+        
+        if google_api_key:
+            google_url = (
+                f"https://maps.googleapis.com/maps/api/distancematrix/json"
+                f"?origins={pickup}"
+                f"&destinations={destination}"
+                f"&units=metric"
+                f"&key={google_api_key}"
+            )
+            
+            import requests
+            google_response = requests.get(google_url, timeout=10)
+            google_data = google_response.json()
+            
+            if (
+                google_data.get('status') == 'OK'
+                and google_data['rows'][0]['elements'][0]['status'] == 'OK'
+            ):
+                distance_meters = google_data['rows'][0]['elements'][0]['distance']['value']
+                distance_km = distance_meters / 1000
+        
+        # Calculate fare
+        fare = pricing['basePrice'] + (distance_km * pricing['pricePerKm'])
+        
+        return Response({
+            'service_name': pricing['name'],
+            'distance_km': round(distance_km, 2),
+            'estimated_fare': round(fare, 2),
+            'currency': 'GH₵'
+        })
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
