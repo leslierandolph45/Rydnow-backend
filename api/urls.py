@@ -8,6 +8,7 @@ from .views import (
     BookingViewSet,
     CustomerProfileViewSet,
     customer_profile,
+    customer_profile_detail,  # ✅ ADDED
     customer_register,
     user_login,
     rider_register,
@@ -25,7 +26,6 @@ from .views import (
     complete_ride,
     estimate_fare,
     calculate_fare_with_ai,
-    # ✅ NEW ENDPOINTS ADDED
     available_jobs_for_rider,
     poll_booking_updates,
     admin_reassign_booking
@@ -43,6 +43,9 @@ router.register(r'customerprofiles', CustomerProfileViewSet)
 
 
 urlpatterns = [
+    # PROFILE ENDPOINT — ✅ NEW
+    path('customer/profile/', customer_profile_detail, name='customer-profile-detail'),
+    
     # BOOKING ENDPOINTS
     path('booking/create/', create_booking, name='create-booking'),
     path('bookings/list/', list_bookings, name='list-bookings'),
@@ -52,7 +55,7 @@ urlpatterns = [
     path('estimate-fare/', estimate_fare, name='estimate-fare'),
     path('calculate-fare/', calculate_fare_with_ai, name='calculate-fare'),
     
-    # ✅ NEW: REAL-TIME & ADMIN ENDPOINTS
+    # REAL-TIME & ADMIN ENDPOINTS
     path('jobs/available/', available_jobs_for_rider, name='available-jobs'),
     path('bookings/poll/', poll_booking_updates, name='poll-bookings'),
     path('admin/reassign/', admin_reassign_booking, name='admin-reassign'),
@@ -82,8 +85,6 @@ urlpatterns = [
     path('auth/token/', obtain_auth_token, name='api_token_auth'),
     path('profile/', customer_profile, name='customer_profile'),
 ]
-
-
 
 
 if settings.DEBUG:
