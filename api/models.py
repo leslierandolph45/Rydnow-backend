@@ -15,7 +15,7 @@ COMMISSION_RATE = 0.15  # ✅ YOUR 15% COMMISSION
 # ─── CHOICES ───
 SERVICE_CHOICES = [
     ('okada', 'Okada Ride'),
-    ('delivery', 'Parcel Delivery'),  # ✅ Added to match frontend
+    ('delivery', 'Parcel Delivery'),
     ('parcel', 'Parcel Delivery'),
     ('waste-bin', 'Waste Collection'),
 ]
@@ -219,19 +219,26 @@ class Booking(models.Model):
     destination_lat = models.FloatField(null=True, blank=True)
     destination_lng = models.FloatField(null=True, blank=True)
     distance_km = models.FloatField(null=True, blank=True)
+    duration_mins = models.IntegerField(null=True, blank=True)  # ✅ ADDED
     price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
 
     customer = models.ForeignKey(CustomerProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
-    customer_name = models.CharField(max_length=100, blank=True)  # ✅ Made optional
-    customer_phone = models.CharField(max_length=20, blank=True)  # ✅ Made optional
+    customer_name = models.CharField(max_length=100, blank=True)
+    customer_phone = models.CharField(max_length=20, blank=True)
     customer_email = models.EmailField(blank=True, null=True)
 
 
     rider = models.ForeignKey(Rider, on_delete=models.SET_NULL, null=True, blank=True)
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='pending')
-
-
+    
+    # ✅ ADDED — Booking timeline for real-time tracking
+    assigned_at = models.DateTimeField(null=True, blank=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    
+    delivery_category = models.CharField(max_length=100, blank=True, null=True)  # ✅ ADDED
     parcel_details = models.TextField(blank=True, null=True)
 
 
