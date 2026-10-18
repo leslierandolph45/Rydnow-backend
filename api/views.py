@@ -988,3 +988,39 @@ def complete_ride(request):
         return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def estimate_fare(request):
+    """Secure fare estimation — calculated on backend, never trusted from frontend"""
+    try:
+        pickup = request.data.get('pickup')
+        destination = request.data.get('destination')
+        service_type = request.data.get('service_type', 'okada')
+        
+        if not pickup or not destination:
+            return Response({'error': 'Pickup and destination required'}, status=400)
+        
+        # Pricing rules — defined ONLY here on backend
+        PRICING = {
+            'okada': {'basePrice': 5.0, 'pricePerKm': 1.5, 'name': 'Okada Ride'},
+            'delivery': {'basePrice': 8.0, 'pricePerKm': 2.0, 'name': 'Delivery'},
+            'waste': {'basePrice': 15.0, 'pricePerKm': 0.0, 'name': 'Waste Collection'},
+        }
+        
+        pricing = PRICING.get(service_type, PRICING['okada'])
+        
+        # TODO: Call Google Maps Distance Matrix API here
+        # For now — straight-line estimate; replace with actual API call
+        # In production: distance = get_distance_from_google_maps(pickup, destination)
+        estimated_distance_km = 5.0  # placeholder — replace with real Google Maps data
+        
+        fare = pricing['basePrice'] + (estimated_distance_km * pricing['pricePerKm'])
+        
+        return Response({
+            'service_name': pricing['name'],
+            'distance_km': round(estimated_distance_km, 2),
+            'estimated_fare': round(fare, 2),
+            'currency': 'GH₵'
+        })
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
