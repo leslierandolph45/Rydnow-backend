@@ -4,7 +4,7 @@ from rest_framework import status, viewsets
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
-from django.db import transaction  # ✅ ADDED for atomic operations
+from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.conf import settings
@@ -909,7 +909,7 @@ def accept_booking(request):
 
 
     try:
-        with transaction.atomic():  # ✅ ALL OR NOTHING — prevents race conditions
+        with transaction.atomic():
             booking = Booking.objects.select_for_update().get(id=booking_id)
             
             if booking.status != 'searching_rider':
