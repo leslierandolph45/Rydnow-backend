@@ -6,9 +6,78 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
+from django.conf import settings
 from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, Transaction, WithdrawalRequest
 from .serializers import BookingSerializer, CustomerProfileSerializer, RiderSerializer
 import uuid
+import requests
+
+
+
+
+# ═══════════════════════════════════════════════════════
+# 📍 HELPER: GET DISTANCE FROM GOOGLE MAPS
+# ═══════════════════════════════════════════════════════
+
+
+def get_distance_and_duration(pickup_address, dest_address):
+    """Call Google Maps API — backend only, secure & reliable"""
+    api_key = settings.GOOGLE_MAPS_API_KEY
+    
+    if not api_key:
+        print("⚠️ GOOGLE_MAPS_API_KEY not set — using fallback estimate")
+        return None, None
+    
+    url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+    params = {
+        "origins": pickup_address,
+        "destinations": dest_address,
+        "key": api_key,
+        "units": "metric"
+    }
+    
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        
+        if data["status"] == "OK" and data["rows"][0]["elements"][0]["status"] == "OK":
+            element = data["rows"][0]["elements"][0]
+            distance_km = element["distance"]["value"] / 1000
+            duration_mins = round(element["duration"]["value"] / 60)
+            return round(distance_km, 2), duration_mins
+    except Exception as e:
+        print(f"⚠️ Google Maps error: {e}")
+    
+    return None, None
+
+
+
+
+# ═══════════════════════════════════════════════════════
+# 💰 HELPER: BACKEND-ONLY PRICING ENGINE
+# ═══════════════════════════════════════════════════════
+
+
+def calculate_fare(service_type, distance_km):
+    """NO ONE can edit these prices from the frontend! Secure ✅"""
+    PRICING = {
+        "okada": {"base": 5.0, "per_km": 1.5},
+        "parcel": {"base": 8.0, "per_km": 2.0},
+        "delivery": {"base": 8.0, "per_km": 2.0},
+        "waste-bin": {"base": 15.0, "per_km": 0.0},
+        "waste": {"base": 15.0, "per_km": 0.0},
+    }
+    
+    rules = PRICING.get(service_type, PRICING["okada"])
+    base = rules["base"]
+    per_km = rules["per_km"]
+    
+    if distance_km:
+        total = base + (distance_km * per_km)
+    else:
+        total = base
+    
+    return round(total, 2)
 
 
 
@@ -312,7 +381,7 @@ def rider_submit_documents(request):
 
 
 # ═══════════════════════════════════════════════════════
-# 🆕 CREATE BOOKING — NOW AUTO = searching_rider ✅
+# 🆕 CREATE BOOKING — SECURE VERSION ✅
 # ═══════════════════════════════════════════════════════
 
 
@@ -320,50 +389,83 @@ def rider_submit_documents(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def create_booking(request):
-    """Customer creates a new booking — called from frontend on 'Confirm & Pay'"""
+    """
+    ✅ NEW SECURE FLOW:
+    1. Frontend sends: pickup, destination, service_type only
+    2. Backend gets distance from Google Maps
+    3. Backend calculates fare — frontend CANNOT edit it
+    4. Backend saves everything with verified price
+    """
     try:
-        data = request.data.copy()
-        
-        customer_name = data.pop('customer_name', 'Guest')
-        customer_phone = data.pop('customer_phone', '')
-        customer_email = data.pop('customer_email', '')
-        
+        pickup = request.data.get('pickup')
+        destination = request.data.get('destination')
+        service_type = request.data.get('service_type', 'okada')
+        delivery_category = request.data.get('delivery_category', '')
+        parcel_details = request.data.get('parcel_details', '')
+        customer_name = request.data.get('customer_name', 'Customer')
+        customer_phone = request.data.get('customer_phone', '')
+        payment_method = request.data.get('payment_method', 'cash')
+
+
+        if not pickup or not destination:
+            return Response(
+                {'error': 'Pickup and destination are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+        # Step 1: Get distance from Google Maps (backend only)
+        distance_km, duration_mins = get_distance_and_duration(pickup, destination)
+
+
+        # Step 2: Calculate fare — BACKEND ONLY, secure ✅
+        final_price = calculate_fare(service_type, distance_km)
+
+
+        # Step 3: Create customer record if phone provided
         customer = None
         if customer_phone:
             customer, _ = CustomerProfile.objects.get_or_create(
                 phone=customer_phone,
                 defaults={
                     'full_name': customer_name,
-                    'email': customer_email
+                    'email': ''
                 }
             )
-        
+
+
+        # Step 4: Save booking — with VERIFIED calculated price
         booking_data = {
-            'service_type': data.pop('service_type', 'okada'),
-            'pickup': data.pop('pickup', ''),
-            'pickup_lat': data.pop('pickup_lat', None),
-            'pickup_lng': data.pop('pickup_lng', None),
-            'destination': data.pop('destination', ''),
-            'destination_lat': data.pop('destination_lat', None),
-            'destination_lng': data.pop('destination_lng', None),
-            'distance_km': data.pop('distance_km', None),
-            'price': data.pop('fare', data.pop('price', None)),
+            'service_type': service_type,
+            'pickup': pickup,
+            'destination': destination,
+            'delivery_category': delivery_category,
+            'parcel_details': parcel_details,
+            'distance_km': distance_km,
+            'duration_mins': duration_mins,
+            'price': final_price,
             'customer': customer.id if customer else None,
             'customer_name': customer_name,
             'customer_phone': customer_phone,
-            'customer_email': customer_email,
-            'parcel_details': data.pop('parcel_details', ''),
-            'payment_method': data.pop('payment_method', ''),
+            'payment_method': payment_method,
             'status': 'searching_rider'
         }
-        
+
+
         serializer = BookingSerializer(data=booking_data)
         if serializer.is_valid():
             booking = serializer.save()
             return Response({
-                'message': '✅ Booking created successfully!',
-                'booking_id': booking.id,
-                'booking': serializer.data
+                'success': True,
+                'id': booking.id,
+                'service_type': service_type,
+                'pickup': pickup,
+                'destination': destination,
+                'distance_km': distance_km,
+                'duration_mins': duration_mins,
+                'price': final_price,
+                'status': booking.status,
+                'message': '✅ Booking created successfully!'
             }, status=status.HTTP_201_CREATED)
         else:
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -673,11 +775,15 @@ def request_withdrawal(request):
 
 
         if not all([rider_id, amount, mobile_money_number]):
-            return Response({'detail': 'Amount and mobile money number required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                'detail': 'Amount and mobile money number required'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
         if amount <= 0:
-            return Response({'detail': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                'detail': 'Invalid amount'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
         rider = get_rider_object(rider_id)
