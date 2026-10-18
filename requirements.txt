@@ -3,4 +3,3 @@ djangorestframework
 django-cors-headers
 dj-database-url
 gunicorn
-requests==2.31.0
