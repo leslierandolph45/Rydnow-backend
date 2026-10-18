@@ -24,7 +24,11 @@ from .views import (
     start_ride,
     complete_ride,
     estimate_fare,
-    calculate_fare_with_ai
+    calculate_fare_with_ai,
+    # ✅ NEW ENDPOINTS ADDED
+    available_jobs_for_rider,
+    poll_booking_updates,
+    admin_reassign_booking
 )
 
 
@@ -47,6 +51,11 @@ urlpatterns = [
     path('bookings/complete/', complete_ride, name='complete-ride'),
     path('estimate-fare/', estimate_fare, name='estimate-fare'),
     path('calculate-fare/', calculate_fare_with_ai, name='calculate-fare'),
+    
+    # ✅ NEW: REAL-TIME & ADMIN ENDPOINTS
+    path('jobs/available/', available_jobs_for_rider, name='available-jobs'),
+    path('bookings/poll/', poll_booking_updates, name='poll-bookings'),
+    path('admin/reassign/', admin_reassign_booking, name='admin-reassign'),
 
 
     # AUTH ENDPOINTS
