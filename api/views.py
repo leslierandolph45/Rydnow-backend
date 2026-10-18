@@ -10,35 +10,37 @@ from django.conf import settings
 from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, Transaction, WithdrawalRequest
 from .serializers import BookingSerializer, CustomerProfileSerializer, RiderSerializer
 import uuid
-import requests
+import json
+from urllib import request, parse
 
 
 
 
 # ═══════════════════════════════════════════════════════
-# 📍 HELPER: GET DISTANCE FROM GOOGLE MAPS
+# 📍 HELPER: GET DISTANCE FROM GOOGLE MAPS — NO requests package!
 # ═══════════════════════════════════════════════════════
 
 
 def get_distance_and_duration(pickup_address, dest_address):
-    """Call Google Maps API — backend only, secure & reliable"""
+    """Call Google Maps API using Django's built-in urllib — no extra packages needed ✅"""
     api_key = settings.GOOGLE_MAPS_API_KEY
     
     if not api_key:
         print("⚠️ GOOGLE_MAPS_API_KEY not set — using fallback estimate")
         return None, None
     
-    url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+    base_url = "https://maps.googleapis.com/maps/api/distancematrix/json"
     params = {
         "origins": pickup_address,
         "destinations": dest_address,
         "key": api_key,
         "units": "metric"
     }
+    full_url = f"{base_url}?{parse.urlencode(params)}"
     
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        data = resp.json()
+        with request.urlopen(full_url, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
         
         if data["status"] == "OK" and data["rows"][0]["elements"][0]["status"] == "OK":
             element = data["rows"][0]["elements"][0]
