@@ -40,7 +40,7 @@ RIDER_STATUS_CHOICES = [
     ('inactive', 'Inactive'),
 ]
 
-PAYMENT_STATUS = [
+BOOKING_STATUS = [
     ('pending', 'Held in Escrow'),
     ('released', 'Released'),
     ('cancelled', 'Cancelled/Refunded'),
