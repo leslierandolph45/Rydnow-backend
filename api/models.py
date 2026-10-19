@@ -5,7 +5,7 @@ from django.utils import timezone
 
 
 # ─── CONFIG ───
-COMMISSION_RATE = 0.15  # ✅ YOUR 15% COMMISSION
+COMMISSION_RATE = 0.15  # 15% COMMISSION
 
 
 # ─── CHOICES ───
@@ -40,7 +40,7 @@ RIDER_STATUS_CHOICES = [
     ('inactive', 'Inactive'),
 ]
 
-BOOKING_STATUS = [
+PAYMENT_STATUS = [
     ('pending', 'Held in Escrow'),
     ('released', 'Released'),
     ('cancelled', 'Cancelled/Refunded'),
@@ -93,7 +93,7 @@ class CustomerProfile(models.Model):
     phone = models.CharField(max_length=20, blank=True, null=True)
     profile_photo = models.ImageField(upload_to='profiles/', blank=True, null=True)
     
-    # ✅ EMAIL & PHONE VERIFICATION
+    # EMAIL & PHONE VERIFICATION
     email_verified = models.BooleanField(default=False)
     phone_verified = models.BooleanField(default=False)
     email_verification_token = models.CharField(max_length=255, blank=True, null=True)
@@ -118,7 +118,7 @@ class RiderProfile(models.Model):
     motorbike_model = models.CharField(max_length=200, blank=True)
     license_number = models.CharField(max_length=100, blank=True)
 
-    # 📍 LIVE LOCATION
+    # LIVE LOCATION
     current_lat = models.FloatField(null=True, blank=True, help_text="Current latitude")
     current_lng = models.FloatField(null=True, blank=True, help_text="Current longitude")
     last_location_update = models.DateTimeField(null=True, blank=True, help_text="Last time location was updated")
@@ -128,7 +128,7 @@ class RiderProfile(models.Model):
     passport_photo = models.CharField(max_length=500, blank=True)
     license_doc = models.CharField(max_length=500, blank=True)
 
-    # ✅ VERIFICATION & APPROVAL
+    # VERIFICATION & APPROVAL
     status = models.CharField(max_length=50, choices=RIDER_STATUS_CHOICES, default='pending')
     is_online = models.BooleanField(default=False)
     email_verified = models.BooleanField(default=False)
@@ -137,7 +137,7 @@ class RiderProfile(models.Model):
     sms_verification_code = models.CharField(max_length=6, blank=True, null=True)
     sms_code_expires_at = models.DateTimeField(blank=True, null=True)
     
-    # 🛡️ RESTRICTION FLAG
+    # RESTRICTION FLAG
     is_restricted = models.BooleanField(default=False, help_text="If checked, rider cannot accept bookings")
     restriction_notes = models.TextField(blank=True, help_text="Why was this rider restricted?")
     restricted_until = models.DateTimeField(null=True, blank=True, help_text="Leave blank for permanent restriction")
@@ -156,7 +156,7 @@ class Rider(models.Model):
     phone = models.CharField(max_length=20)
     location = models.CharField(max_length=255, blank=True, null=True)
 
-    # 📍 LIVE LOCATION
+    # LIVE LOCATION
     current_lat = models.FloatField(null=True, blank=True, help_text="Current latitude")
     current_lng = models.FloatField(null=True, blank=True, help_text="Current longitude")
     last_location_update = models.DateTimeField(null=True, blank=True, help_text="Last time location was updated")
@@ -164,7 +164,7 @@ class Rider(models.Model):
     is_online = models.BooleanField(default=False)
     verification_status = models.CharField(max_length=20, choices=VERIFICATION_STATUS, default='pending')
     
-    # ✅ RIDER APPROVAL STATUS
+    # RIDER APPROVAL STATUS
     approval_status = models.CharField(
         max_length=20,
         choices=[
@@ -185,7 +185,7 @@ class Rider(models.Model):
 
     admin_notes = models.TextField(blank=True, null=True, help_text="Notes for approval/rejection")
     
-    # 🛡️ RESTRICTION FLAG
+    # RESTRICTION FLAG
     is_restricted = models.BooleanField(default=False, help_text="If checked, rider cannot accept bookings")
     restriction_reason = models.CharField(max_length=50, choices=RESTRICTION_REASON, blank=True)
     restriction_details = models.TextField(blank=True)
@@ -225,7 +225,7 @@ class Booking(models.Model):
 
     parcel_details = models.TextField(blank=True, null=True)
 
-    # 💰 ESCROW PAYMENT
+    # ESCROW PAYMENT
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='pending')
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     platform_commission = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -247,9 +247,7 @@ class Booking(models.Model):
             self.save()
 
 
-# ══════════════════════════════════════════════════════════
-# 💰 RIDER WALLET
-# ══════════════════════════════════════════════════════════
+# RIDER WALLET
 class RiderWallet(models.Model):
     rider = models.OneToOneField(Rider, on_delete=models.CASCADE, related_name='wallet')
     balance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
@@ -276,9 +274,7 @@ class RiderWallet(models.Model):
         return f"{self.rider.name} — GH₵{self.balance}"
 
 
-# ══════════════════════════════════════════════════════════
-# 📝 TRANSACTION HISTORY
-# ══════════════════════════════════════════════════════════
+# TRANSACTION HISTORY
 class Transaction(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='transactions')
@@ -298,9 +294,7 @@ class Transaction(models.Model):
         return f"{self.rider.name} — {self.get_transaction_type_display()} — GH₵{self.amount}"
 
 
-# ══════════════════════════════════════════════════════════
-# 💳 WITHDRAWAL REQUEST
-# ══════════════════════════════════════════════════════════
+# WITHDRAWAL REQUEST
 class WithdrawalRequest(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='withdrawals')
@@ -315,9 +309,7 @@ class WithdrawalRequest(models.Model):
         return f"Withdrawal — {self.rider.name} — GH₵{self.amount} — {self.status}"
 
 
-# ══════════════════════════════════════════════════════════
-# 🛡️ RIDER COMPLAINTS & RESTRICTIONS
-# ══════════════════════════════════════════════════════════
+# RIDER COMPLAINTS & RESTRICTIONS
 class RiderComplaint(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
