@@ -1,25 +1,62 @@
-from django.contrib import admin
-from django.urls import path, include
-from django.conf import settings
-from django.conf.urls.static import static
-from django.http import HttpResponse
-from .views import send_verification_code, verify_verification_code
-
-
-def home(request):
-    return HttpResponse("Rydnow API is running! 🚀 Go to /admin or /api/bookings")
-
+from django.urls import path
+from .views import (
+    RiderViewSet,
+    BookingViewSet,
+    CustomerProfileViewSet,
+    customer_profile,
+    customer_register,
+    user_login,
+    rider_register,
+    rider_submit_documents,
+    update_rider_location,
+    get_nearby_riders,
+    get_rider_wallet,
+    rider_transactions,
+    record_job_payment,
+    request_withdrawal,
+    create_booking,
+    list_bookings,
+    accept_booking,
+    start_ride,
+    complete_ride,
+    estimate_fare,
+    calculate_fare_with_ai,
+    send_verification_code,
+    verify_verification_code,
+)
 
 urlpatterns = [
-    path('', home),
-    path('admin/', admin.site.urls),
-    path('api/', include('api.urls')),
+    # ─── AUTH ───
+    path('auth/register/', customer_register, name='customer-register'),
+    path('auth/login/', user_login, name='user-login'),
     
-    # ✅ OTP VERIFICATION ENDPOINTS
-    path('api/auth/send-code/', send_verification_code, name='send-verification-code'),
-    path('api/auth/verify-code/', verify_verification_code, name='verify-verification-code'),
+    # ─── OTP VERIFICATION ───
+    path('auth/send-code/', send_verification_code, name='send-verification-code'),
+    path('auth/verify-code/', verify_verification_code, name='verify-verification-code'),
+    
+    # ─── CUSTOMER PROFILE ───
+    path('customer/profile/', customer_profile, name='customer-profile'),
+    
+    # ─── RIDERS ───
+    path('riders/', RiderViewSet.as_view({'get': 'list'})),
+    path('riders/<int:pk>/', RiderViewSet.as_view({'get': 'retrieve'})),
+    path('rider/register/', rider_register, name='rider-register'),
+    path('rider/documents/', rider_submit_documents, name='rider-submit-documents'),
+    path('rider/location/', update_rider_location, name='update-rider-location'),
+    path('riders/nearby/', get_nearby_riders, name='get-nearby-riders'),
+    path('rider/wallet/', get_rider_wallet, name='get-rider-wallet'),
+    path('rider/transactions/', rider_transactions, name='rider-transactions'),
+    path('rider/withdraw/', request_withdrawal, name='request-withdrawal'),
+    
+    # ─── BOOKINGS ───
+    path('bookings/create/', create_booking, name='create-booking'),
+    path('bookings/', list_bookings, name='list-bookings'),
+    path('bookings/<int:booking_id>/accept/', accept_booking, name='accept-booking'),
+    path('bookings/<int:booking_id>/start/', start_ride, name='start-ride'),
+    path('bookings/<int:booking_id>/complete/', complete_ride, name='complete-ride'),
+    path('bookings/<int:booking_id>/payment/', record_job_payment, name='record-job-payment'),
+    
+    # ─── FARE ESTIMATE ───
+    path('fare/estimate/', estimate_fare, name='estimate-fare'),
+    path('fare/ai-calculate/', calculate_fare_with_ai, name='calculate-fare-with-ai'),
 ]
-
-
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
