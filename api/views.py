@@ -535,7 +535,7 @@ def request_withdrawal(request):
 
 
 # ==========================================
-#  💳 PAYSTACK PAYMENT INTEGRATION — NEW!
+#  💳 PAYSTACK PAYMENT INTEGRATION
 # ==========================================
 
 PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY', '')
@@ -549,7 +549,7 @@ def initialize_payment(request):
     try:
         booking_id = request.data.get('booking_id')
         email = request.data.get('email')
-        amount = request.data.get('amount')  # in GH₵ — convert to kobo: × 100
+        amount = request.data.get('amount')
 
         if not all([booking_id, email, amount]):
             return Response(
@@ -559,13 +559,11 @@ def initialize_payment(request):
 
         amount_kobo = int(float(amount) * 100)
 
-        # Verify booking exists
         try:
             booking = Booking.objects.get(id=booking_id)
         except Booking.DoesNotExist:
             return Response({'detail': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Initialize with Paystack
         headers = {
             'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}',
             'Content-Type': 'application/json'
@@ -633,7 +631,6 @@ def verify_payment(request):
         data = resp.json()
 
         if data.get('status') and data['data']['status'] == 'success':
-            # Update booking payment status
             Booking.objects.filter(transaction_reference=reference).update(
                 payment_status='released',
                 paid_at=timezone.now()
@@ -670,8 +667,6 @@ def paystack_webhook(request):
 
         if event == 'charge.success':
             reference = data.get('reference')
-            amount = data.get('amount', 0) / 100
-            # Update booking if exists
             Booking.objects.filter(transaction_reference=reference).update(
                 payment_status='released',
                 paid_at=timezone.now()
