@@ -357,5 +357,9 @@ class RiderComplaint(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        rider_name = self.rider.name if self.rider else (self.rider_profile.full_name if self.rider_profile else "Unknown Rider")
+        rider_name = "Unknown Rider"
+        if self.rider:
+            rider_name = self.rider.name
+        elif self.rider_profile:
+            rider_name = self.rider_profile.full_name
         return f"{rider_name} — {self.get_complaint_type_display()} — {self.get_status_display()}"
