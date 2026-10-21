@@ -16,10 +16,16 @@ from .views import (
     initialize_payment,
     verify_payment,
     paystack_webhook,
+    send_verification_code,
+    verify_code,
 )
 
 
 urlpatterns = [
+    # ─── VERIFICATION ───
+    path('auth/send-code/', send_verification_code, name='send-verification-code'),
+    path('auth/verify-code/', verify_code, name='verify-code'),
+
     # ─── AUTH ───
     path('auth/register/', customer_register, name='customer-register'),
     path('auth/login/', user_login, name='user-login'),
