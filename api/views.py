@@ -9,6 +9,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.conf import settings
 from django.http import HttpResponse
+from django.core.cache import cache
+import random
 from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, Transaction, WithdrawalRequest
 import uuid
 import json
@@ -20,6 +22,9 @@ import requests
 #  HELPER FUNCTIONS
 # ==========================================
 
+def generate_verification_code():
+    return str(random.randint(100000, 999999))
+
 def get_or_create_customer_profile(user):
     profile, created = CustomerProfile.objects.get_or_create(
         user=user,
@@ -30,6 +35,58 @@ def get_or_create_customer_profile(user):
         }
     )
     return profile
+
+
+# ==========================================
+#  VERIFICATION CODE ENDPOINTS
+# ==========================================
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def send_verification_code(request):
+    """Send verification code to email or phone"""
+    contact = request.data.get('contact')
+    contact_type = request.data.get('type', 'email')
+    
+    if not contact:
+        return Response({'error': 'Contact info is required'}, status=400)
+    
+    code = generate_verification_code()
+    cache.set(f'verify_{contact}', code, timeout=600)
+    
+    print(f'🔑 Verification code for {contact}: {code}')
+    
+    return Response({
+        'success': True,
+        'message': 'Verification code sent',
+        'code': code
+    })
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_code(request):
+    """Verify the code matches"""
+    contact = request.data.get('contact')
+    code = request.data.get('code')
+    
+    if not contact or not code:
+        return Response({'error': 'Contact and code are required'}, status=400)
+    
+    stored_code = cache.get(f'verify_{contact}')
+    
+    if stored_code and str(stored_code) == str(code):
+        return Response({
+            'success': True,
+            'message': 'Code verified successfully'
+        })
+    else:
+        return Response({
+            'success': False,
+            'error': 'Invalid or expired code'
+        }, status=400)
 
 
 # ==========================================
