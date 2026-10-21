@@ -2,7 +2,6 @@ from django.urls import path
 from .views import (
     RiderViewSet,
     BookingViewSet,
-    CustomerProfileViewSet,
     customer_profile,
     customer_register,
     user_login,
