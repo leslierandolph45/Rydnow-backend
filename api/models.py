@@ -55,6 +55,9 @@ TRANSACTION_TYPES = [
     ('job_payment', 'Job Payment'),
     ('withdrawal', 'Withdrawal'),
     ('commission', 'Platform Commission'),
+    ('deposit', 'Deposit'),
+    ('refund', 'Refund'),
+    ('bonus', 'Bonus Credit'),
 ]
 
 WITHDRAWAL_STATUS = [
@@ -91,6 +94,100 @@ RESTRICTION_REASON = [
 
 
 # ==========================================
+#  CUSTOMER WALLET — NEW!
+# ==========================================
+class CustomerWallet(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='customer_wallet')
+    balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    withdrawable_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    bonus_credit = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.username} — Wallet: GH₵{self.balance}"
+
+    def deposit(self, amount, is_bonus=False):
+        amount = round(float(amount), 2)
+        self.balance = round(float(self.balance) + amount, 2)
+        if is_bonus:
+            self.bonus_credit = round(float(self.bonus_credit) + amount, 2)
+        else:
+            self.withdrawable_balance = round(float(self.withdrawable_balance) + amount, 2)
+        self.save()
+        WalletTransaction.objects.create(
+            wallet=self,
+            wallet_type='customer',
+            transaction_type='bonus' if is_bonus else 'deposit',
+            amount=amount,
+            description='Funds added to wallet'
+        )
+
+    def pay_for_delivery(self, amount):
+        amount = round(float(amount), 2)
+        if float(self.balance) < amount:
+            return False, 'Insufficient wallet balance'
+        
+        self.balance = round(float(self.balance) - amount, 2)
+        # Use bonus first, then withdrawable funds
+        if float(self.bonus_credit) >= amount:
+            self.bonus_credit = round(float(self.bonus_credit) - amount, 2)
+        else:
+            remaining = round(amount - float(self.bonus_credit), 2)
+            self.bonus_credit = 0.00
+            self.withdrawable_balance = round(float(self.withdrawable_balance) - remaining, 2)
+        
+        self.save()
+        WalletTransaction.objects.create(
+            wallet=self,
+            wallet_type='customer',
+            transaction_type='payment',
+            amount=amount,
+            description='Payment for delivery'
+        )
+        return True, 'Payment successful'
+
+    def withdraw_funds(self, amount):
+        amount = round(float(amount), 2)
+        if float(self.withdrawable_balance) < amount:
+            return False, 'Insufficient withdrawable balance'
+        
+        self.withdrawable_balance = round(float(self.withdrawable_balance) - amount, 2)
+        self.balance = round(float(self.balance) - amount, 2)
+        self.save()
+        WalletTransaction.objects.create(
+            wallet=self,
+            wallet_type='customer',
+            transaction_type='withdrawal',
+            amount=amount,
+            description='Withdrawal to Mobile Money'
+        )
+        return True, 'Withdrawal successful'
+
+
+# ==========================================
+#  WALLET TRANSACTION — NEW!
+# ==========================================
+class WalletTransaction(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    wallet = models.ForeignKey(CustomerWallet, on_delete=models.CASCADE, related_name='transactions', null=True, blank=True)
+    wallet_type = models.CharField(max_length=20, default='customer')
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    description = models.CharField(max_length=255, blank=True)
+    phone_number = models.CharField(max_length=20, blank=True, null=True)
+    status = models.CharField(max_length=20, default='completed')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.get_transaction_type_display()} — GH₵{self.amount}"
+
+
+# ==========================================
 #  CUSTOMER PROFILE
 # ==========================================
 class CustomerProfile(models.Model):
@@ -112,6 +209,13 @@ class CustomerProfile(models.Model):
 
     def __str__(self):
         return self.user.username
+
+    def save(self, *args, **kwargs):
+        is_new = self.pk is None
+        super().save(*args, **kwargs)
+        # Create wallet automatically when customer is created
+        if is_new:
+            CustomerWallet.objects.get_or_create(user=self.user)
 
 
 # ==========================================
