@@ -138,3 +138,7 @@ REST_FRAMEWORK = {
 # ─── CORS SETTINGS ───
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+
+# ─── STATIC FILES CONFIG FOR RENDER ───
+STATIC_URL = '/static/'
+STATIC_ROOT = '/opt/render/project/src/staticfiles'
