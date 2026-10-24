@@ -25,6 +25,35 @@ import requests
 def generate_verification_code():
     return str(random.randint(100000, 999999))
 
+
+# 🇬🇧🇬🇭 FLEXIBLE PHONE VALIDATION — accepts ANY reasonable format
+def clean_and_validate_phone(phone):
+    if not phone:
+        return None, "Phone number is required"
+    
+    # Remove ALL spaces first
+    cleaned = phone.replace(' ', '').strip()
+    
+    # ✅ Format 1: 0244203327 (10 digits starting with 0)
+    if cleaned.startswith('0') and len(cleaned) == 10 and cleaned.isdigit():
+        return cleaned, None
+    
+    # ✅ Format 2: +233244203327 (starts with +233, 13 chars total)
+    if cleaned.startswith('+233') and len(cleaned) == 13:
+        return cleaned, None
+    
+    # ✅ Format 3: 244203327 (9 digits — add leading 0)
+    if len(cleaned) == 9 and cleaned.isdigit():
+        return '0' + cleaned, None
+    
+    # ✅ Format 4: 233244203327 (no + — add it)
+    if cleaned.startswith('233') and len(cleaned) == 12 and cleaned.isdigit():
+        return '+' + cleaned, None
+    
+    # ❌ Invalid
+    return None, "Enter a valid Ghanaian number — e.g. 0241234567 or +233241234567"
+
+
 def get_or_create_customer_profile(user):
     profile, created = CustomerProfile.objects.get_or_create(
         user=user,
@@ -40,6 +69,7 @@ def get_or_create_customer_profile(user):
 # ==========================================
 #  VERIFICATION CODE ENDPOINTS
 # ==========================================
+
 
 @csrf_exempt
 @api_view(['POST'])
@@ -93,6 +123,7 @@ def verify_code(request):
 #  AUTHENTICATION — Customer & Rider Registration
 # ==========================================
 
+
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -102,13 +133,20 @@ def customer_register(request):
         email = request.data.get('email')
         password = request.data.get('password')
         full_name = request.data.get('full_name')
-        phone = request.data.get('phone')
+        phone = request.data.get('phone', '')
 
         if not all([username, email, password]):
             return Response(
                 {'detail': 'Username, email and password are required.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        # ✅ Validate & clean phone number
+        if phone:
+            cleaned_phone, phone_error = clean_and_validate_phone(phone)
+            if phone_error:
+                return Response({'detail': phone_error}, status=status.HTTP_400_BAD_REQUEST)
+            phone = cleaned_phone
 
         if User.objects.filter(username=username).exists():
             return Response(
@@ -210,6 +248,12 @@ def rider_register(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # ✅ Validate & clean phone number
+        cleaned_phone, phone_error = clean_and_validate_phone(phone)
+        if phone_error:
+            return Response({'detail': phone_error}, status=status.HTTP_400_BAD_REQUEST)
+        phone = cleaned_phone
+
         if User.objects.filter(username=username).exists():
             return Response(
                 {'username': 'Username already taken.'},
@@ -305,6 +349,7 @@ def rider_submit_documents(request):
 #  VIEWSETS — Riders, Bookings
 # ==========================================
 
+
 class RiderViewSet(viewsets.ReadOnlyModelViewSet):
     """List and view all registered riders"""
     queryset = Rider.objects.all()
@@ -333,6 +378,7 @@ def customer_profile(request):
 # ==========================================
 #  LIVE RIDER LOCATION
 # ==========================================
+
 
 @csrf_exempt
 @api_view(['POST'])
@@ -406,6 +452,7 @@ def get_nearby_riders(request):
 # ==========================================
 #  WALLET, COMMISSION & WITHDRAWAL SYSTEM
 # ==========================================
+
 
 COMMISSION_RATE = 0.15  # 15% Platform Commission
 
@@ -541,7 +588,9 @@ def request_withdrawal(request):
         network = request.data.get('network', '')
 
         if not all([rider_id, amount, mobile_money_number]):
-            return Response({'detail': 'Amount and mobile money number required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                'detail': 'Amount and mobile money number required'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         if amount <= 0:
             return Response({'detail': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
@@ -594,6 +643,7 @@ def request_withdrawal(request):
 # ==========================================
 #  💳 PAYSTACK PAYMENT INTEGRATION
 # ==========================================
+
 
 PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY', '')
 
