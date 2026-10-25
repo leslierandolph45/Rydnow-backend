@@ -1,5 +1,11 @@
-from django.urls import path
+from django.urls import path, include
 from . import views
+from rest_framework.routers import DefaultRouter
+
+
+# Create router for auto-generated Booking endpoints
+router = DefaultRouter()
+router.register(r'bookings', views.BookingViewSet, basename='booking')
 
 
 urlpatterns = [
@@ -24,10 +30,13 @@ urlpatterns = [
     path('rider/wallet/', views.get_rider_wallet, name='rider-wallet'),
     path('rider/transactions/', views.rider_transactions, name='rider-transactions'),
     path('payment/record-job/', views.record_job_payment, name='record-job-payment'),
-    path('payment/withdraw/', views.request_withdrawal, name='request-withdrawal'),
+    path('payment/withdraw/', views.request_withdrawal, name='request-withdraw'),
 
     # Paystack
     path('paystack/initialize/', views.initialize_payment, name='paystack-initialize'),
     path('paystack/verify/', views.verify_payment, name='paystack-verify'),
     path('paystack/webhook/', views.paystack_webhook, name='paystack-webhook'),
+
+    # ✨ Auto-generated Booking endpoints: /api/bookings/ (create, list, update, cancel)
+    path('', include(router.urls)),
 ]
