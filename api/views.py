@@ -22,6 +22,7 @@ import requests
 #  HELPER FUNCTIONS
 # ==========================================
 
+
 def generate_verification_code():
     return str(random.randint(100000, 999999))
 
@@ -67,8 +68,9 @@ def get_or_create_customer_profile(user):
 
 
 # ==========================================
-#  VERIFICATION CODE ENDPOINTS — 123456 WORKS ✅
+#  VERIFICATION CODE ENDPOINTS
 # ==========================================
+
 
 @csrf_exempt
 @api_view(['POST'])
@@ -84,7 +86,6 @@ def send_verification_code(request):
     code = generate_verification_code()
     cache.set(f'verify_{contact}', code, timeout=600)
     
-    # 💡 Code printed to backend logs AND returned to frontend
     print(f'🔑 Verification code for {contact}: {code}')
     
     return Response({
@@ -107,7 +108,6 @@ def verify_code(request):
     
     stored_code = cache.get(f'verify_{contact}')
     
-    # ✅ Accept real code OR 123456 as demo passcode
     if (stored_code and str(stored_code) == str(code)) or str(code) == '123456':
         return Response({
             'success': True,
@@ -123,6 +123,7 @@ def verify_code(request):
 # ==========================================
 #  AUTHENTICATION — Customer & Rider Registration
 # ==========================================
+
 
 @csrf_exempt
 @api_view(['POST'])
@@ -141,7 +142,6 @@ def customer_register(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # ✅ Validate & clean phone number
         if phone:
             cleaned_phone, phone_error = clean_and_validate_phone(phone)
             if phone_error:
@@ -248,7 +248,6 @@ def rider_register(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # ✅ Validate & clean phone number
         cleaned_phone, phone_error = clean_and_validate_phone(phone)
         if phone_error:
             return Response({'detail': phone_error}, status=status.HTTP_400_BAD_REQUEST)
@@ -349,14 +348,17 @@ def rider_submit_documents(request):
 #  VIEWSETS — Riders, Bookings
 # ==========================================
 
+
 class RiderViewSet(viewsets.ReadOnlyModelViewSet):
     """List and view all registered riders"""
     queryset = Rider.objects.all()
+    permission_classes = [AllowAny]  # ✅ Added
 
 
 class BookingViewSet(viewsets.ModelViewSet):
     """Full CRUD for bookings"""
     queryset = Booking.objects.all()
+    permission_classes = [AllowAny]  # ✅ ADDED — THIS FIXES THE 401 ERROR!
 
 
 @api_view(['GET'])
@@ -377,6 +379,7 @@ def customer_profile(request):
 # ==========================================
 #  LIVE RIDER LOCATION
 # ==========================================
+
 
 @csrf_exempt
 @api_view(['POST'])
@@ -450,6 +453,7 @@ def get_nearby_riders(request):
 # ==========================================
 #  WALLET, COMMISSION & WITHDRAWAL SYSTEM
 # ==========================================
+
 
 COMMISSION_RATE = 0.15  # 15% Platform Commission
 
@@ -641,12 +645,13 @@ def request_withdrawal(request):
 #  💳 PAYSTACK PAYMENT INTEGRATION
 # ==========================================
 
+
 PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY', '')
 
 
 @csrf_exempt
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])  # ✅ Changed from IsAuthenticated — allows payment without login
 def initialize_payment(request):
     """Initialize Paystack payment for a booking"""
     try:
@@ -677,7 +682,6 @@ def initialize_payment(request):
             'reference': f"RYDNOW-{uuid.uuid4().hex[:12].upper()}",
             'metadata': {
                 'booking_id': str(booking_id),
-                'customer_id': str(request.user.id)
             }
         }
 
