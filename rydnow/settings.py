@@ -12,27 +12,27 @@ import dj_database_url
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-0_*)!yzmt^(4*agf254^=cjqo0wbh!rz36ir_z71k=t_)=@')
+# ─── SECURITY ───
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-0_*)!yzmt^(4*agf254^=cjqo0wbh!rz36ir_z71k=t_)=@'
+)
 
-
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
-
 
 ALLOWED_HOSTS = [
     '127.0.0.1',
     'localhost',
-    '.up.railway.app',           # ✅ Railway domains
-    '.onrender.com',             # ✅ Render domains (just in case)
-    '.vercel.app',               # ✅ Your frontend
+    '.up.railway.app',
+    '.onrender.com',
+    '.vercel.app',
 ]
 
-# Add custom domain if you have one
 if 'CUSTOM_DOMAIN' in os.environ:
     ALLOWED_HOSTS.append(os.environ.get('CUSTOM_DOMAIN', ''))
 
 
+# ─── APPS ───
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -46,11 +46,10 @@ INSTALLED_APPS = [
     'api',
 ]
 
-
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',  # ✅ Added for static files
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -59,9 +58,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-
 ROOT_URLCONF = 'rydnow.urls'
-
 
 TEMPLATES = [
     {
@@ -78,7 +75,6 @@ TEMPLATES = [
     },
 ]
 
-
 WSGI_APPLICATION = 'rydnow.wsgi.application'
 
 
@@ -90,7 +86,6 @@ DATABASES = {
     }
 }
 
-# Use PostgreSQL on Railway/Production
 if 'DATABASE_URL' in os.environ:
     DATABASES['default'] = dj_database_url.config(
         conn_max_age=600,
@@ -98,21 +93,13 @@ if 'DATABASE_URL' in os.environ:
     )
 
 
+# ─── AUTH & INTERNATIONALIZATION ───
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-    },
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
-
 
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
@@ -120,16 +107,13 @@ USE_I18N = True
 USE_TZ = True
 
 
-# ─── STATIC FILES ───
+# ─── STATIC & MEDIA ───
 STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-
-# ─── MEDIA / FILE UPLOADS ───
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
-
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
