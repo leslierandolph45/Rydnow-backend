@@ -67,7 +67,7 @@ def get_or_create_customer_profile(user):
 
 
 # ==========================================
-#  VERIFICATION CODE ENDPOINTS — UPDATED ✅
+#  VERIFICATION CODE ENDPOINTS — 123456 WORKS ✅
 # ==========================================
 
 @csrf_exempt
@@ -89,7 +89,7 @@ def send_verification_code(request):
     
     return Response({
         'success': True,
-        'message': 'Verification code sent — use the code below or 123456',
+        'message': 'Verification code sent — use 123456 or check logs',
         'code': code
     })
 
@@ -111,12 +111,12 @@ def verify_code(request):
     if (stored_code and str(stored_code) == str(code)) or str(code) == '123456':
         return Response({
             'success': True,
-            'message': 'Code verified successfully'
+            'message': '✅ Code verified — welcome in!'
         })
     else:
         return Response({
             'success': False,
-            'error': 'Invalid or expired code — try 123456 for demo'
+            'error': 'Invalid code — try 123456'
         }, status=400)
 
 
@@ -179,7 +179,7 @@ def customer_register(request):
         )
 
         return Response({
-            'message': 'Customer account created successfully!',
+            'message': '✅ Account created successfully!',
             'user': {
                 'id': user.id,
                 'username': user.username,
@@ -290,7 +290,7 @@ def rider_register(request):
         RiderWallet.objects.create(rider=rider_profile)
 
         return Response({
-            'message': 'Rider account created! Please upload your documents.',
+            'message': '✅ Rider account created! Please upload your documents.',
             'user': {
                 'id': user.id,
                 'username': user.username,
