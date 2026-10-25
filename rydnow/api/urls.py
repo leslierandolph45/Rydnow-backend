@@ -1,38 +1,33 @@
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
-from rest_framework.authtoken.views import obtain_auth_token
-from .views import (
-    RiderViewSet, BookingViewSet, customer_profile,
-    customer_register, user_login, rider_register, rider_submit_documents,
-    update_rider_location, get_nearby_riders,
-    get_rider_wallet, rider_transactions, record_job_payment, request_withdrawal
-)
-
-
-router = DefaultRouter()
-router.register(r'riders', RiderViewSet)
-router.register(r'bookings', BookingViewSet)
+from django.urls import path
+from . import views
 
 
 urlpatterns = [
-    # ✅ AUTH ENDPOINTS
-    path('auth/register/', customer_register, name='customer-register'),
-    path('auth/login/', user_login, name='user-login'),
-    path('auth/rider-register/', rider_register, name='rider-register'),
-    path('auth/rider-submit/', rider_submit_documents, name='rider-submit'),
-    
-    # ✅ 📍 LIVE LOCATION
-    path('rider/update-location/', update_rider_location, name='update-rider-location'),
-    path('riders/nearby/', get_nearby_riders, name='nearby-riders'),
-    
-    # ✅ 💰 WALLET, COMMISSION & WITHDRAWALS — NEW!
-    path('wallet/balance/', get_rider_wallet, name='rider-wallet'),
-    path('wallet/transactions/', rider_transactions, name='rider-transactions'),
-    path('payments/record/', record_job_payment, name='record-payment'),
-    path('withdrawals/request/', request_withdrawal, name='request-withdrawal'),
-    
-    # ✅ EXISTING ENDPOINTS
-    path('', include(router.urls)),
-    path('auth/token/', obtain_auth_token, name='api_token_auth'),
-    path('profile/', customer_profile, name='customer_profile'),
+    # Auth endpoints — matching your actual function names
+    path('auth/register/', views.customer_register, name='register'),
+    path('auth/login/', views.user_login, name='login'),
+    path('auth/send-code/', views.send_verification_code, name='send-code'),
+    path('auth/verify-code/', views.verify_code, name='verify-code'),
+
+    # Rider registration
+    path('auth/rider-register/', views.rider_register, name='rider-register'),
+    path('rider/submit-docs/', views.rider_submit_documents, name='rider-submit-docs'),
+
+    # Profile
+    path('customer/profile/', views.customer_profile, name='customer-profile'),
+
+    # Location
+    path('rider/update-location/', views.update_rider_location, name='update-rider-location'),
+    path('riders/nearby/', views.get_nearby_riders, name='nearby-riders'),
+
+    # Wallet & Payments
+    path('rider/wallet/', views.get_rider_wallet, name='rider-wallet'),
+    path('rider/transactions/', views.rider_transactions, name='rider-transactions'),
+    path('payment/record-job/', views.record_job_payment, name='record-job-payment'),
+    path('payment/withdraw/', views.request_withdrawal, name='request-withdrawal'),
+
+    # Paystack
+    path('paystack/initialize/', views.initialize_payment, name='paystack-initialize'),
+    path('paystack/verify/', views.verify_payment, name='paystack-verify'),
+    path('paystack/webhook/', views.paystack_webhook, name='paystack-webhook'),
 ]
