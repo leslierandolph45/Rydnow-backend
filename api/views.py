@@ -67,15 +67,14 @@ def get_or_create_customer_profile(user):
 
 
 # ==========================================
-#  VERIFICATION CODE ENDPOINTS
+#  VERIFICATION CODE ENDPOINTS — UPDATED ✅
 # ==========================================
-
 
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def send_verification_code(request):
-    """Send verification code to email or phone"""
+    """Send verification code — code returned in response for demo convenience"""
     contact = request.data.get('contact')
     contact_type = request.data.get('type', 'email')
     
@@ -85,11 +84,12 @@ def send_verification_code(request):
     code = generate_verification_code()
     cache.set(f'verify_{contact}', code, timeout=600)
     
+    # 💡 Code printed to backend logs AND returned to frontend
     print(f'🔑 Verification code for {contact}: {code}')
     
     return Response({
         'success': True,
-        'message': 'Verification code sent',
+        'message': 'Verification code sent — use the code below or 123456',
         'code': code
     })
 
@@ -98,7 +98,7 @@ def send_verification_code(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def verify_code(request):
-    """Verify the code matches"""
+    """Verify code — accepts cached code OR 123456 for demo"""
     contact = request.data.get('contact')
     code = request.data.get('code')
     
@@ -107,7 +107,8 @@ def verify_code(request):
     
     stored_code = cache.get(f'verify_{contact}')
     
-    if stored_code and str(stored_code) == str(code):
+    # ✅ Accept real code OR 123456 as demo passcode
+    if (stored_code and str(stored_code) == str(code)) or str(code) == '123456':
         return Response({
             'success': True,
             'message': 'Code verified successfully'
@@ -115,14 +116,13 @@ def verify_code(request):
     else:
         return Response({
             'success': False,
-            'error': 'Invalid or expired code'
+            'error': 'Invalid or expired code — try 123456 for demo'
         }, status=400)
 
 
 # ==========================================
 #  AUTHENTICATION — Customer & Rider Registration
 # ==========================================
-
 
 @csrf_exempt
 @api_view(['POST'])
@@ -349,7 +349,6 @@ def rider_submit_documents(request):
 #  VIEWSETS — Riders, Bookings
 # ==========================================
 
-
 class RiderViewSet(viewsets.ReadOnlyModelViewSet):
     """List and view all registered riders"""
     queryset = Rider.objects.all()
@@ -378,7 +377,6 @@ def customer_profile(request):
 # ==========================================
 #  LIVE RIDER LOCATION
 # ==========================================
-
 
 @csrf_exempt
 @api_view(['POST'])
@@ -452,7 +450,6 @@ def get_nearby_riders(request):
 # ==========================================
 #  WALLET, COMMISSION & WITHDRAWAL SYSTEM
 # ==========================================
-
 
 COMMISSION_RATE = 0.15  # 15% Platform Commission
 
@@ -643,7 +640,6 @@ def request_withdrawal(request):
 # ==========================================
 #  💳 PAYSTACK PAYMENT INTEGRATION
 # ==========================================
-
 
 PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY', '')
 
