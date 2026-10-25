@@ -48,7 +48,7 @@ RIDER_STATUS_CHOICES = [
 PAYMENT_STATUS = [
     ('pending', 'Held in Escrow'),
     ('released', 'Released'),
-    ('cancelled', 'Cancelled/Refunded'),
+    ('cancelled', 'Cancelled/Refund'),
 ]
 
 TRANSACTION_TYPES = [
@@ -94,7 +94,7 @@ RESTRICTION_REASON = [
 
 
 # ==========================================
-#  CUSTOMER WALLET — NEW!
+#  CUSTOMER WALLET
 # ==========================================
 class CustomerWallet(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -130,7 +130,6 @@ class CustomerWallet(models.Model):
             return False, 'Insufficient wallet balance'
         
         self.balance = round(float(self.balance) - amount, 2)
-        # Use bonus first, then withdrawable funds
         if float(self.bonus_credit) >= amount:
             self.bonus_credit = round(float(self.bonus_credit) - amount, 2)
         else:
@@ -167,7 +166,7 @@ class CustomerWallet(models.Model):
 
 
 # ==========================================
-#  WALLET TRANSACTION — NEW!
+#  WALLET TRANSACTION
 # ==========================================
 class WalletTransaction(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -197,12 +196,12 @@ class CustomerProfile(models.Model):
     phone = models.CharField(max_length=20, blank=True, null=True)
     profile_photo = models.ImageField(upload_to='profiles/', blank=True, null=True)
 
-    # Email & Phone Verification
-    email_verified = models.BooleanField(default=False)
-    phone_verified = models.BooleanField(default=False)
-    email_verification_token = models.CharField(max_length=255, blank=True, null=True)
-    sms_verification_code = models.CharField(max_length=6, blank=True, null=True)
-    sms_code_expires_at = models.DateTimeField(blank=True, null=True)
+    # ─── VERIFICATION — COMMENTED OUT UNTIL DB MIGRATION RUNS ───
+    # email_verified = models.BooleanField(default=False)
+    # phone_verified = models.BooleanField(default=False)
+    # email_verification_token = models.CharField(max_length=255, blank=True, null=True)
+    # sms_verification_code = models.CharField(max_length=6, blank=True, null=True)
+    # sms_code_expires_at = models.DateTimeField(blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -213,7 +212,6 @@ class CustomerProfile(models.Model):
     def save(self, *args, **kwargs):
         is_new = self.pk is None
         super().save(*args, **kwargs)
-        # Create wallet automatically when customer is created
         if is_new:
             CustomerWallet.objects.get_or_create(user=self.user)
 
@@ -231,26 +229,24 @@ class RiderProfile(models.Model):
     motorbike_model = models.CharField(max_length=200, blank=True)
     license_number = models.CharField(max_length=100, blank=True)
 
-    # Live Location
     current_lat = models.FloatField(null=True, blank=True, help_text="Current latitude")
     current_lng = models.FloatField(null=True, blank=True, help_text="Current longitude")
     last_location_update = models.DateTimeField(null=True, blank=True, help_text="Last time location was updated")
 
-    # Document Uploads
     ghana_card_doc = models.CharField(max_length=500, blank=True)
     passport_photo = models.CharField(max_length=500, blank=True)
     license_doc = models.CharField(max_length=500, blank=True)
 
-    # Verification & Approval
     status = models.CharField(max_length=50, choices=RIDER_STATUS_CHOICES, default='pending')
     is_online = models.BooleanField(default=False)
-    email_verified = models.BooleanField(default=False)
-    phone_verified = models.BooleanField(default=False)
-    email_verification_token = models.CharField(max_length=255, blank=True, null=True)
-    sms_verification_code = models.CharField(max_length=6, blank=True, null=True)
-    sms_code_expires_at = models.DateTimeField(blank=True, null=True)
 
-    # Restriction Flag
+    # ─── VERIFICATION — COMMENTED OUT UNTIL DB MIGRATION RUNS ───
+    # email_verified = models.BooleanField(default=False)
+    # phone_verified = models.BooleanField(default=False)
+    # email_verification_token = models.CharField(max_length=255, blank=True, null=True)
+    # sms_verification_code = models.CharField(max_length=6, blank=True, null=True)
+    # sms_code_expires_at = models.DateTimeField(blank=True, null=True)
+
     is_restricted = models.BooleanField(default=False, help_text="If checked, rider cannot accept bookings")
     restriction_notes = models.TextField(blank=True, help_text="Why was this rider restricted?")
     restricted_until = models.DateTimeField(null=True, blank=True, help_text="Leave blank for permanent restriction")
@@ -271,7 +267,6 @@ class Rider(models.Model):
     phone = models.CharField(max_length=20)
     location = models.CharField(max_length=255, blank=True, null=True)
 
-    # Live Location
     current_lat = models.FloatField(null=True, blank=True, help_text="Current latitude")
     current_lng = models.FloatField(null=True, blank=True, help_text="Current longitude")
     last_location_update = models.DateTimeField(null=True, blank=True, help_text="Last time location was updated")
@@ -279,7 +274,6 @@ class Rider(models.Model):
     is_online = models.BooleanField(default=False)
     verification_status = models.CharField(max_length=20, choices=VERIFICATION_STATUS, default='pending')
 
-    # Rider Approval Status
     approval_status = models.CharField(
         max_length=20,
         choices=[
@@ -293,7 +287,6 @@ class Rider(models.Model):
     approved_at = models.DateTimeField(null=True, blank=True)
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_riders')
 
-    # Documents
     id_card = models.ImageField(upload_to='documents/ids/', null=True, blank=True)
     driver_license = models.ImageField(upload_to='documents/licenses/', null=True, blank=True)
     vehicle_registration = models.ImageField(upload_to='documents/vehicles/', null=True, blank=True)
@@ -301,7 +294,6 @@ class Rider(models.Model):
 
     admin_notes = models.TextField(blank=True, null=True, help_text="Notes for approval/rejection")
 
-    # Restriction Flag
     is_restricted = models.BooleanField(default=False, help_text="If checked, rider cannot accept bookings")
     restriction_reason = models.CharField(max_length=50, choices=RESTRICTION_REASON, blank=True)
     restriction_details = models.TextField(blank=True)
@@ -343,7 +335,6 @@ class Booking(models.Model):
 
     parcel_details = models.TextField(blank=True, null=True)
 
-    # Escrow Payment
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='pending')
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     platform_commission = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
