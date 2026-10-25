@@ -19,14 +19,14 @@ class CustomerProfileAdmin(admin.ModelAdmin):
 
 
 # ══════════════════════════════════════════════════════════
-# 👥 USER ADMIN — SIMPLIFIED (no inline to avoid conflict)
+# 👥 USER ADMIN
 # ══════════════════════════════════════════════════════════
 admin.site.unregister(User)
 admin.site.register(User, BaseUserAdmin)
 
 
 # ══════════════════════════════════════════════════════════
-# 👥 RIDER MANAGEMENT — SECTION 1
+# 👥 RIDER MANAGEMENT
 # ══════════════════════════════════════════════════════════
 @admin.register(Rider)
 class RiderAdmin(admin.ModelAdmin):
@@ -82,7 +82,7 @@ class RiderProfileAdmin(admin.ModelAdmin):
 
 
 # ══════════════════════════════════════════════════════════
-# 📋 BOOKING MANAGEMENT — SECTION 2
+# 📋 BOOKING MANAGEMENT
 # ══════════════════════════════════════════════════════════
 @admin.register(Booking)
 class BookingAdmin(admin.ModelAdmin):
@@ -117,7 +117,7 @@ class BookingAdmin(admin.ModelAdmin):
 
 
 # ══════════════════════════════════════════════════════════
-# 💰 FINANCE & WALLET — SECTION 3
+# 💰 FINANCE & WALLET
 # ══════════════════════════════════════════════════════════
 @admin.register(RiderWallet)
 class RiderWalletAdmin(admin.ModelAdmin):
@@ -167,7 +167,7 @@ class WithdrawalRequestAdmin(admin.ModelAdmin):
 
 
 # ══════════════════════════════════════════════════════════
-# 🛡️ COMPLAINTS & REVIEWS — SECTION 4
+# 🛡️ COMPLAINTS & REVIEWS
 # ══════════════════════════════════════════════════════════
 @admin.register(RiderComplaint)
 class RiderComplaintAdmin(admin.ModelAdmin):
