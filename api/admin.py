@@ -83,13 +83,10 @@ class RiderAdmin(admin.ModelAdmin):
 
 @admin.register(RiderProfile)
 class RiderProfileAdmin(admin.ModelAdmin):
-    # ✅ FIXED: Removed is_restricted & restricted_until — they don't exist on RiderProfile model
     list_display = ('full_name', 'phone', 'status', 'is_online', 'created_at')
     list_filter = ('status', 'is_online', 'created_at')
     search_fields = ('full_name', 'phone', 'email')
     readonly_fields = ('created_at',)
-    
-    # ✅ FIXED: Removed actions that referenced non-existent fields
     actions = []
 
 
