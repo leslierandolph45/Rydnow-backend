@@ -1,4 +1,4 @@
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.response import Response
 from rest_framework import status, viewsets
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -10,8 +10,10 @@ from django.utils import timezone
 from django.conf import settings
 from django.http import HttpResponse
 from django.core.cache import cache
+from math import radians, cos, sin, asin, sqrt
 import random
 from .models import CustomerProfile, RiderProfile, Rider, Booking, RiderWallet, Transaction, WithdrawalRequest
+from .serializers import BookingSerializer
 import uuid
 import json
 import os
@@ -27,31 +29,22 @@ def generate_verification_code():
     return str(random.randint(100000, 999999))
 
 
-# 🇬🇧🇬🇭 FLEXIBLE PHONE VALIDATION — accepts ANY reasonable format
+# 🇬🇭 FLEXIBLE PHONE VALIDATION
 def clean_and_validate_phone(phone):
     if not phone:
         return None, "Phone number is required"
     
-    # Remove ALL spaces first
     cleaned = phone.replace(' ', '').strip()
     
-    # ✅ Format 1: 0244203327 (10 digits starting with 0)
     if cleaned.startswith('0') and len(cleaned) == 10 and cleaned.isdigit():
         return cleaned, None
-    
-    # ✅ Format 2: +233244203327 (starts with +233, 13 chars total)
     if cleaned.startswith('+233') and len(cleaned) == 13:
         return cleaned, None
-    
-    # ✅ Format 3: 244203327 (9 digits — add leading 0)
     if len(cleaned) == 9 and cleaned.isdigit():
         return '0' + cleaned, None
-    
-    # ✅ Format 4: 233244203327 (no + — add it)
     if cleaned.startswith('233') and len(cleaned) == 12 and cleaned.isdigit():
         return '+' + cleaned, None
     
-    # ❌ Invalid
     return None, "Enter a valid Ghanaian number — e.g. 0241234567 or +233241234567"
 
 
@@ -65,6 +58,87 @@ def get_or_create_customer_profile(user):
         }
     )
     return profile
+
+
+# ==========================================
+#  📍 DISTANCE CALCULATION — Haversine Formula
+# ==========================================
+def calculate_distance(lat1, lng1, lat2, lng2):
+    """Calculate distance between two points in km"""
+    try:
+        lat1, lng1, lat2, lng2 = float(lat1), float(lng1), float(lat2), float(lng2)
+        lat1, lng1, lat2, lng2 = map(radians, [lat1, lng1, lat2, lng2])
+        
+        dlat = lat2 - lat1
+        dlng = lng2 - lng1
+        a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlng/2)**2
+        c = 2 * asin(sqrt(a))
+        return 6371 * c
+    except (TypeError, ValueError):
+        return 999  # Return large distance if coordinates invalid
+
+
+# ==========================================
+#  📍 FIND NEAREST RIDER
+# ==========================================
+def find_nearest_available_rider(pickup_lat, pickup_lng, max_distance_km=15.0):
+    """Find closest online & approved rider within range"""
+    try:
+        # Get available riders from RiderProfile
+        profile_riders = list(RiderProfile.objects.filter(
+            is_online=True,
+            status='approved',
+            current_lat__isnull=False,
+            current_lng__isnull=False
+        ).values('id', 'full_name', 'phone', 'current_lat', 'current_lng'))
+
+        # Get available riders from legacy Rider model
+        legacy_riders = list(Rider.objects.filter(
+            is_online=True,
+            verification_status='approved',
+            current_lat__isnull=False,
+            current_lng__isnull=False
+        ).values('id', 'name', 'phone', 'current_lat', 'current_lng'))
+
+        all_riders = []
+        
+        # Normalize RiderProfile format
+        for r in profile_riders:
+            dist = calculate_distance(pickup_lat, pickup_lng, r['current_lat'], r['current_lng'])
+            all_riders.append({
+                'id': r['id'],
+                'name': r['full_name'],
+                'phone': r['phone'],
+                'lat': r['current_lat'],
+                'lng': r['current_lng'],
+                'distance_km': dist,
+                'type': 'profile'
+            })
+        
+        # Normalize legacy Rider format
+        for r in legacy_riders:
+            dist = calculate_distance(pickup_lat, pickup_lng, r['current_lat'], r['current_lng'])
+            all_riders.append({
+                'id': r['id'],
+                'name': r['name'],
+                'phone': r['phone'],
+                'lat': r['current_lat'],
+                'lng': r['current_lng'],
+                'distance_km': dist,
+                'type': 'legacy'
+            })
+
+        # Filter and sort by distance
+        in_range = [r for r in all_riders if r['distance_km'] <= max_distance_km]
+        if not in_range:
+            return None, 0
+        
+        in_range.sort(key=lambda x: x['distance_km'])
+        return in_range[0], in_range[0]['distance_km']
+    
+    except Exception as e:
+        print(f"⚠️ Error finding nearest rider: {e}")
+        return None, 0
 
 
 # ==========================================
@@ -352,13 +426,77 @@ def rider_submit_documents(request):
 class RiderViewSet(viewsets.ReadOnlyModelViewSet):
     """List and view all registered riders"""
     queryset = Rider.objects.all()
-    permission_classes = [AllowAny]  # ✅ Added
+    permission_classes = [AllowAny]
 
 
 class BookingViewSet(viewsets.ModelViewSet):
-    """Full CRUD for bookings"""
+    """Bookings — with auto nearest rider assignment! ✅"""
     queryset = Booking.objects.all()
-    permission_classes = [AllowAny]  # ✅ ADDED — THIS FIXES THE 401 ERROR!
+    permission_classes = [AllowAny]
+    serializer_class = BookingSerializer
+
+    def create(self, request, *args, **kwargs):
+        """Create booking + auto-find & assign nearest rider"""
+        try:
+            data = request.data.copy()
+            
+            pickup_lat = data.get('pickup_lat')
+            pickup_lng = data.get('pickup_lng')
+            
+            nearest_rider = None
+            distance_km = 0
+            
+            # Search for nearest rider if we have coordinates
+            if pickup_lat and pickup_lng:
+                nearest_rider, distance_km = find_nearest_available_rider(
+                    float(pickup_lat),
+                    float(pickup_lng),
+                    max_distance_km=15.0
+                )
+            
+            # Create the booking
+            serializer = self.get_serializer(data=data)
+            serializer.is_valid(raise_exception=True)
+            booking = serializer.save(status='searching_rider')
+            
+            # Assign rider if found
+            if nearest_rider:
+                booking.status = 'assigned'
+                booking.rider_id = nearest_rider['id']
+                booking.rider_name = nearest_rider['name']
+                if hasattr(booking, 'distance_to_pickup'):
+                    booking.distance_to_pickup = round(distance_km, 2)
+                booking.save()
+                
+                return Response({
+                    'success': True,
+                    'message': f'✅ Rider found — {nearest_rider["name"]} is {distance_km:.2f}km away',
+                    'booking': BookingSerializer(booking).data,
+                    'assigned_rider': {
+                        'id': nearest_rider['id'],
+                        'name': nearest_rider['name'],
+                        'phone': nearest_rider['phone'],
+                        'distance_km': round(distance_km, 2)
+                    }
+                }, status=status.HTTP_201_CREATED)
+            
+            # No rider found — still searching
+            return Response({
+                'success': True,
+                'message': '🔍 Booking created — searching for nearby riders...',
+                'booking': BookingSerializer(booking).data,
+                'assigned_rider': None
+            }, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            import traceback
+            print("❌ Booking Error:", str(e))
+            print(traceback.format_exc())
+            return Response({
+                'success': False,
+                'error': str(e),
+                'detail': 'Could not create booking. Check all required fields.'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
@@ -651,7 +789,7 @@ PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY', '')
 
 @csrf_exempt
 @api_view(['POST'])
-@permission_classes([AllowAny])  # ✅ Changed from IsAuthenticated — allows payment without login
+@permission_classes([AllowAny])
 def initialize_payment(request):
     """Initialize Paystack payment for a booking"""
     try:
@@ -680,9 +818,7 @@ def initialize_payment(request):
             'email': email,
             'amount': amount_kobo,
             'reference': f"RYDNOW-{uuid.uuid4().hex[:12].upper()}",
-            'metadata': {
-                'booking_id': str(booking_id),
-            }
+            'metadata': {'booking_id': str(booking_id)}
         }
 
         resp = requests.post(
@@ -727,9 +863,7 @@ def verify_payment(request):
         return Response({'detail': 'Reference required.'}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        headers = {
-            'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}',
-        }
+        headers = {'Authorization': f'Bearer {PAYSTACK_SECRET_KEY}'}
         resp = requests.get(
             f'https://api.paystack.co/transaction/verify/{reference}',
             headers=headers,
