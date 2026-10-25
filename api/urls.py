@@ -1,3 +1,17 @@
+from django.urls import path, include  # ✅ Make sure INCLUDE is here!
+from . import views
+from rest_framework.routers import DefaultRouter  # ✅ Make sure this is here!
+
+
+router = DefaultRouter()
+router.register(r'bookings', views.BookingViewSet, basename='booking')
+
+
+urlpatterns = [
+    # ... all your existing paths ...
+    path('', include(router.urls)),  # ✅ And this at the END
+]
+
 from django.urls import path, include
 from . import views
 from rest_framework.routers import DefaultRouter
