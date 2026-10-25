@@ -18,19 +18,11 @@ class CustomerProfileAdmin(admin.ModelAdmin):
     readonly_fields = ('created_at', 'updated_at')
 
 
-class CustomerProfileInline(admin.StackedInline):
-    model = CustomerProfile
-    can_delete = False
-    verbose_name_plural = 'Profile'
-
-
-class CustomUserAdmin(BaseUserAdmin):
-    inlines = (CustomerProfileInline,)
-    list_display = ('username', 'email', 'first_name', 'last_name', 'is_staff')
-
-
+# ══════════════════════════════════════════════════════════
+# 👥 USER ADMIN — SIMPLIFIED (no inline to avoid conflict)
+# ══════════════════════════════════════════════════════════
 admin.site.unregister(User)
-admin.site.register(User, CustomUserAdmin)
+admin.site.register(User, BaseUserAdmin)
 
 
 # ══════════════════════════════════════════════════════════
@@ -87,7 +79,6 @@ class RiderProfileAdmin(admin.ModelAdmin):
     list_filter = ('status', 'is_online', 'created_at')
     search_fields = ('full_name', 'phone', 'email')
     readonly_fields = ('created_at',)
-    # ⚠️ Removed empty actions list — that was causing the error!
 
 
 # ══════════════════════════════════════════════════════════
