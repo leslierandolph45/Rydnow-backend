@@ -212,8 +212,9 @@ class CustomerProfile(models.Model):
     def save(self, *args, **kwargs):
         is_new = self.pk is None
         super().save(*args, **kwargs)
-        if is_new:
-            CustomerWallet.objects.get_or_create(user=self.user)
+        # ─── WALLET AUTO-CREATE — COMMENTED OUT UNTIL DB MIGRATION RUNS ───
+        # if is_new:
+        #     CustomerWallet.objects.get_or_create(user=self.user)
 
 
 # ==========================================
