@@ -47,8 +47,8 @@ class RiderAdmin(admin.ModelAdmin):
     fieldsets = (
         ('Personal Info', {'fields': ('name', 'email', 'phone', 'location', 'user')}),
         ('Status', {'fields': ('verification_status', 'is_online')}),
-        ('📋 Submitted Documents', {'fields': ('id_card', 'driver_license', 'vehicle_registration', 'insurance')}),
-        ('🛡️ Restriction Control', {'fields': ('is_restricted', 'restriction_reason', 'restriction_details', 'restricted_until')}),
+        ('Submitted Documents', {'fields': ('id_card', 'driver_license', 'vehicle_registration', 'insurance')}),
+        ('Restriction Control', {'fields': ('is_restricted', 'restriction_reason', 'restriction_details', 'restricted_until')}),
         ('Admin Notes', {'fields': ('admin_notes',)}),
     )
     
@@ -87,7 +87,7 @@ class RiderProfileAdmin(admin.ModelAdmin):
     list_filter = ('status', 'is_online', 'created_at')
     search_fields = ('full_name', 'phone', 'email')
     readonly_fields = ('created_at',)
-    actions = []
+    # ⚠️ Removed empty actions list — that was causing the error!
 
 
 # ══════════════════════════════════════════════════════════
@@ -108,7 +108,7 @@ class BookingAdmin(admin.ModelAdmin):
                                  'distance_km', 'price')}),
         ('Customer', {'fields': ('customer', 'customer_name', 'customer_phone', 'customer_email')}),
         ('Rider', {'fields': ('rider', 'status')}),
-        ('💰 Payment Details', {'fields': ('total_amount', 'platform_commission',
+        ('Payment Details', {'fields': ('total_amount', 'platform_commission',
                                            'rider_amount', 'payment_status',
                                            'payment_method', 'transaction_reference', 'paid_at')}),
         ('Parcel/Waste Details', {'fields': ('parcel_details',)}),
@@ -187,8 +187,7 @@ class RiderComplaintAdmin(admin.ModelAdmin):
     readonly_fields = ('created_at', 'resolved_at')
     
     fieldsets = (
-        ('Complaint Info', {'fields': ('rider', 'rider_profile', 'booking',
-                                       'complaint_type', 'description')}),
+        ('Complaint Info', {'fields': ('rider', 'booking', 'complaint_type', 'description')}),
         ('Reporter', {'fields': ('reporter_name', 'reporter_phone')}),
         ('Status & Action', {'fields': ('status', 'admin_notes', 'action_taken', 'resolved_at')}),
     )
@@ -198,8 +197,6 @@ class RiderComplaintAdmin(admin.ModelAdmin):
     def subject_rider(self, obj):
         if obj.rider:
             return obj.rider.name
-        elif obj.rider_profile:
-            return obj.rider_profile.full_name
         return "Unknown Rider"
     subject_rider.short_description = 'Rider'
     
