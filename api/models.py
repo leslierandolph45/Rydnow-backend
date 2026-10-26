@@ -14,13 +14,11 @@ COMMISSION_RATE = 0.15  # 15% Platform Commission
 #  CHOICE CONSTANTS
 # ==========================================
 
-
 SERVICE_CHOICES = [
     ('okada', 'Okada'),
     ('parcel', 'Parcel Delivery'),
     ('waste-bin', 'Waste Collection'),
 ]
-
 
 STATUS_CHOICES = [
     ('pending', 'Pending'),
@@ -31,14 +29,12 @@ STATUS_CHOICES = [
     ('cancelled', 'Cancelled'),
 ]
 
-
 VERIFICATION_STATUS = [
     ('pending', 'Pending Review'),
     ('submitted', 'Documents Submitted'),
-    ('approved', '✅ Approved'),
-    ('rejected', '❌ Rejected'),
+    ('approved', 'Approved'),
+    ('rejected', 'Rejected'),
 ]
-
 
 RIDER_STATUS_CHOICES = [
     ('pending', 'Pending'),
@@ -49,13 +45,11 @@ RIDER_STATUS_CHOICES = [
     ('inactive', 'Inactive'),
 ]
 
-
 PAYMENT_STATUS = [
     ('pending', 'Held in Escrow'),
     ('released', 'Released'),
     ('cancelled', 'Cancelled/Refund'),
 ]
-
 
 TRANSACTION_TYPES = [
     ('job_payment', 'Job Payment'),
@@ -66,22 +60,19 @@ TRANSACTION_TYPES = [
     ('bonus', 'Bonus Credit'),
 ]
 
-
 WITHDRAWAL_STATUS = [
     ('pending', 'Processing'),
     ('completed', 'Sent'),
     ('failed', 'Failed'),
 ]
 
-
 COMPLAINT_STATUS = [
-    ('pending', '🔄 Under Review'),
-    ('resolved', '✅ Resolved — No Action'),
-    ('warning_issued', '⚠️ Warning Issued'),
-    ('restricted', '🚫 Restricted'),
-    ('banned', '❌ Banned'),
+    ('pending', 'Under Review'),
+    ('resolved', 'Resolved — No Action'),
+    ('warning_issued', 'Warning Issued'),
+    ('restricted', 'Restricted'),
+    ('banned', 'Banned'),
 ]
-
 
 COMPLAINT_TYPE = [
     ('late_arrival', 'Late Arrival'),
@@ -92,7 +83,6 @@ COMPLAINT_TYPE = [
     ('item_damaged', 'Item Damaged/Lost'),
     ('other', 'Other'),
 ]
-
 
 RESTRICTION_REASON = [
     ('too_many_complaints', 'Too Many Complaints'),
@@ -115,13 +105,11 @@ class CustomerWallet(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-
     def __str__(self):
         try:
             return f"{self.user.username} — Wallet: GH₵{self.balance}"
         except:
             return f"Wallet #{self.id}"
-
 
     def deposit(self, amount, is_bonus=False):
         amount = round(float(amount), 2)
@@ -138,7 +126,6 @@ class CustomerWallet(models.Model):
             amount=amount,
             description='Funds added to wallet'
         )
-
 
     def pay_for_delivery(self, amount):
         amount = round(float(amount), 2)
@@ -162,7 +149,6 @@ class CustomerWallet(models.Model):
             description='Payment for delivery'
         )
         return True, 'Payment successful'
-
 
     def withdraw_funds(self, amount):
         amount = round(float(amount), 2)
@@ -196,10 +182,8 @@ class WalletTransaction(models.Model):
     status = models.CharField(max_length=20, default='completed')
     created_at = models.DateTimeField(auto_now_add=True)
 
-
     class Meta:
         ordering = ['-created_at']
-
 
     def __str__(self):
         try:
@@ -218,10 +202,8 @@ class CustomerProfile(models.Model):
     phone = models.CharField(max_length=20, blank=True, null=True)
     profile_photo = models.ImageField(upload_to='profiles/', blank=True, null=True)
 
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
 
     def __str__(self):
         try:
@@ -229,13 +211,9 @@ class CustomerProfile(models.Model):
         except:
             return f"Customer #{self.id}"
 
-
     def save(self, *args, **kwargs):
         is_new = self.pk is None
         super().save(*args, **kwargs)
-        # Wallet auto-create disabled until migration
-        # if is_new:
-        #     CustomerWallet.objects.get_or_create(user=self.user)
 
 
 # ==========================================
@@ -244,7 +222,6 @@ class CustomerProfile(models.Model):
 class RiderProfile(models.Model):
     STATUS_CHOICES = RIDER_STATUS_CHOICES
 
-
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     full_name = models.CharField(max_length=200)
     email = models.EmailField()
@@ -252,28 +229,22 @@ class RiderProfile(models.Model):
     motorbike_model = models.CharField(max_length=200, blank=True)
     license_number = models.CharField(max_length=100, blank=True)
 
-
     current_lat = models.FloatField(null=True, blank=True, help_text="Current latitude")
     current_lng = models.FloatField(null=True, blank=True, help_text="Current longitude")
     last_location_update = models.DateTimeField(null=True, blank=True, help_text="Last time location was updated")
-
 
     ghana_card_doc = models.CharField(max_length=500, blank=True)
     passport_photo = models.CharField(max_length=500, blank=True)
     license_doc = models.CharField(max_length=500, blank=True)
 
-
     status = models.CharField(max_length=50, choices=RIDER_STATUS_CHOICES, default='pending')
     is_online = models.BooleanField(default=False)
-
 
     is_restricted = models.BooleanField(default=False, help_text="If checked, rider cannot accept bookings")
     restriction_notes = models.TextField(blank=True, help_text="Why was this rider restricted?")
     restricted_until = models.DateTimeField(null=True, blank=True, help_text="Leave blank for permanent restriction")
 
-
     created_at = models.DateTimeField(auto_now_add=True)
-
 
     def __str__(self):
         try:
@@ -292,62 +263,28 @@ class Rider(models.Model):
     phone = models.CharField(max_length=20)
     location = models.CharField(max_length=255, blank=True, null=True)
 
-
     current_lat = models.FloatField(null=True, blank=True, help_text="Current latitude")
     current_lng = models.FloatField(null=True, blank=True, help_text="Current longitude")
     last_location_update = models.DateTimeField(null=True, blank=True, help_text="Last time location was updated")
 
-
     is_online = models.BooleanField(default=False)
     verification_status = models.CharField(max_length=20, choices=VERIFICATION_STATUS, default='pending')
 
-
-    approval_status = models.CharField(
-        max_length=20,
-        choices=[
-            ('pending', 'Pending Email & Phone Verification'),
-            ('documents_submitted', 'Documents Submitted — Under Review'),
-            ('approved', '✅ Approved — Can Accept Jobs'),
-            ('rejected', '❌ Rejected — See Admin Notes'),
-        ],
-        default='pending'
-    )
-    approved_at = models.DateTimeField(null=True, blank=True)
-    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_riders')
-
-
-    id_card = models.ImageField(upload_to='documents/ids/', null=True, blank=True)
-    driver_license = models.ImageField(upload_to='documents/licenses/', null=True, blank=True)
-    vehicle_registration = models.ImageField(upload_to='documents/vehicles/', null=True, blank=True)
-    insurance = models.ImageField(upload_to='documents/insurance/', null=True, blank=True)
-
-
-    admin_notes = models.TextField(blank=True, null=True, help_text="Notes for approval/rejection")
-
-
     is_restricted = models.BooleanField(default=False, help_text="If checked, rider cannot accept bookings")
-    restriction_reason = models.CharField(max_length=50, choices=RESTRICTION_REASON, blank=True)
-    restriction_details = models.TextField(blank=True)
-    restricted_at = models.DateTimeField(null=True, blank=True)
-    restricted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='restricted_by_admin')
-
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-
     def __str__(self):
         try:
-            status_display = self.get_approval_status_display() if hasattr(self, 'get_approval_status_display') else self.verification_status
-            return f"{self.name} — {status_display}"
+            return f"{self.name} — {self.verification_status}"
         except:
             return f"Rider #{self.id} — {self.name}"
-
 
     @property
     def is_approved(self):
         try:
-            return self.approval_status == 'approved' and not self.is_restricted
+            return self.verification_status == 'approved' and not self.is_restricted
         except:
             return False
 
@@ -366,19 +303,15 @@ class Booking(models.Model):
     distance_km = models.FloatField(null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
-
     customer = models.ForeignKey(CustomerProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
     customer_name = models.CharField(max_length=100)
     customer_phone = models.CharField(max_length=20)
     customer_email = models.EmailField(blank=True, null=True)
 
-
     rider = models.ForeignKey(Rider, on_delete=models.SET_NULL, null=True, blank=True)
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='pending')
 
-
     parcel_details = models.TextField(blank=True, null=True)
-
 
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='pending')
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -388,10 +321,8 @@ class Booking(models.Model):
     transaction_reference = models.CharField(max_length=255, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
 
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
 
     def __str__(self):
         try:
@@ -399,7 +330,6 @@ class Booking(models.Model):
             return f"{service_display} — {self.customer_name}"
         except:
             return f"Booking #{self.id}"
-
 
     def split_payment(self):
         if self.total_amount and not self.platform_commission:
@@ -418,13 +348,11 @@ class RiderWallet(models.Model):
     total_withdrawn = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     updated_at = models.DateTimeField(auto_now=True)
 
-
     def deposit(self, amount):
         amount = round(float(amount), 2)
         self.balance = round(float(self.balance) + amount, 2)
         self.total_earned = round(float(self.total_earned) + amount, 2)
         self.save()
-
 
     def withdraw(self, amount):
         amount = round(float(amount), 2)
@@ -434,7 +362,6 @@ class RiderWallet(models.Model):
             self.save()
             return True
         return False
-
 
     def __str__(self):
         try:
@@ -447,95 +374,4 @@ class RiderWallet(models.Model):
 #  TRANSACTION HISTORY
 # ==========================================
 class Transaction(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='transactions')
-    booking = models.ForeignKey(Booking, on_delete=models.SET_NULL, null=True, blank=True)
-    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    commission = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    rider_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    status = models.CharField(max_length=20, default='completed')
-    description = models.CharField(max_length=255, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-
-    class Meta:
-        ordering = ['-created_at']
-
-
-    def __str__(self):
-        try:
-            type_display = self.get_transaction_type_display() if hasattr(self, 'get_transaction_type_display') else self.transaction_type
-            return f"{self.rider.name} — {type_display} — GH₵{self.amount}"
-        except:
-            return f"Transaction #{self.id}"
-
-
-# ==========================================
-#  WITHDRAWAL REQUEST
-# ==========================================
-class WithdrawalRequest(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='withdrawals')
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    mobile_money_number = models.CharField(max_length=20)
-    network = models.CharField(max_length=20, blank=True)
-    status = models.CharField(max_length=20, choices=WITHDRAWAL_STATUS, default='pending')
-    created_at = models.DateTimeField(auto_now_add=True)
-    processed_at = models.DateTimeField(null=True, blank=True)
-
-
-    def __str__(self):
-        try:
-            return f"Withdrawal — {self.rider.name} — GH₵{self.amount} — {self.status}"
-        except:
-            return f"Withdrawal #{self.id}"
-
-
-# ==========================================
-#  RIDER COMPLAINTS & RESTRICTIONS
-# ==========================================
-class RiderComplaint(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-
-
-    rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='complaints', null=True, blank=True)
-    rider_profile = models.ForeignKey(RiderProfile, on_delete=models.CASCADE, related_name='complaints', null=True, blank=True)
-
-
-    booking = models.ForeignKey(Booking, on_delete=models.SET_NULL, null=True, blank=True, related_name='complaints')
-
-
-    reporter_name = models.CharField(max_length=200, blank=True)
-    reporter_phone = models.CharField(max_length=20, blank=True)
-
-
-    complaint_type = models.CharField(max_length=50, choices=COMPLAINT_TYPE)
-    description = models.TextField(help_text="What happened?")
-    status = models.CharField(max_length=20, choices=COMPLAINT_STATUS, default='pending')
-
-
-    admin_notes = models.TextField(blank=True, help_text="Your notes on this complaint")
-    action_taken = models.CharField(max_length=100, blank=True)
-
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    resolved_at = models.DateTimeField(null=True, blank=True)
-
-
-    class Meta:
-        ordering = ['-created_at']
-
-
-    def __str__(self):
-        rider_name = "Unknown Rider"
-        try:
-            if self.rider:
-                rider_name = self.rider.name
-            elif self.rider_profile:
-                rider_name = self.rider_profile.full_name
-            type_display = self.get_complaint_type_display() if hasattr(self, 'get_complaint_type_display') else self.complaint_type
-            status_display = self.get_status_display() if hasattr(self, 'get_status_display') else self.status
-            return f"{rider_name} — {type_display} — {status_display}"
-        except:
-            return f"Complaint #{self.id}"
+    id = models.UUIDField
