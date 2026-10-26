@@ -4,15 +4,7 @@ import uuid
 from django.utils import timezone
 
 
-# ==========================================
-#  CONFIGURATION
-# ==========================================
-COMMISSION_RATE = 0.15  # 15% Platform Commission
-
-
-# ==========================================
-#  CHOICE CONSTANTS
-# ==========================================
+COMMISSION_RATE = 0.15
 
 SERVICE_CHOICES = [
     ('okada', 'Okada'),
@@ -93,9 +85,6 @@ RESTRICTION_REASON = [
 ]
 
 
-# ==========================================
-#  CUSTOMER WALLET
-# ==========================================
 class CustomerWallet(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='customer_wallet')
@@ -131,7 +120,6 @@ class CustomerWallet(models.Model):
         amount = round(float(amount), 2)
         if float(self.balance) < amount:
             return False, 'Insufficient wallet balance'
-        
         self.balance = round(float(self.balance) - amount, 2)
         if float(self.bonus_credit) >= amount:
             self.bonus_credit = round(float(self.bonus_credit) - amount, 2)
@@ -139,7 +127,6 @@ class CustomerWallet(models.Model):
             remaining = round(amount - float(self.bonus_credit), 2)
             self.bonus_credit = 0.00
             self.withdrawable_balance = round(float(self.withdrawable_balance) - remaining, 2)
-        
         self.save()
         WalletTransaction.objects.create(
             wallet=self,
@@ -154,7 +141,6 @@ class CustomerWallet(models.Model):
         amount = round(float(amount), 2)
         if float(self.withdrawable_balance) < amount:
             return False, 'Insufficient withdrawable balance'
-        
         self.withdrawable_balance = round(float(self.withdrawable_balance) - amount, 2)
         self.balance = round(float(self.balance) - amount, 2)
         self.save()
@@ -168,9 +154,6 @@ class CustomerWallet(models.Model):
         return True, 'Withdrawal successful'
 
 
-# ==========================================
-#  WALLET TRANSACTION
-# ==========================================
 class WalletTransaction(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     wallet = models.ForeignKey(CustomerWallet, on_delete=models.CASCADE, related_name='transactions', null=True, blank=True)
@@ -192,16 +175,12 @@ class WalletTransaction(models.Model):
             return f"Transaction #{self.id}"
 
 
-# ==========================================
-#  CUSTOMER PROFILE
-# ==========================================
 class CustomerProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='customer_profile')
     full_name = models.CharField(max_length=200, blank=True)
     email = models.EmailField(blank=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
     profile_photo = models.ImageField(upload_to='profiles/', blank=True, null=True)
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -216,34 +195,25 @@ class CustomerProfile(models.Model):
         super().save(*args, **kwargs)
 
 
-# ==========================================
-#  RIDER PROFILE
-# ==========================================
 class RiderProfile(models.Model):
     STATUS_CHOICES = RIDER_STATUS_CHOICES
-
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     full_name = models.CharField(max_length=200)
     email = models.EmailField()
     phone = models.CharField(max_length=30, blank=True)
     motorbike_model = models.CharField(max_length=200, blank=True)
     license_number = models.CharField(max_length=100, blank=True)
-
     current_lat = models.FloatField(null=True, blank=True, help_text="Current latitude")
     current_lng = models.FloatField(null=True, blank=True, help_text="Current longitude")
     last_location_update = models.DateTimeField(null=True, blank=True, help_text="Last time location was updated")
-
     ghana_card_doc = models.CharField(max_length=500, blank=True)
     passport_photo = models.CharField(max_length=500, blank=True)
     license_doc = models.CharField(max_length=500, blank=True)
-
     status = models.CharField(max_length=50, choices=RIDER_STATUS_CHOICES, default='pending')
     is_online = models.BooleanField(default=False)
-
     is_restricted = models.BooleanField(default=False, help_text="If checked, rider cannot accept bookings")
     restriction_notes = models.TextField(blank=True, help_text="Why was this rider restricted?")
     restricted_until = models.DateTimeField(null=True, blank=True, help_text="Leave blank for permanent restriction")
-
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -253,25 +223,18 @@ class RiderProfile(models.Model):
             return f"RiderProfile #{self.id}"
 
 
-# ==========================================
-#  RIDER
-# ==========================================
 class Rider(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, null=True, blank=True)
     name = models.CharField(max_length=100)
     email = models.EmailField(null=True, blank=True)
     phone = models.CharField(max_length=20)
     location = models.CharField(max_length=255, blank=True, null=True)
-
     current_lat = models.FloatField(null=True, blank=True, help_text="Current latitude")
     current_lng = models.FloatField(null=True, blank=True, help_text="Current longitude")
     last_location_update = models.DateTimeField(null=True, blank=True, help_text="Last time location was updated")
-
     is_online = models.BooleanField(default=False)
     verification_status = models.CharField(max_length=20, choices=VERIFICATION_STATUS, default='pending')
-
     is_restricted = models.BooleanField(default=False, help_text="If checked, rider cannot accept bookings")
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -289,9 +252,6 @@ class Rider(models.Model):
             return False
 
 
-# ==========================================
-#  BOOKING
-# ==========================================
 class Booking(models.Model):
     service_type = models.CharField(max_length=20, choices=SERVICE_CHOICES)
     pickup = models.CharField(max_length=255)
@@ -302,17 +262,13 @@ class Booking(models.Model):
     destination_lng = models.FloatField(null=True, blank=True)
     distance_km = models.FloatField(null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
     customer = models.ForeignKey(CustomerProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
     customer_name = models.CharField(max_length=100)
     customer_phone = models.CharField(max_length=20)
     customer_email = models.EmailField(blank=True, null=True)
-
     rider = models.ForeignKey(Rider, on_delete=models.SET_NULL, null=True, blank=True)
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='pending')
-
     parcel_details = models.TextField(blank=True, null=True)
-
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='pending')
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     platform_commission = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -320,7 +276,6 @@ class Booking(models.Model):
     payment_method = models.CharField(max_length=50, blank=True)
     transaction_reference = models.CharField(max_length=255, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -338,9 +293,6 @@ class Booking(models.Model):
             self.save()
 
 
-# ==========================================
-#  RIDER WALLET
-# ==========================================
 class RiderWallet(models.Model):
     rider = models.OneToOneField(Rider, on_delete=models.CASCADE, related_name='wallet')
     balance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
@@ -370,9 +322,6 @@ class RiderWallet(models.Model):
             return f"RiderWallet #{self.id}"
 
 
-# ==========================================
-#  TRANSACTION HISTORY
-# ==========================================
 class Transaction(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='transactions')
@@ -380,8 +329,6 @@ class Transaction(models.Model):
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     commission = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    rider_amount = models.DecimalField(max_digits=
-   commission = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     rider_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     status = models.CharField(max_length=20, default='completed')
     description = models.CharField(max_length=255, blank=True)
@@ -398,9 +345,6 @@ class Transaction(models.Model):
             return f"Transaction #{self.id}"
 
 
-# ==========================================
-#  WITHDRAWAL REQUEST
-# ==========================================
 class WithdrawalRequest(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='withdrawals')
@@ -409,7 +353,7 @@ class WithdrawalRequest(models.Model):
     network = models.CharField(max_length=20, blank=True)
     status = models.CharField(max_length=20, choices=WITHDRAWAL_STATUS, default='pending')
     created_at = models.DateTimeField(auto_now_add=True)
-    processed_at = models.DateTimeField(null=True, blank=True)
+       processed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         try:
