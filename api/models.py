@@ -374,4 +374,80 @@ class RiderWallet(models.Model):
 #  TRANSACTION HISTORY
 # ==========================================
 class Transaction(models.Model):
-    id = models.UUIDField
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='transactions')
+    booking = models.ForeignKey(Booking, on_delete=models.SET_NULL, null=True, blank=True)
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    commission = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    rider_amount = models.DecimalField(max_digits=
+   commission = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    rider_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    status = models.CharField(max_length=20, default='completed')
+    description = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        try:
+            type_display = self.get_transaction_type_display() if hasattr(self, 'get_transaction_type_display') else self.transaction_type
+            return f"{self.rider.name} — {type_display} — GH₵{self.amount}"
+        except:
+            return f"Transaction #{self.id}"
+
+
+# ==========================================
+#  WITHDRAWAL REQUEST
+# ==========================================
+class WithdrawalRequest(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='withdrawals')
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    mobile_money_number = models.CharField(max_length=20)
+    network = models.CharField(max_length=20, blank=True)
+    status = models.CharField(max_length=20, choices=WITHDRAWAL_STATUS, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        try:
+            return f"Withdrawal — {self.rider.name} — GH₵{self.amount} — {self.status}"
+        except:
+            return f"Withdrawal #{self.id}"
+
+
+# ==========================================
+#  RIDER COMPLAINTS & RESTRICTIONS
+# ==========================================
+class RiderComplaint(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='complaints', null=True, blank=True)
+    rider_profile = models.ForeignKey(RiderProfile, on_delete=models.CASCADE, related_name='complaints', null=True, blank=True)
+    booking = models.ForeignKey(Booking, on_delete=models.SET_NULL, null=True, blank=True, related_name='complaints')
+    reporter_name = models.CharField(max_length=200, blank=True)
+    reporter_phone = models.CharField(max_length=20, blank=True)
+    complaint_type = models.CharField(max_length=50, choices=COMPLAINT_TYPE)
+    description = models.TextField(help_text="What happened?")
+    status = models.CharField(max_length=20, choices=COMPLAINT_STATUS, default='pending')
+    admin_notes = models.TextField(blank=True, help_text="Your notes on this complaint")
+    action_taken = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        rider_name = "Unknown Rider"
+        try:
+            if self.rider:
+                rider_name = self.rider.name
+            elif self.rider_profile:
+                rider_name = self.rider_profile.full_name
+            type_display = self.get_complaint_type_display() if hasattr(self, 'get_complaint_type_display') else self.complaint_type
+            status_display = self.get_status_display() if hasattr(self, 'get_status_display') else self.status
+            return f"{rider_name} — {type_display} — {status_display}"
+        except:
+            return f"Complaint #{self.id}"
