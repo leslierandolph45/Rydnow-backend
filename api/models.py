@@ -87,10 +87,7 @@ class CustomerWallet(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        try:
-            return f"{self.user.username} — Wallet: GH₵{self.balance}"
-        except:
-            return f"Wallet #{self.id}"
+        return f"Wallet: {self.id}"
 
 
 class WalletTransaction(models.Model):
@@ -108,10 +105,7 @@ class WalletTransaction(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        try:
-            return f"{self.get_transaction_type_display()} — GH₵{self.amount}"
-        except:
-            return f"Transaction #{self.id}"
+        return f"Tx: {self.id}"
 
 
 class CustomerProfile(models.Model):
@@ -124,10 +118,7 @@ class CustomerProfile(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        try:
-            return self.user.username
-        except:
-            return f"Customer #{self.id}"
+        return f"Customer: {self.id}"
 
 
 class RiderProfile(models.Model):
@@ -152,10 +143,7 @@ class RiderProfile(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        try:
-            return self.full_name
-        except:
-            return f"RiderProfile #{self.id}"
+        return f"RiderProfile: {self.id}"
 
 
 class Rider(models.Model):
@@ -174,17 +162,11 @@ class Rider(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        try:
-            return f"{self.name} — {self.verification_status}"
-        except:
-            return f"Rider #{self.id} — {self.name}"
+        return f"Rider: {self.id}"
 
     @property
     def is_approved(self):
-        try:
-            return self.verification_status == 'approved' and not self.is_restricted
-        except:
-            return False
+        return self.verification_status == 'approved' if self.verification_status else False
 
 
 class Booking(models.Model):
@@ -215,11 +197,7 @@ class Booking(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        try:
-            service_display = self.get_service_type_display() if hasattr(self, 'get_service_type_display') else self.service_type
-            return f"{service_display} — {self.customer_name}"
-        except:
-            return f"Booking #{self.id}"
+        return f"Booking: {self.id}"
 
 
 class RiderWallet(models.Model):
@@ -245,10 +223,7 @@ class RiderWallet(models.Model):
         return False
 
     def __str__(self):
-        try:
-            return f"{self.rider.name} — GH₵{self.balance}"
-        except:
-            return f"RiderWallet #{self.id}"
+        return f"RiderWallet: {self.id}"
 
 
 class Transaction(models.Model):
@@ -267,11 +242,7 @@ class Transaction(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        try:
-            type_display = self.get_transaction_type_display() if hasattr(self, 'get_transaction_type_display') else self.transaction_type
-            return f"{self.rider.name} — {type_display} — GH₵{self.amount}"
-        except:
-            return f"Transaction #{self.id}"
+        return f"Transaction: {self.id}"
 
 
 class WithdrawalRequest(models.Model):
@@ -285,10 +256,7 @@ class WithdrawalRequest(models.Model):
     processed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
-        try:
-            return f"Withdrawal — {self.rider.name} — GH₵{self.amount} — {self.status}"
-        except:
-            return f"Withdrawal #{self.id}"
+        return f"Withdrawal: {self.id}"
 
 
 class RiderComplaint(models.Model):
@@ -310,14 +278,4 @@ class RiderComplaint(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        rider_name = "Unknown Rider"
-        try:
-            if self.rider:
-                rider_name = self.rider.name
-            elif self.rider_profile:
-                rider_name = self.rider_profile.full_name
-            type_display = self.get_complaint_type_display() if hasattr(self, 'get_complaint_type_display') else self.complaint_type
-            status_display = self.get_status_display() if hasattr(self, 'get_status_display') else self.status
-            return f"{rider_name} — {type_display} — {status_display}"
-        except:
-            return f"Complaint #{self.id}"
+        return f"Complaint: {self.id}"
