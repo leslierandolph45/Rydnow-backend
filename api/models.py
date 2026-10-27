@@ -5,9 +5,17 @@ from django.core.exceptions import ValidationError
 from django.db.models import F, Q
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
-from math import radians, cos, sin, sqrt, asin
 
 
+# ── HELPER FUNCTIONS ──────────────────────────────
+def round_money(value):
+    return Decimal(str(value)).quantize(Decimal('0.00'), rounding=ROUND_HALF_UP)
+
+def validate_non_negative_amount(value):
+    if value < Decimal('0'):
+        raise ValidationError("Amount cannot be negative")
+    return value
+    
 # ==========================================
 #  BUSINESS RULES — RYDNOW STANDARDS
 # ==========================================
@@ -525,41 +533,78 @@ class RiderProfile(models.Model):
 # ==========================================
 
 class RiderWallet(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+       id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rider = models.OneToOneField(
-        Rider, on_delete=models.PROTECT,
-        related_name='wallet', unique=True
+        Rider,
+        on_delete=models.PROTECT,
+        related_name='wallet',
+        unique=True
     )
     balance = models.DecimalField(
-        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
         validators=[validate_non_negative_amount]
     )
     available_balance = models.DecimalField(
-        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
         validators=[validate_non_negative_amount]
     )
     pending_earnings = models.DecimalField(
-        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
         validators=[validate_non_negative_amount]
     )
-    currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default='GHS')
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    currency = models.CharField(
+        max_length=3,
+        choices=CURRENCY_CHOICES,
+        default='GHS'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"Wallet: {self.rider.name} — {self.currency} {self.balance}"
+        return f"{self.rider.name} — {self.currency} {self.balance}"
 
-    def credit_earnings(self, amount, booking_ref='', payment_verified=False):
+
+               def hold_pending_earnings(self, amount, booking_ref=''):
+            """         
+                 When payment is confirmed, move amount into pending earnings.
+        These funds are held safely until the booking is completed.
+        """
+                 amount = round_money(amount)
+        validate_positive_amount(amount)
+        
+                  transaction.atomic():
+            wallet = RiderWallet.objects.select_for_update().get(pk=self.pk)
+            wallet.full_clean(exclude=['rider'])
+            
+            wallet.pending_earnings = F('pending_earnings') + amount
+            wallet.save(update_fields=['pending_earnings', 'updated_at'])
+            
+            wallet.refresh_from_db()
+        return wallet, "Earnings held safely for release on completion"
+
+
+       def credit_earnings(self, amount, booking_ref='', payment_verified=False):
         amount = round_money(amount)
         validate_positive_amount(amount)
+
+        # Prevent releasing more than is safely held
+        if self.pending_earnings < amount:
+            return None, "Insufficient pending earnings to release"
 
         if not payment_verified:
             return None, "Payment must be verified before crediting earnings"
 
         ref = f"PAY-{booking_ref or generate_transaction_ref()}"
+
 
         with transaction.atomic():
             if WalletTransaction.objects.filter(reference=ref).exists():
@@ -871,23 +916,23 @@ class Booking(models.Model):
         return True, "Booking cancelled"
 
     def confirm_payment_verified(self, provider_ref='', payment_ref=''):
+               # Prevent duplicate processing
+        if self.payment_status in ['held', 'released']:
+            return True, "Payment already verified"
+
         if payment_ref:
             self.payment_ref = payment_ref
         if provider_ref:
             self.provider_ref = provider_ref
-        self.payment_status = 'released'
+            
+        # ✅ Hold funds — DON'T release earnings yet!
+        self.payment_status = 'held'
         self.full_clean()
         self.save()
+        
+        return True, "Payment verified — held securely until ride completion"
 
-        # Release earnings ONLY if booking already completed
-        if self.status == 'completed' and self.rider_payout > 0 and self.assigned_rider:
-            wallet, _ = RiderWallet.objects.get_or_create(rider=self.assigned_rider)
-            wallet.credit_earnings(
-                self.rider_payout,
-                booking_ref=self.booking_ref,
-                payment_verified=True
-            )
-        return True, "Payment verified — earnings ready for release"
+    
 
     def process_refund(self, amount=None, reason='', provider_confirm_callback=None):
         if self.payment_status not in ['held', 'released']:
