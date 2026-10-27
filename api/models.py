@@ -52,8 +52,8 @@ def validate_longitude(value):
 # ==========================================
 #  BUSINESS RULES — RYDNOW STANDARDS
 # ==========================================
-COMMISSION_RATE = Decimal('0.15')        # 15% RYDNOW Commission
-RIDER_PAYOUT_RATE = Decimal('0.85')       # 85% Rider Earnings
+COMMISSION_RATE = Decimal('0.15')
+RIDER_PAYOUT_RATE = Decimal('0.85')
 CURRENCY_CHOICES = [('GHS', 'Ghana Cedi')]
 
 
@@ -99,13 +99,11 @@ def validate_fare_breakdown(total_fare, commission, payout):
 # ==========================================
 #  CHOICE CONSTANTS
 # ==========================================
-
 SERVICE_CHOICES = [
     ('okada', 'Okada Ride'),
     ('parcel', 'Parcel Delivery'),
     ('waste-bin', 'Waste Collection'),
 ]
-
 
 STATUS_CHOICES = [
     ('pending', 'Pending'),
@@ -116,7 +114,6 @@ STATUS_CHOICES = [
     ('cancelled', 'Cancelled'),
 ]
 
-
 STATUS_TRANSITIONS = {
     'pending': ['searching_rider', 'cancelled'],
     'searching_rider': ['assigned', 'cancelled'],
@@ -126,14 +123,12 @@ STATUS_TRANSITIONS = {
     'cancelled': [],
 }
 
-
 VERIFICATION_STATUS = [
     ('pending', 'Pending Review'),
     ('submitted', 'Documents Submitted'),
     ('approved', 'Approved'),
     ('rejected', 'Rejected'),
 ]
-
 
 PAYMENT_STATUS = [
     ('initiated', 'Payment Initiated'),
@@ -146,13 +141,11 @@ PAYMENT_STATUS = [
     ('cancelled', 'Cancelled Before Processing'),
 ]
 
-
 PAYMENT_METHOD_CHOICES = [
     ('momo', 'Mobile Money'),
     ('visa', 'Visa Card'),
     ('debit', 'Debit Card'),
 ]
-
 
 TRANSACTION_TYPES = [
     ('job_payment', 'Completed Job Payment'),
@@ -166,7 +159,6 @@ TRANSACTION_TYPES = [
     ('payout', 'Rider Earnings Payout'),
 ]
 
-
 WITHDRAWAL_STATUS = [
     ('pending', 'Queued for Processing'),
     ('reserved', 'Funds Reserved — Sending'),
@@ -178,7 +170,6 @@ WITHDRAWAL_STATUS = [
     ('timeout', 'Provider Timeout — Funds Restored'),
 ]
 
-
 COMPLAINT_STATUS = [
     ('pending', 'Under Review'),
     ('in_progress', 'Being Investigated'),
@@ -188,7 +179,6 @@ COMPLAINT_STATUS = [
     ('banned', 'Rider Banned'),
     ('dismissed', 'No Action Required'),
 ]
-
 
 COMPLAINT_TYPE = [
     ('late_arrival', 'Late Arrival'),
@@ -205,43 +195,42 @@ COMPLAINT_TYPE = [
 # ==========================================
 #  CUSTOMER WALLET
 # ==========================================
-
 class CustomerWallet(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(
-        User,
-        on_delete=models.PROTECT,
-        related_name='customer_wallet',
-        unique=True
+        User, on_delete=models.PROTECT,
+        related_name='customer_wallet', unique=True
     )
     balance = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal('0.00'),
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
         validators=[validate_non_negative_amount]
     )
     withdrawable_balance = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal('0.00'),
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
         validators=[validate_non_negative_amount]
     )
     bonus_credit = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal('0.00'),
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
         validators=[validate_non_negative_amount]
     )
-    currency = models.CharField(
-        max_length=3,
-        choices=CURRENCY_CHOICES,
-        default='GHS'
-    )
+    currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default='GHS')
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(balance__gte=0),
+                name='customer_balance_not_negative',
+                violation_message="Balance cannot be negative"
+            ),
+            models.CheckConstraint(
+                check=models.Q(withdrawable_balance__gte=0),
+                name='customer_withdrawable_not_negative',
+                violation_message="Withdrawable balance cannot be negative"
+            ),
+        ]
 
     def __str__(self):
         username = getattr(self.user, 'username', 'Deleted User')
@@ -262,25 +251,16 @@ class CustomerWallet(models.Model):
 
                 wallet.balance = F('balance') + amount
                 wallet.withdrawable_balance = F('withdrawable_balance') + amount
-                wallet.save(update_fields=[
-                    'balance', 'withdrawable_balance', 'updated_at',
-                ])
+                wallet.save(update_fields=['balance', 'withdrawable_balance', 'updated_at'])
 
                 WalletTransaction.objects.create(
-                    wallet=wallet,
-                    wallet_type='customer',
-                    transaction_type='deposit',
-                    amount=amount,
-                    reference=ref,
-                    description=description,
-                    currency=wallet.currency,
-                    related_booking=related_booking,
-                    status='completed',
+                    wallet=wallet, wallet_type='customer',
+                    transaction_type='deposit', amount=amount,
+                    reference=ref, description=description, currency=wallet.currency,
+                    related_booking=related_booking, status='completed'
                 )
-
                 wallet.refresh_from_db()
                 return wallet, "Deposit successful"
-
         except IntegrityError:
             if WalletTransaction.objects.filter(reference=ref).exists():
                 return None, f"Duplicate transaction: {ref}"
@@ -306,24 +286,16 @@ class CustomerWallet(models.Model):
 
                 wallet.balance = F('balance') - amount
                 wallet.withdrawable_balance = F('withdrawable_balance') - amount
-                wallet.save(update_fields=[
-                    'balance', 'withdrawable_balance', 'updated_at',
-                ])
+                wallet.save(update_fields=['balance', 'withdrawable_balance', 'updated_at'])
 
                 WalletTransaction.objects.create(
-                    wallet=wallet,
-                    wallet_type='customer',
-                    transaction_type='withdrawal',
-                    amount=-amount,
-                    reference=ref,
-                    description=description,
-                    currency=wallet.currency,
-                    status='completed',
+                    wallet=wallet, wallet_type='customer',
+                    transaction_type='withdrawal', amount=-amount,
+                    reference=ref, description=description,
+                    currency=wallet.currency, status='completed'
                 )
-
                 wallet.refresh_from_db()
                 return True, "Withdrawal successful"
-
         except IntegrityError:
             if WalletTransaction.objects.filter(reference=ref).exists():
                 return False, f"Duplicate transaction: {ref}"
@@ -333,60 +305,32 @@ class CustomerWallet(models.Model):
 # ==========================================
 #  WALLET TRANSACTION
 # ==========================================
-
 class WalletTransaction(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     wallet = models.ForeignKey(
-        CustomerWallet,
-        on_delete=models.PROTECT,
-        related_name='transactions',
-        null=True,
-        blank=True
+        CustomerWallet, on_delete=models.PROTECT,
+        related_name='transactions', null=True, blank=True
     )
     rider_wallet = models.ForeignKey(
-        'RiderWallet',
-        on_delete=models.PROTECT,
-        related_name='transactions',
-        null=True,
-        blank=True
+        'RiderWallet', on_delete=models.PROTECT,
+        related_name='transactions', null=True, blank=True
     )
-    wallet_type = models.CharField(
-        max_length=20,
-        default='customer',
-        db_index=True
-    )
-    transaction_type = models.CharField(
-        max_length=20,
-        choices=TRANSACTION_TYPES,
-        db_index=True
-    )
+    wallet_type = models.CharField(max_length=20, default='customer', db_index=True)
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES, db_index=True)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
-    currency = models.CharField(
-        max_length=3,
-        choices=CURRENCY_CHOICES,
-        default='GHS'
-    )
+    currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default='GHS')
     reference = models.CharField(
-        max_length=50,
-        unique=True,
-        db_index=True,
+        max_length=50, unique=True, db_index=True,
         default=generate_transaction_ref
     )
     status = models.CharField(max_length=20, default='completed', db_index=True)
     description = models.CharField(max_length=255, blank=True)
     related_booking = models.ForeignKey(
-        'Booking',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='wallet_transactions'
+        'Booking', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='wallet_transactions'
     )
     provider_ref = models.CharField(max_length=255, blank=True)
-    idempotency_key = models.CharField(
-        max_length=100,
-        blank=True,
-        db_index=True
-    )
+    idempotency_key = models.CharField(max_length=100, blank=True, db_index=True)
     metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
@@ -399,6 +343,32 @@ class WalletTransaction(models.Model):
             models.Index(fields=['reference']),
             models.Index(fields=['wallet_type', 'status', '-created_at']),
         ]
+        constraints = [
+            # Exactly ONE wallet owner — never both, never neither
+            models.CheckConstraint(
+                check=(
+                    models.Q(wallet__isnull=False, rider_wallet__isnull=True)
+                ) | (
+                    models.Q(wallet__isnull=True, rider_wallet__isnull=False)
+                ),
+                name='tx_exactly_one_wallet',
+                violation_message="Transaction must belong to exactly one wallet"
+            ),
+            # Unique idempotency key PER CUSTOMER WALLET
+            models.UniqueConstraint(
+                fields=['wallet', 'idempotency_key'],
+                condition=~models.Q(idempotency_key=''),
+                name='unique_idempotency_per_customer',
+                violation_message="Duplicate operation — this request was already processed"
+            ),
+            # Unique idempotency key PER RIDER WALLET
+            models.UniqueConstraint(
+                fields=['rider_wallet', 'idempotency_key'],
+                condition=~models.Q(idempotency_key=''),
+                name='unique_idempotency_per_rider',
+                violation_message="Duplicate operation — this payout was already processed"
+            ),
+        ]
 
     def __str__(self):
         return f"{self.reference} | {self.transaction_type} | {self.amount} {self.currency}"
@@ -407,13 +377,12 @@ class WalletTransaction(models.Model):
 # ==========================================
 #  CUSTOMER PROFILE
 # ==========================================
-
 class CustomerProfile(models.Model):
     user = models.OneToOneField(
         User, on_delete=models.PROTECT,
         related_name='customer_profile', unique=True
     )
-    full_name = models.CharField(max_length=200, blank=True)
+       full_name = models.CharField(max_length=200, blank=True)
     email = models.EmailField(blank=True)
     phone = models.CharField(max_length=30, blank=True, null=True, validators=[validate_phone_number])
     profile_photo = models.ImageField(upload_to='profiles/customer/%Y/%m/', blank=True, null=True)
@@ -431,7 +400,6 @@ class CustomerProfile(models.Model):
 # ==========================================
 #  RIDER — Core Identity
 # ==========================================
-
 class Rider(models.Model):
     user = models.OneToOneField(
         User, on_delete=models.PROTECT, null=True, blank=True,
@@ -444,7 +412,7 @@ class Rider(models.Model):
     current_lat = models.FloatField(null=True, blank=True, validators=[validate_latitude])
     current_lng = models.FloatField(null=True, blank=True, validators=[validate_longitude])
     last_location_update = models.DateTimeField(null=True, blank=True)
-       verification_status = models.CharField(
+    verification_status = models.CharField(
         max_length=20, choices=VERIFICATION_STATUS,
         default='pending', db_index=True
     )
@@ -488,7 +456,6 @@ class Rider(models.Model):
 # ==========================================
 #  RIDER PROFILE — Eligibility & Extended Data
 # ==========================================
-
 class RiderProfile(models.Model):
     rider = models.OneToOneField(
         Rider, on_delete=models.PROTECT,
@@ -527,8 +494,8 @@ class RiderProfile(models.Model):
         if not hasattr(self, 'rider'):
             return False
         return (
-            self.is_online 
-            and self.rider.verification_status == 'approved' 
+            self.is_online
+            and self.rider.verification_status == 'approved'
             and not self.rider.is_restricted
         )
 
@@ -541,42 +508,46 @@ class RiderProfile(models.Model):
 # ==========================================
 #  RIDER WALLET — Separate from Customer Wallet
 # ==========================================
-
 class RiderWallet(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rider = models.OneToOneField(
-        Rider,
-        on_delete=models.PROTECT,
-        related_name='wallet',
-        unique=True
+        Rider, on_delete=models.PROTECT,
+        related_name='wallet', unique=True
     )
     balance = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal('0.00'),
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
         validators=[validate_non_negative_amount]
     )
     available_balance = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal('0.00'),
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
         validators=[validate_non_negative_amount]
     )
     pending_earnings = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal('0.00')
+        max_digits=12, decimal_places=2, default=Decimal('0.00')
     )
-    currency = models.CharField(
-        max_length=3,
-        choices=CURRENCY_CHOICES,
-        default='GHS'
-    )
+    currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default='GHS')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(balance__gte=0),
+                name='rider_balance_not_negative',
+                violation_message="Balance cannot be negative"
+            ),
+            models.CheckConstraint(
+                check=models.Q(available_balance__gte=0),
+                name='rider_available_not_negative',
+                violation_message="Available balance cannot be negative"
+            ),
+            models.CheckConstraint(
+                check=models.Q(pending_earnings__gte=0),
+                name='rider_pending_not_negative',
+                violation_message="Pending earnings cannot be negative"
+            ),
+        ]
 
     def __str__(self):
         return f"{self.rider.name} — {self.currency} {self.balance}"
@@ -628,7 +599,7 @@ class RiderWallet(models.Model):
                 amount=amount,
                 reference=ref,
                 description=f"Earnings credited: Booking {booking_ref}",
-                currency=self.currency,
+                currency=wallet.currency,
                 status='completed'
             )
             wallet.refresh_from_db()
@@ -676,7 +647,7 @@ class RiderWallet(models.Model):
                 amount=amount,
                 reference=f"RESTORE-{generate_transaction_ref()}",
                 description=f"Funds restored: {reason}",
-                currency=self.currency,
+                currency=wallet.currency,
                 status='completed'
             )
         return True, "Funds restored"
@@ -710,7 +681,6 @@ class RiderWallet(models.Model):
 # ==========================================
 #  BOOKING — Complete with fare breakdown & locking
 # ==========================================
-
 class Booking(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     booking_ref = models.CharField(
@@ -782,7 +752,7 @@ class Booking(models.Model):
     class Meta:
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['customer', '-created_at']),
+           models.Index(fields=['customer', '-created_at']),
             models.Index(fields=['assigned_rider', 'status']),
             models.Index(fields=['status', 'created_at']),
             models.Index(fields=['booking_ref']),
@@ -826,20 +796,17 @@ class Booking(models.Model):
         c = 2 * asin(sqrt(a))
         return round(R * c, 2)
 
-       def assign_rider(self, rider):
+    def assign_rider(self, rider):
         """Atomic rider assignment — prevents double-booking race conditions"""
         with transaction.atomic():
-            # Validate status BEFORE acquiring lock
             if self.status not in ['pending', 'searching_rider']:
                 return False, "Booking no longer available"
 
             booking = Booking.objects.select_for_update().get(pk=self.pk)
 
-            # Double-check status AFTER acquiring lock — prevents race conditions
             if booking.status not in ['pending', 'searching_rider']:
                 return False, "Booking no longer available"
 
-            # Verify rider eligibility
             try:
                 profile = RiderProfile.objects.get(rider=rider)
                 if not profile.is_eligible:
@@ -847,7 +814,6 @@ class Booking(models.Model):
             except RiderProfile.DoesNotExist:
                 return False, "Rider profile not found"
 
-            # Prevent same rider having multiple active bookings
             active_count = Booking.objects.filter(
                 assigned_rider=rider,
                 status__in=['assigned', 'in_progress']
@@ -861,7 +827,6 @@ class Booking(models.Model):
             booking.full_clean()
             booking.save()
 
-            # Sync in-memory instance
             self.assigned_rider = rider
             self.status = 'assigned'
             self.accepted_at = booking.accepted_at
@@ -885,7 +850,6 @@ class Booking(models.Model):
             return False, "Payment not confirmed"
 
         with transaction.atomic():
-            # Refresh from DB inside transaction for consistency
             booking = Booking.objects.select_for_update().get(pk=self.pk)
 
             if booking.status == 'completed':
@@ -900,7 +864,6 @@ class Booking(models.Model):
             booking.full_clean()
             booking.save()
 
-            # Credit rider earnings — ONLY once per booking via unique reference
             if booking.rider_payout > 0 and booking.assigned_rider:
                 wallet, _ = RiderWallet.objects.get_or_create(rider=booking.assigned_rider)
                 wallet.credit_earnings(
@@ -909,7 +872,6 @@ class Booking(models.Model):
                     payment_verified=True
                 )
 
-            # Sync in-memory instance
             self.status = booking.status
             self.completed_at = booking.completed_at
         return True, "Booking completed & earnings credited"
@@ -931,17 +893,14 @@ class Booking(models.Model):
             booking.full_clean()
             booking.save()
 
-            # Issue refund if funds already held/released
             if booking.payment_status in ['held', 'released']:
                 booking.process_refund(amount=None, reason=f"Booking cancelled: {reason}")
 
-            # Sync in-memory instance
             self.status = booking.status
             self.cancelled_at = booking.cancelled_at
         return True, "Booking cancelled"
 
     def confirm_payment_verified(self, provider_ref='', payment_ref=''):
-        # Prevent duplicate processing
         if self.payment_status in ['held', 'released']:
             return True, "Payment already verified"
 
@@ -950,7 +909,6 @@ class Booking(models.Model):
         if provider_ref:
             self.provider_ref = provider_ref
 
-        # Hold funds — DON'T release earnings yet!
         self.payment_status = 'held'
         self.full_clean()
         self.save()
@@ -972,7 +930,6 @@ class Booking(models.Model):
         if WalletTransaction.objects.filter(reference=ref).exists():
             return True, "Refund already processed (idempotent)"
 
-        # Provider confirmation if provided
         if callable(provider_confirm_callback):
             provider_success = provider_confirm_callback(
                 amount=refund_amount,
@@ -981,7 +938,6 @@ class Booking(models.Model):
             if not provider_success:
                 return False, "Provider refund failed — refund not marked complete"
 
-        # Record the refund transaction
         WalletTransaction.objects.create(
             wallet_type='customer',
             transaction_type='refund',
@@ -992,7 +948,6 @@ class Booking(models.Model):
             status='completed'
         )
 
-        # Update payment status — partial vs full refund
         if refund_amount == self.total_fare:
             self.payment_status = 'refunded'
         else:
@@ -1004,7 +959,6 @@ class Booking(models.Model):
 # ==========================================
 #  WITHDRAWAL REQUEST — Safe 2-phase payout workflow
 # ==========================================
-
 class WithdrawalRequest(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     wallet = models.ForeignKey(
@@ -1094,7 +1048,6 @@ class WithdrawalRequest(models.Model):
             if self.status in ['completed', 'reversed']:
                 return False, "Cannot fail completed payout"
 
-            # Only restore funds if they were actually reserved
             if self.status == 'reserved':
                 self.wallet.restore_funds(self.amount, reason=f"Payout failed: {reason}")
 
@@ -1114,7 +1067,6 @@ class WithdrawalRequest(models.Model):
             if provider_known_failure:
                 return self.mark_payout_failed("Provider response timeout — confirmed failed")
             else:
-                # Uncertain outcome — leave funds reserved for manual reconciliation
                 self.status = 'timeout'
                 self.failure_reason = "Provider timeout — funds held for reconciliation"
                 self.processed_at = timezone.now()
@@ -1135,12 +1087,10 @@ class WithdrawalRequest(models.Model):
                 return True, "Already completed (idempotent)"
             return False, f"Cannot process from status: {self.status}"
 
-        # Step 1: Reserve funds inside transaction
         success, msg = self.reserve_funds()
         if not success:
             return False, msg
 
-        # Step 2: Call provider — OUTSIDE transaction to avoid long-lived connections
         provider_result = True
         provider_response = {}
         if callable(provider_callback):
@@ -1151,11 +1101,9 @@ class WithdrawalRequest(models.Model):
                     idempotency_key=self.idempotency_key
                 )
             except Exception as e:
-                # Provider exception — cautiously mark as timeout, DON'T auto-restore
                 self.mark_timeout(provider_known_failure=False)
                 return False, f"Provider error: {str(e)}"
 
-        # Step 3: Finalize based on confirmed provider response
         if provider_result:
             provider_ref = provider_response.get('provider_ref', '')
             self.confirm_payout_initiated(provider_ref=provider_ref)
@@ -1179,7 +1127,6 @@ class WithdrawalRequest(models.Model):
 # ==========================================
 #  RIDER COMPLAINT — Dispute & Support Records
 # ==========================================
-
 class RiderComplaint(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     booking = models.ForeignKey(
@@ -1190,7 +1137,7 @@ class RiderComplaint(models.Model):
         User, on_delete=models.PROTECT,
         related_name='filed_complaints'
     )
-       complaint_type = models.CharField(max_length=40, choices=COMPLAINT_TYPE)
+    complaint_type = models.CharField(max_length=40, choices=COMPLAINT_TYPE)
     description = models.TextField()
     status = models.CharField(
         max_length=20, choices=COMPLAINT_STATUS,
@@ -1269,7 +1216,6 @@ class RiderComplaint(models.Model):
 # ==========================================
 #  SYSTEM CONFIGURATION — Singleton Platform Settings
 # ==========================================
-
 class SystemConfig(models.Model):
     """Singleton: Platform-wide settings — editable via admin only"""
     key = models.CharField(max_length=100, unique=True)
@@ -1294,7 +1240,6 @@ class SystemConfig(models.Model):
 # ==========================================
 #  SYSTEM ALERTS — Get Notified Before Problems Grow
 # ==========================================
-
 class SystemAlert(models.Model):
     LEVEL_CHOICES = [
         ('info', 'Info'),
@@ -1334,146 +1279,69 @@ class SystemAlert(models.Model):
 
 
 # ==========================================
-#  DAILY SUMMARY LOG — Platform Analytics
+#  DAILY SUMMARY — Reconciliation & Reporting
 # ==========================================
-
 class DailySummary(models.Model):
     date = models.DateField(unique=True, db_index=True)
     total_bookings = models.IntegerField(default=0)
-    completed_rides = models.IntegerField(default=0)
+    completed_bookings = models.IntegerField(default=0)
     cancelled_bookings = models.IntegerField(default=0)
-    total_revenue = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
-    total_commission = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
-    total_payouts = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
-    new_riders = models.IntegerField(default=0)
-    new_customers = models.IntegerField(default=0)
-    pending_withdrawals = models.IntegerField(default=0)
-    notes = models.TextField(blank=True)
+    total_revenue = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0.00')
+    )
+    total_commission = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0.00')
+    )
+    total_payouts = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0.00')
+    )
+    total_refunds = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0.00')
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['-date']
-        get_latest_by = 'date'
+        verbose_name_plural = "Daily Summaries"
 
     def __str__(self):
-        return f"{self.date} — {self.completed_rides} rides | ₵{self.total_revenue}"
+        return f"{self.date} — ₵{self.total_revenue} / {self.completed_bookings} rides"
 
     @classmethod
     def generate_for_date(cls, target_date=None):
-        """Rebuild daily stats — run nightly via cron/celery or admin action"""
-        target_date = target_date or timezone.now().date()
-        next_day = target_date + timezone.timedelta(days=1)
+        """Rebuild daily totals from transaction records — safe to rerun"""
+        from django.db.models import Sum, Count, Q
 
-        bookings = Booking.objects.filter(
-            created_at__date__gte=target_date,
-            created_at__date__lt=next_day
-        )
+        if target_date is None:
+            target_date = timezone.now().date()
+
+        start = timezone.make_aware(timezone.datetime.combine(target_date, timezone.datetime.min.time()))
+        end = timezone.make_aware(timezone.datetime.combine(target_date, timezone.datetime.max.time()))
+
+        bookings = Booking.objects.filter(created_at__date=target_date)
         completed = bookings.filter(status='completed')
         cancelled = bookings.filter(status='cancelled')
+
+        total_revenue = completed.aggregate(s=Sum('total_fare'))['s'] or Decimal('0.00')
+        total_commission = completed.aggregate(s=Sum('platform_commission'))['s'] or Decimal('0.00')
+        total_payouts = completed.aggregate(s=Sum('rider_payout'))['s'] or Decimal('0.00')
+
+        refunds = WalletTransaction.objects.filter(
+            transaction_type='refund',
+            created_at__range=(start, end)
+        ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
 
         summary, _ = cls.objects.update_or_create(
             date=target_date,
             defaults={
                 'total_bookings': bookings.count(),
-                'completed_rides': completed.count(),
+                'completed_bookings': completed.count(),
                 'cancelled_bookings': cancelled.count(),
-                'total_revenue': sum(b.total_fare for b in completed),
-                'total_commission': sum(b.platform_commission for b in completed),
-                'total_payouts': sum(b.rider_payout for b in completed),
-                'new_riders': Rider.objects.filter(
-                    created_at__date__gte=target_date,
-                    created_at__date__lt=next_day
-                ).count(),
-                'new_customers': CustomerProfile.objects.filter(
-                    created_at__date__gte=target_date,
-                    created_at__date__lt=next_day
-                ).count(),
-                'pending_withdrawals': WithdrawalRequest.objects.filter(
-                    status__in=['pending', 'reserved', 'initiated']
-                ).count(),
+                'total_revenue': total_revenue,
+                'total_commission': total_commission,
+                'total_payouts': total_payouts,
+                'total_refunds': abs(refunds),
             }
         )
         return summary
-
-
-# ==========================================
-#  SCHEDULED TASKS
-# ==========================================
-
-def auto_cancel_stale_bookings(minutes=15):
-    """
-    Call this from a scheduled task or admin action:
-    Cancels bookings stuck in 'searching_rider' for longer than specified time
-    """
-    cutoff = timezone.now() - timezone.timedelta(minutes=minutes)
-    stale_bookings = Booking.objects.filter(
-        status='searching_rider',
-        created_at__lt=cutoff
-    )
-    cancelled_count = 0
-    for booking in stale_bookings:
-        with transaction.atomic():
-            booking.status = 'cancelled'
-            booking.cancellation_reason = f"Auto-cancelled: no rider found after {minutes} minutes"
-            booking.cancelled_at = timezone.now()
-            booking.save()
-
-            SystemAlert.create_alert(
-                level='info',
-                title="Booking Auto-Cancelled",
-                message=f"Booking {booking.booking_ref} cancelled — no rider found within {minutes} mins",
-                booking_ref=booking.booking_ref
-            )
-            cancelled_count += 1
-    return cancelled_count
-
-
-# ==========================================
-#  VIEW HELPER FUNCTIONS — Queryset Permission Helpers
-# ==========================================
-
-def get_customer_bookings_queryset(user):
-    """Use in views: return only bookings belonging to THIS customer"""
-    try:
-        profile = CustomerProfile.objects.get(user=user)
-        return Booking.objects.filter(customer=profile)
-    except CustomerProfile.DoesNotExist:
-        return Booking.objects.none()
-
-
-def get_rider_bookings_queryset(user):
-    """Use in views: return only bookings assigned to THIS rider"""
-    try:
-        rider = Rider.objects.get(user=user)
-        return Booking.objects.filter(assigned_rider=rider)
-    except Rider.DoesNotExist:
-        return Booking.objects.none()
-
-
-def get_available_nearby_bookings(rider, max_distance_km=5.0):
-    """
-    Find pending bookings within reasonable distance of an online rider
-    Returns: Unassigned bookings where pickup is near rider's last known location
-    """
-    if not hasattr(rider, 'riderprofile') or not rider.riderprofile.is_eligible:
-        return Booking.objects.none()
-    if None in (rider.current_lat, rider.current_lng):
-        return Booking.objects.none()
-
-    all_pending = Booking.objects.filter(
-        status__in=['pending', 'searching_rider'],
-        assigned_rider__isnull=True
-    ).select_related('customer')
-
-    nearby_ids = []
-    for booking in all_pending:
-        distance = booking.get_distance_km(
-            rider.current_lat, rider.current_lng,
-            booking.pickup_lat, booking.pickup_lng
-        )
-        if distance and distance <= max_distance_km:
-            nearby_ids.append(booking.pk)
-
-    return Booking.objects.filter(pk__in=nearby_ids)
-          
-
