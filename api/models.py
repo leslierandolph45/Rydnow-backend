@@ -5,17 +5,50 @@ from django.core.exceptions import ValidationError
 from django.db.models import F, Q
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
+from math import radians, sin, cos, asin, sqrt
 
 
-# ── HELPER FUNCTIONS ──────────────────────────────
+# ==========================================
+#  HELPER FUNCTIONS
+# ==========================================
+
 def round_money(value):
-    return Decimal(str(value)).quantize(Decimal('0.00'), rounding=ROUND_HALF_UP)
+    """Consistent 2-decimal rounding — ALL financial math uses this"""
+    return Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
 
 def validate_non_negative_amount(value):
     if value < Decimal('0'):
-        raise ValidationError("Amount cannot be negative")
-    return value
-    
+        raise ValidationError("Amount cannot be negative.")
+
+
+def validate_positive_amount(value):
+    if value <= Decimal('0'):
+        raise ValidationError("Amount must be greater than zero.")
+
+
+def validate_phone_number(value):
+    if not value:
+        return
+    digits = ''.join(filter(str.isdigit, value))
+    if len(digits) < 9 or len(digits) > 15:
+        raise ValidationError("Phone number must contain 9–15 digits.")
+
+
+def validate_latitude(value):
+    if value is not None:
+        value = float(value)
+        if not (-90.0 <= value <= 90.0):
+            raise ValidationError("Latitude must be between -90 and 90 degrees.")
+
+
+def validate_longitude(value):
+    if value is not None:
+        value = float(value)
+        if not (-180.0 <= value <= 180.0):
+            raise ValidationError("Longitude must be between -180 and 180 degrees.")
+
+
 # ==========================================
 #  BUSINESS RULES — RYDNOW STANDARDS
 # ==========================================
@@ -25,153 +58,27 @@ CURRENCY_CHOICES = [('GHS', 'Ghana Cedi')]
 
 
 # ==========================================
-#  REFERENCE GENERATORS — No Lambda!
+#  REFERENCE GENERATORS
 # ==========================================
 def generate_transaction_ref():
     return f"TX-{uuid.uuid4().hex[:12].upper()}"
 
+
 def generate_booking_ref():
     return f"BK-{uuid.uuid4().hex[:12].upper()}"
 
+
 def generate_withdrawal_ref():
     return f"WD-{uuid.uuid4().hex[:10].upper()}"
+
 
 def generate_payment_ref():
     return f"PAY-{uuid.uuid4().hex[:10].upper()}"
 
 
 # ==========================================
-#  CHOICE CONSTANTS
+#  FARE VALIDATION
 # ==========================================
-
-SERVICE_CHOICES = [
-    ('okada', 'Okada Ride'),
-    ('parcel', 'Parcel Delivery'),
-    ('waste-bin', 'Waste Collection'),
-]
-
-STATUS_CHOICES = [
-    ('pending', 'Pending'),
-    ('searching_rider', 'Searching Rider'),
-    ('assigned', 'Rider Assigned'),
-    ('in_progress', 'In Progress'),
-    ('completed', 'Completed'),
-    ('cancelled', 'Cancelled'),
-]
-
-STATUS_TRANSITIONS = {
-    'pending': ['searching_rider', 'cancelled'],
-    'searching_rider': ['assigned', 'cancelled'],
-    'assigned': ['in_progress', 'cancelled'],
-    'in_progress': ['completed', 'cancelled'],
-    'completed': [],
-    'cancelled': [],
-}
-
-VERIFICATION_STATUS = [
-    ('pending', 'Pending Review'),
-    ('submitted', 'Documents Submitted'),
-    ('approved', 'Approved'),
-    ('rejected', 'Rejected'),
-]
-
-PAYMENT_STATUS = [
-    ('initiated', 'Payment Initiated'),
-    ('pending_confirmation', 'Waiting Provider Confirmation'),
-    ('held', 'Funds Held in Escrow'),
-    ('released', 'Funds Released'),
-    ('failed', 'Payment Failed'),
-    ('refund_initiated', 'Refund Processing'),
-    ('refunded', 'Refund Completed'),
-    ('cancelled', 'Cancelled Before Processing'),
-]
-
-PAYMENT_METHOD_CHOICES = [
-    ('momo', 'Mobile Money'),
-    ('visa', 'Visa Card'),
-    ('debit', 'Debit Card'),
-]
-
-TRANSACTION_TYPES = [
-    ('job_payment', 'Completed Job Payment'),
-    ('deposit', 'Wallet Top-up'),
-    ('withdrawal', 'Withdrawal'),
-    ('commission', 'Platform Commission Deduction'),
-    ('refund', 'Customer Refund'),
-    ('bonus', 'Platform Bonus Credit'),
-    ('adjustment', 'Manual Adjustment'),
-    ('reversal', 'Transaction Reversal'),
-    ('payout', 'Rider Earnings Payout'),
-]
-
-WITHDRAWAL_STATUS = [
-    ('pending', 'Queued for Processing'),
-    ('reserved', 'Funds Reserved — Sending'),
-    ('validated', 'Verified — Sufficient Balance'),
-    ('initiated', 'Sent to Mobile Money Provider'),
-    ('completed', 'Successfully Sent'),
-    ('failed', 'Provider Failed — Funds Returned'),
-    ('reversed', 'System Reversed — Check Notes'),
-    ('timeout', 'Provider Timeout — Funds Restored'),
-]
-
-COMPLAINT_STATUS = [
-    ('pending', 'Under Review'),
-    ('in_progress', 'Being Investigated'),
-    ('resolved', 'Resolved — Closed'),
-    ('warning_issued', 'Warning Issued'),
-    ('restricted', 'Rider Restricted'),
-    ('banned', 'Rider Banned'),
-    ('dismissed', 'No Action Required'),
-]
-
-COMPLAINT_TYPE = [
-    ('late_arrival', 'Late Arrival'),
-    ('rude_behavior', 'Unprofessional Behavior'),
-    ('overcharging', 'Price Dispute'),
-    ('unsafe_driving', 'Unsafe Riding'),
-    ('no_show', 'Rider Did Not Arrive'),
-    ('item_damaged', 'Item Damaged'),
-    ('cancelled_without_notice', 'Cancelled Without Notice'),
-    ('other', 'Other Issue'),
-]
-
-
-# ==========================================
-#  VALIDATION HELPERS
-# ==========================================
-
-def validate_non_negative_amount(value):
-    if value < Decimal('0'):
-        raise ValidationError("Amount cannot be negative.")
-
-def validate_positive_amount(value):
-    if value <= Decimal('0'):
-        raise ValidationError("Amount must be greater than zero.")
-
-def validate_phone_number(value):
-    if not value:
-        return
-    digits = ''.join(filter(str.isdigit, value))
-    if len(digits) < 9 or len(digits) > 15:
-        raise ValidationError("Phone number must contain 9–15 digits.")
-
-def validate_latitude(value):
-    if value is not None:
-        value = float(value)
-        if not (-90.0 <= value <= 90.0):
-            raise ValidationError("Latitude must be between -90 and 90 degrees.")
-
-def validate_longitude(value):
-    if value is not None:
-        value = float(value)
-        if not (-180.0 <= value <= 180.0):
-            raise ValidationError("Longitude must be between -180 and 180 degrees.")
-
-def round_money(value):
-    """Consistent 2-decimal rounding — ALL financial math uses this"""
-    return Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-
 def validate_fare_breakdown(total_fare, commission, payout):
     """Ensure 15% + 85% = 100% exactly within 1 pesewa tolerance"""
     if total_fare is None or total_fare <= 0:
@@ -190,7 +97,113 @@ def validate_fare_breakdown(total_fare, commission, payout):
 
 
 # ==========================================
-# CUSTOMER WALLET
+#  CHOICE CONSTANTS
+# ==========================================
+
+SERVICE_CHOICES = [
+    ('okada', 'Okada Ride'),
+    ('parcel', 'Parcel Delivery'),
+    ('waste-bin', 'Waste Collection'),
+]
+
+
+STATUS_CHOICES = [
+    ('pending', 'Pending'),
+    ('searching_rider', 'Searching Rider'),
+    ('assigned', 'Rider Assigned'),
+    ('in_progress', 'In Progress'),
+    ('completed', 'Completed'),
+    ('cancelled', 'Cancelled'),
+]
+
+
+STATUS_TRANSITIONS = {
+    'pending': ['searching_rider', 'cancelled'],
+    'searching_rider': ['assigned', 'cancelled'],
+    'assigned': ['in_progress', 'cancelled'],
+    'in_progress': ['completed', 'cancelled'],
+    'completed': [],
+    'cancelled': [],
+}
+
+
+VERIFICATION_STATUS = [
+    ('pending', 'Pending Review'),
+    ('submitted', 'Documents Submitted'),
+    ('approved', 'Approved'),
+    ('rejected', 'Rejected'),
+]
+
+
+PAYMENT_STATUS = [
+    ('initiated', 'Payment Initiated'),
+    ('pending_confirmation', 'Waiting Provider Confirmation'),
+    ('held', 'Funds Held in Escrow'),
+    ('released', 'Funds Released'),
+    ('failed', 'Payment Failed'),
+    ('refund_initiated', 'Refund Processing'),
+    ('refunded', 'Refund Completed'),
+    ('cancelled', 'Cancelled Before Processing'),
+]
+
+
+PAYMENT_METHOD_CHOICES = [
+    ('momo', 'Mobile Money'),
+    ('visa', 'Visa Card'),
+    ('debit', 'Debit Card'),
+]
+
+
+TRANSACTION_TYPES = [
+    ('job_payment', 'Completed Job Payment'),
+    ('deposit', 'Wallet Top-up'),
+    ('withdrawal', 'Withdrawal'),
+    ('commission', 'Platform Commission Deduction'),
+    ('refund', 'Customer Refund'),
+    ('bonus', 'Platform Bonus Credit'),
+    ('adjustment', 'Manual Adjustment'),
+    ('reversal', 'Transaction Reversal'),
+    ('payout', 'Rider Earnings Payout'),
+]
+
+
+WITHDRAWAL_STATUS = [
+    ('pending', 'Queued for Processing'),
+    ('reserved', 'Funds Reserved — Sending'),
+    ('validated', 'Verified — Sufficient Balance'),
+    ('initiated', 'Sent to Mobile Money Provider'),
+    ('completed', 'Successfully Sent'),
+    ('failed', 'Provider Failed — Funds Returned'),
+    ('reversed', 'System Reversed — Check Notes'),
+    ('timeout', 'Provider Timeout — Funds Restored'),
+]
+
+
+COMPLAINT_STATUS = [
+    ('pending', 'Under Review'),
+    ('in_progress', 'Being Investigated'),
+    ('resolved', 'Resolved — Closed'),
+    ('warning_issued', 'Warning Issued'),
+    ('restricted', 'Rider Restricted'),
+    ('banned', 'Rider Banned'),
+    ('dismissed', 'No Action Required'),
+]
+
+
+COMPLAINT_TYPE = [
+    ('late_arrival', 'Late Arrival'),
+    ('rude_behavior', 'Unprofessional Behavior'),
+    ('overcharging', 'Price Dispute'),
+    ('unsafe_driving', 'Unsafe Riding'),
+    ('no_show', 'Rider Did Not Arrive'),
+    ('item_damaged', 'Item Damaged'),
+    ('cancelled_without_notice', 'Cancelled Without Notice'),
+    ('other', 'Other Issue'),
+]
+
+
+# ==========================================
+#  CUSTOMER WALLET
 # ==========================================
 
 class CustomerWallet(models.Model):
@@ -241,7 +254,6 @@ class CustomerWallet(models.Model):
 
         try:
             with transaction.atomic():
-                # Check duplicate BEFORE locking row
                 if WalletTransaction.objects.filter(reference=ref).exists():
                     return None, f"Duplicate transaction: {ref}"
 
@@ -269,10 +281,10 @@ class CustomerWallet(models.Model):
                 wallet.refresh_from_db()
                 return wallet, "Deposit successful"
 
-        except IntegrityError as e:
+        except IntegrityError:
             if WalletTransaction.objects.filter(reference=ref).exists():
                 return None, f"Duplicate transaction: {ref}"
-            return None, f"Database error: {str(e)}"
+            return None, "Database error"
 
     def withdraw(self, amount, reference=None, description=''):
         amount = round_money(amount)
@@ -312,14 +324,14 @@ class CustomerWallet(models.Model):
                 wallet.refresh_from_db()
                 return True, "Withdrawal successful"
 
-        except IntegrityError as e:
+        except IntegrityError:
             if WalletTransaction.objects.filter(reference=ref).exists():
                 return False, f"Duplicate transaction: {ref}"
-            return False, f"Database error: {str(e)}"
+            return False, "Database error"
 
 
 # ==========================================
-# WALLET TRANSACTION
+#  WALLET TRANSACTION
 # ==========================================
 
 class WalletTransaction(models.Model):
@@ -389,10 +401,7 @@ class WalletTransaction(models.Model):
         ]
 
     def __str__(self):
-           return (
-        f"{self.reference} | {self.transaction_type} | "
-        f"{self.amount} {self.currency}"
-    )
+        return f"{self.reference} | {self.transaction_type} | {self.amount} {self.currency}"
 
 
 # ==========================================
@@ -435,7 +444,7 @@ class Rider(models.Model):
     current_lat = models.FloatField(null=True, blank=True, validators=[validate_latitude])
     current_lng = models.FloatField(null=True, blank=True, validators=[validate_longitude])
     last_location_update = models.DateTimeField(null=True, blank=True)
-    verification_status = models.CharField(
+       verification_status = models.CharField(
         max_length=20, choices=VERIFICATION_STATUS,
         default='pending', db_index=True
     )
@@ -458,6 +467,7 @@ class Rider(models.Model):
         return self.verification_status == 'approved' and not self.is_restricted
 
     def get_distance_km(self, lat, lng):
+        """Calculate Haversine distance between this rider and given coordinates"""
         if None in (self.current_lat, self.current_lng, lat, lng):
             return None
         if self.current_lat == 0 and self.current_lng == 0:
@@ -466,7 +476,7 @@ class Rider(models.Model):
         lon1 = max(-180.0, min(180.0, float(self.current_lng)))
         lat2 = max(-90.0, min(90.0, float(lat)))
         lon2 = max(-180.0, min(180.0, float(lng)))
-        R = 6371
+        R = 6371  # Earth radius in km
         dlat = radians(lat2 - lat1)
         dlon = radians(lon2 - lon1)
         a = sin(dlat / 2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2)**2
@@ -517,8 +527,8 @@ class RiderProfile(models.Model):
         if not hasattr(self, 'rider'):
             return False
         return (
-            self.is_online
-            and self.rider.verification_status == 'approved'
+            self.is_online 
+            and self.rider.verification_status == 'approved' 
             and not self.rider.is_restricted
         )
 
@@ -533,7 +543,7 @@ class RiderProfile(models.Model):
 # ==========================================
 
 class RiderWallet(models.Model):
-       id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rider = models.OneToOneField(
         Rider,
         on_delete=models.PROTECT,
@@ -555,8 +565,7 @@ class RiderWallet(models.Model):
     pending_earnings = models.DecimalField(
         max_digits=12,
         decimal_places=2,
-        default=Decimal('0.00'),
-        validators=[validate_non_negative_amount]
+        default=Decimal('0.00')
     )
     currency = models.CharField(
         max_length=3,
@@ -572,39 +581,31 @@ class RiderWallet(models.Model):
     def __str__(self):
         return f"{self.rider.name} — {self.currency} {self.balance}"
 
-
-               def hold_pending_earnings(self, amount, booking_ref=''):
-            """         
-                 When payment is confirmed, move amount into pending earnings.
-        These funds are held safely until the booking is completed.
-        """
-                 amount = round_money(amount)
-        validate_positive_amount(amount)
-        
-                  transaction.atomic():
-            wallet = RiderWallet.objects.select_for_update().get(pk=self.pk)
-            wallet.full_clean(exclude=['rider'])
-            
-            wallet.pending_earnings = F('pending_earnings') + amount
-            wallet.save(update_fields=['pending_earnings', 'updated_at'])
-            
-            wallet.refresh_from_db()
-        return wallet, "Earnings held safely for release on completion"
-
-
-       def credit_earnings(self, amount, booking_ref='', payment_verified=False):
+    def hold_pending_earnings(self, amount, booking_ref=''):
+        """Hold earnings securely until booking completes"""
         amount = round_money(amount)
         validate_positive_amount(amount)
 
-        # Prevent releasing more than is safely held
+        with transaction.atomic():
+            wallet = RiderWallet.objects.select_for_update().get(pk=self.pk)
+            wallet.full_clean(exclude=['rider'])
+
+            wallet.pending_earnings = F('pending_earnings') + amount
+            wallet.save(update_fields=['pending_earnings', 'updated_at'])
+            wallet.refresh_from_db()
+        return wallet, "Earnings held safely for release on completion"
+
+    def credit_earnings(self, amount, booking_ref='', payment_verified=False):
+        """Release held earnings to rider balance — ONLY once payment is verified"""
+        amount = round_money(amount)
+        validate_positive_amount(amount)
+
         if self.pending_earnings < amount:
             return None, "Insufficient pending earnings to release"
-
         if not payment_verified:
             return None, "Payment must be verified before crediting earnings"
 
         ref = f"PAY-{booking_ref or generate_transaction_ref()}"
-
 
         with transaction.atomic():
             if WalletTransaction.objects.filter(reference=ref).exists():
@@ -616,7 +617,9 @@ class RiderWallet(models.Model):
             wallet.balance = F('balance') + amount
             wallet.available_balance = F('available_balance') + amount
             wallet.pending_earnings = F('pending_earnings') - amount
-            wallet.save(update_fields=['balance', 'available_balance', 'pending_earnings', 'updated_at'])
+            wallet.save(update_fields=[
+                'balance', 'available_balance', 'pending_earnings', 'updated_at'
+            ])
 
             WalletTransaction.objects.create(
                 rider_wallet=wallet,
@@ -632,6 +635,7 @@ class RiderWallet(models.Model):
         return wallet, "Earnings credited successfully"
 
     def reserve_funds(self, amount):
+        """Reserve funds during withdrawal process"""
         amount = round_money(amount)
         validate_positive_amount(amount)
 
@@ -645,6 +649,7 @@ class RiderWallet(models.Model):
         return True, "Funds reserved"
 
     def confirm_withdrawal_debit(self, amount):
+        """Final debit after provider confirms payout"""
         amount = round_money(amount)
         with transaction.atomic():
             wallet = RiderWallet.objects.select_for_update().get(pk=self.pk)
@@ -654,6 +659,7 @@ class RiderWallet(models.Model):
         return True, "Funds debited"
 
     def restore_funds(self, amount, reason=''):
+        """Restore reserved funds if payout fails"""
         amount = round_money(amount)
         validate_positive_amount(amount)
 
@@ -676,6 +682,7 @@ class RiderWallet(models.Model):
         return True, "Funds restored"
 
     def create_withdrawal_request(self, amount, method, idempotency_key=''):
+        """Initiate a withdrawal request — idempotent"""
         amount = round_money(amount)
         validate_positive_amount(amount)
 
@@ -797,12 +804,30 @@ class Booking(models.Model):
         validate_fare_breakdown(self.total_fare, self.platform_commission, self.rider_payout)
 
     def save(self, *args, **kwargs):
+        """Auto-calculate 15% / 85% split when total_fare is set"""
         if self.total_fare > 0 and self.platform_commission == 0 and self.rider_payout == 0:
             self.platform_commission = round_money(self.total_fare * COMMISSION_RATE)
             self.rider_payout = round_money(self.total_fare * RIDER_PAYOUT_RATE)
         super().save(*args, **kwargs)
 
-    def assign_rider(self, rider):
+    def get_distance_km(self, from_lat, from_lng, to_lat, to_lng):
+        """Haversine distance calculation for pickup → destination or rider → pickup"""
+        if None in (from_lat, from_lng, to_lat, to_lng):
+            return None
+        lat1 = max(-90.0, min(90.0, float(from_lat)))
+        lon1 = max(-180.0, min(180.0, float(from_lng)))
+        lat2 = max(-90.0, min(90.0, float(to_lat)))
+        lon2 = max(-180.0, min(180.0, float(to_lng)))
+        R = 6371
+        dlat = radians(lat2 - lat1)
+        dlon = radians(lon2 - lon1)
+        a = sin(dlat / 2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2)**2
+        a = max(0.0, min(1.0, a))
+        c = 2 * asin(sqrt(a))
+        return round(R * c, 2)
+
+       def assign_rider(self, rider):
+        """Atomic rider assignment — prevents double-booking race conditions"""
         with transaction.atomic():
             # Validate status BEFORE acquiring lock
             if self.status not in ['pending', 'searching_rider']:
@@ -916,7 +941,7 @@ class Booking(models.Model):
         return True, "Booking cancelled"
 
     def confirm_payment_verified(self, provider_ref='', payment_ref=''):
-               # Prevent duplicate processing
+        # Prevent duplicate processing
         if self.payment_status in ['held', 'released']:
             return True, "Payment already verified"
 
@@ -924,15 +949,12 @@ class Booking(models.Model):
             self.payment_ref = payment_ref
         if provider_ref:
             self.provider_ref = provider_ref
-            
-        # ✅ Hold funds — DON'T release earnings yet!
+
+        # Hold funds — DON'T release earnings yet!
         self.payment_status = 'held'
         self.full_clean()
         self.save()
-        
         return True, "Payment verified — held securely until ride completion"
-
-    
 
     def process_refund(self, amount=None, reason='', provider_confirm_callback=None):
         if self.payment_status not in ['held', 'released']:
@@ -1067,7 +1089,7 @@ class WithdrawalRequest(models.Model):
             return success, msg
 
     def mark_payout_failed(self, reason='Provider error'):
-        """Restore reserved funds ONLY if we are certain the payout failed."""
+        """Restore reserved funds ONLY if we are certain the payout failed"""
         with transaction.atomic():
             if self.status in ['completed', 'reversed']:
                 return False, "Cannot fail completed payout"
@@ -1143,7 +1165,7 @@ class WithdrawalRequest(models.Model):
             return self.mark_payout_failed(reason=error)
 
     def retry_failed(self, new_idempotency_key=None):
-        """Create new request; preserve original failure record."""
+        """Create new request; preserve original failure record"""
         if self.status != 'failed':
             return None, "Only failed requests can be retried"
         key = new_idempotency_key or f"RETRY-{self.reference}-{uuid.uuid4().hex[:6]}"
@@ -1168,7 +1190,7 @@ class RiderComplaint(models.Model):
         User, on_delete=models.PROTECT,
         related_name='filed_complaints'
     )
-    complaint_type = models.CharField(max_length=40, choices=COMPLAINT_TYPE)
+       complaint_type = models.CharField(max_length=40, choices=COMPLAINT_TYPE)
     description = models.TextField()
     status = models.CharField(
         max_length=20, choices=COMPLAINT_STATUS,
@@ -1243,8 +1265,9 @@ class RiderComplaint(models.Model):
         self.save()
         return True
 
+
 # ==========================================
-#  SYSTEM CONFIGURATION & AUTOMATION — RYDNOW AUTO-RUN & SAFETY
+#  SYSTEM CONFIGURATION — Singleton Platform Settings
 # ==========================================
 
 class SystemConfig(models.Model):
@@ -1302,7 +1325,6 @@ class SystemAlert(models.Model):
             message=message,
             booking_ref=booking_ref
         )
-        # In production: trigger email/SMS notification here
         return alert
 
     def mark_resolved(self):
@@ -1312,7 +1334,7 @@ class SystemAlert(models.Model):
 
 
 # ==========================================
-#  DAILY SUMMARY LOG — Know What Happened
+#  DAILY SUMMARY LOG — Platform Analytics
 # ==========================================
 
 class DailySummary(models.Model):
@@ -1375,7 +1397,7 @@ class DailySummary(models.Model):
 
 
 # ==========================================
-#  BOOKING AUTO-MANAGEMENT — Add Methods to Existing Booking Class
+#  SCHEDULED TASKS
 # ==========================================
 
 def auto_cancel_stale_bookings(minutes=15):
@@ -1407,7 +1429,7 @@ def auto_cancel_stale_bookings(minutes=15):
 
 
 # ==========================================
-#  HELPER: QUICK PERMISSION CHECKS FOR VIEWS
+#  VIEW HELPER FUNCTIONS — Queryset Permission Helpers
 # ==========================================
 
 def get_customer_bookings_queryset(user):
@@ -1443,14 +1465,15 @@ def get_available_nearby_bookings(rider, max_distance_km=5.0):
         assigned_rider__isnull=True
     ).select_related('customer')
 
-    nearby = []
+    nearby_ids = []
     for booking in all_pending:
         distance = booking.get_distance_km(
             rider.current_lat, rider.current_lng,
             booking.pickup_lat, booking.pickup_lng
         )
         if distance and distance <= max_distance_km:
-            nearby.append(booking)
+            nearby_ids.append(booking.pk)
 
-    # Return filtered PKs for queryset efficiency
-    return Booking.objects.filter(pk__in=[b.pk for b in nearby])
+    return Booking.objects.filter(pk__in=nearby_ids)
+          
+
