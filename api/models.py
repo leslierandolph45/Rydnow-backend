@@ -76,14 +76,6 @@ COMPLAINT_TYPE = [
     ('other', 'Other'),
 ]
 
-RESTRICTION_REASON = [
-    ('too_many_complaints', 'Too Many Complaints'),
-    ('payment_issue', 'Payment Issue'),
-    ('fraud_suspected', 'Suspected Fraud'),
-    ('safety_concerns', 'Safety Concerns'),
-    ('admin_initiated', 'Admin Decision'),
-]
-
 
 class CustomerWallet(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -99,59 +91,6 @@ class CustomerWallet(models.Model):
             return f"{self.user.username} — Wallet: GH₵{self.balance}"
         except:
             return f"Wallet #{self.id}"
-
-    def deposit(self, amount, is_bonus=False):
-        amount = round(float(amount), 2)
-        self.balance = round(float(self.balance) + amount, 2)
-        if is_bonus:
-            self.bonus_credit = round(float(self.bonus_credit) + amount, 2)
-        else:
-            self.withdrawable_balance = round(float(self.withdrawable_balance) + amount, 2)
-        self.save()
-        WalletTransaction.objects.create(
-            wallet=self,
-            wallet_type='customer',
-            transaction_type='bonus' if is_bonus else 'deposit',
-            amount=amount,
-            description='Funds added to wallet'
-        )
-
-    def pay_for_delivery(self, amount):
-        amount = round(float(amount), 2)
-        if float(self.balance) < amount:
-            return False, 'Insufficient wallet balance'
-        self.balance = round(float(self.balance) - amount, 2)
-        if float(self.bonus_credit) >= amount:
-            self.bonus_credit = round(float(self.bonus_credit) - amount, 2)
-        else:
-            remaining = round(amount - float(self.bonus_credit), 2)
-            self.bonus_credit = 0.00
-            self.withdrawable_balance = round(float(self.withdrawable_balance) - remaining, 2)
-        self.save()
-        WalletTransaction.objects.create(
-            wallet=self,
-            wallet_type='customer',
-            transaction_type='payment',
-            amount=amount,
-            description='Payment for delivery'
-        )
-        return True, 'Payment successful'
-
-    def withdraw_funds(self, amount):
-        amount = round(float(amount), 2)
-        if float(self.withdrawable_balance) < amount:
-            return False, 'Insufficient withdrawable balance'
-        self.withdrawable_balance = round(float(self.withdrawable_balance) - amount, 2)
-        self.balance = round(float(self.balance) - amount, 2)
-        self.save()
-        WalletTransaction.objects.create(
-            wallet=self,
-            wallet_type='customer',
-            transaction_type='withdrawal',
-            amount=amount,
-            description='Withdrawal to Mobile Money'
-        )
-        return True, 'Withdrawal successful'
 
 
 class WalletTransaction(models.Model):
@@ -189,10 +128,6 @@ class CustomerProfile(models.Model):
             return self.user.username
         except:
             return f"Customer #{self.id}"
-
-    def save(self, *args, **kwargs):
-        is_new = self.pk is None
-        super().save(*args, **kwargs)
 
 
 class RiderProfile(models.Model):
@@ -286,12 +221,6 @@ class Booking(models.Model):
         except:
             return f"Booking #{self.id}"
 
-    def split_payment(self):
-        if self.total_amount and not self.platform_commission:
-            self.platform_commission = round(float(self.total_amount) * COMMISSION_RATE, 2)
-            self.rider_amount = round(float(self.total_amount) - float(self.platform_commission), 2)
-            self.save()
-
 
 class RiderWallet(models.Model):
     rider = models.OneToOneField(Rider, on_delete=models.CASCADE, related_name='wallet')
@@ -353,7 +282,7 @@ class WithdrawalRequest(models.Model):
     network = models.CharField(max_length=20, blank=True)
     status = models.CharField(max_length=20, choices=WITHDRAWAL_STATUS, default='pending')
     created_at = models.DateTimeField(auto_now_add=True)
-       processed_at = models.DateTimeField(null=True, blank=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         try:
@@ -362,9 +291,6 @@ class WithdrawalRequest(models.Model):
             return f"Withdrawal #{self.id}"
 
 
-# ==========================================
-#  RIDER COMPLAINTS & RESTRICTIONS
-# ==========================================
 class RiderComplaint(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rider = models.ForeignKey(Rider, on_delete=models.CASCADE, related_name='complaints', null=True, blank=True)
