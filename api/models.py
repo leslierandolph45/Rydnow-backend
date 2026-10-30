@@ -255,16 +255,17 @@ class CustomerWallet(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 class Meta:
     ordering = ['-created_at']
-    constraints = [
+    constraints=[
         models.CheckConstraint(
             condition=models.Q(balance__gte=0),
-            name='customer_balance_not_negative', 
+            name='customer_balance_not_negative',
         ),
         models.CheckConstraint(
             condition=models.Q(withdrawable_balance__gte=0),
             name='customer_withdrawable_not_negative',
         ),
     ]
+    
 
     def __str__(self):
         username = getattr(self.user, 'username', 'Deleted User')
