@@ -532,22 +532,6 @@ class Meta:
         models.Index(fields=['reference']),
         models.Index(fields=['wallet_type', 'status', '-created_at'])
     ]
-    constraints=[
-        #Exactly One Wallet owner - never both, neve neither
-        models.CheckConstraint(
-            condition=(
-                models.Q(wallet_isnull=False, rider_wallet__isnull=True)|
-                 models.Q(wallet__isnull=True, rider_wallet__isnull=False)
-            ), 
-            name='tx_exactly_one_wallet',
-        ),
-        #Unique idempotency key PER CUSTOMER WALLET
-        models.UniqueConstraint(
-            fields=['wallet', 'idempotency_key'],
-            condition=~models.Q(idempotency_key=''),
-            name='unique_)idempotency_per_rider',
-        )
-    ]
 rider_wallet = models.ForeignKey('rider_wallet',on_delete=models.PROTECT,related_name='withdrawals')       
 def __str__(self):
     return f"{self.reference} | {self.transaction_type} | {self.amount} {self.currency}"
@@ -1083,20 +1067,6 @@ class RiderWallet(models.Model):
 
     class Meta:
         ordering = ['-created_at']
-        constraints = [
-            models.CheckConstraint(
-                condition=models.Q(balance__gte=0),
-                name='rider_balance_not_negative',
-            ),
-            models.CheckConstraint(
-                condition=models.Q(available_balance__gte=0),
-                name='rider_available_not_negative',
-            ),
-            models.CheckConstraint(
-                condition=models.Q(pending_earnings__gte=0),
-                name='rider_pending_not_negative',
-            ),
-        ]
 
     def __str__(self):
         return f"{self.rider.full_name} — {self.currency} {self.balance}"
