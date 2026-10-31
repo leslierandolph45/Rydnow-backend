@@ -23,6 +23,7 @@ from django.views.decorators.csrf import csrf_exempt
 # Create router for auto-generated Booking endpoints
 urlpatterns = [
     path('admin/',admin.sitte.urls),
+    path('',include('api.urls')),
     # Auth endpoints — matching your actual function names
     path('auth/register/', views.customer_register, name='register'),
     path('auth/login/', user_login, name='login'),
