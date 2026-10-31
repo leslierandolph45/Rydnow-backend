@@ -1,5 +1,21 @@
 from django.urls import path
 from django.contrib import admin
+from .views import(
+    user_login,
+    send_verification_code,
+    customer_register,
+    rider_register,
+    rider_submit_documents,
+    customer_profile,
+    update_rider_location,
+    get_nearby_riders,
+    get_rider_wallet,
+    wallet_deposit,
+    wallet_transactions,
+    request_withdrawal,
+    initialize_payment,
+    verify_payment,
+)
 from .views import user_login, send_verification_code
 from . import views
 from rest_framework.decorators import api_view, permission_classes
