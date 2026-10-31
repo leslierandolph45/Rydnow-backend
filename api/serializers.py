@@ -125,8 +125,8 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
 
 
 #class RiderDocumentSerializer(serializers.ModelSerializer):
-    #class Meta:
-     #   model = RiderDocument
-      #  fields = ['id', 'document_type', 'document_file', 'status', 
-       #           'uploaded_at', 'verified_at', 'rejection_reason']
-        #read_only_fields = ['id', 'uploaded_at', 'verified_at', 'status']
+ #   class Meta:
+  #      model = RiderDocument
+   #     fields = ['id', 'document_type', 'document_file', 'status', 
+    #              'uploaded_at', 'verified_at', 'rejection_reason']
+     #   read_only_fields = ['id', 'uploaded_at', 'verified_at', 'status']
