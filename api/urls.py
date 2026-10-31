@@ -1,5 +1,7 @@
 from django.urls import path
 from . import views
+from djang.contrib import admin
+from django.urls import path
 
 urlpatterns = [
     # Auth
