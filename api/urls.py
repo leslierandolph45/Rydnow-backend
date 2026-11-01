@@ -1,13 +1,13 @@
 from django.urls import path
 from . import views
-
+from django.contrib import admin
 
 urlpatterns = [
-    # Auth endpoints — matching your actual function names
+    # Auth
     path('auth/register/', views.customer_register, name='register'),
     path('auth/login/', views.user_login, name='login'),
     path('auth/send-code/', views.send_verification_code, name='send-code'),
-    path('auth/verify-code/', views.verify_code, name='verify-code'),
+    path('auth/verify-code/', views.send_verification_code, name='verify-code'),
 
     # Rider registration
     path('auth/rider-register/', views.rider_register, name='rider-register'),
@@ -18,16 +18,15 @@ urlpatterns = [
 
     # Location
     path('rider/update-location/', views.update_rider_location, name='update-rider-location'),
-    path('riders/nearby/', views.get_nearby_riders, name='nearby-riders'),
+    path('riders/nearby/', views.get_nearby_riders, name='get-nearby-riders'),
 
-    # Wallet & Payments
+    # Wallet
     path('rider/wallet/', views.get_rider_wallet, name='rider-wallet'),
+    path('rider/deposit/', views.wallet_deposit, name='wallet-deposit'),
     path('rider/transactions/', views.rider_transactions, name='rider-transactions'),
-    path('payment/record-job/', views.record_job_payment, name='record-job-payment'),
-    path('payment/withdraw/', views.request_withdrawal, name='request-withdrawal'),
+    path('payment/withdraw/', views.request_withdrawal, name='request-withdraw'),
 
     # Paystack
     path('paystack/initialize/', views.initialize_payment, name='paystack-initialize'),
     path('paystack/verify/', views.verify_payment, name='paystack-verify'),
-    path('paystack/webhook/', views.paystack_webhook, name='paystack-webhook'),
 ]
