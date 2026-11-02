@@ -13,6 +13,7 @@ from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
+from django.views.decorators.csrf import csrf_exempt
 
 #  DJANGO REST FRAMEWORK IMPORTS
 from rest_framework.decorators import api_view, permission_classes
@@ -29,6 +30,7 @@ from .models import (
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@csrf_exempt
 def user_login(request):
     username= request.data.get('username')
     password= request.data.get('password')
@@ -57,6 +59,7 @@ def user_login(request):
         }
     }, status=status.HTTP_200_OK)
 
+@csrf_exempt
 def customer_register(request):
     from djanjo.contrib.auth.password_validation import validate_password
     from django.core.exceptions import ValidationError
