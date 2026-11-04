@@ -1,11 +1,14 @@
+from django.conf import settings
 from django.db import models, transaction, IntegrityError
 from django.contrib.auth.models import User
 from django.utils import timezone
 from django.core.exceptions import ValidationError
+from django.core import validators
 from django.db.models import F, Q
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from math import radians, sin, cos, asin, sqrt
+from .validators import validate_phone_number, validate_non_negative_amount
 
 # ==========================================
 #  SERVICE — Canonical Service Definitions
@@ -993,6 +996,15 @@ class Booking(models.Model):
 #  RIDER PROFILE — Eligibility & Extended Data
 # ==========================================
 class RiderProfile(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='rider_profile',
+        null=True,
+        blank=True,
+        help_text='Linked Django account - for authentication'
+    )
+
     rider = models.OneToOneField(
         Rider, on_delete=models.PROTECT,
         related_name='profile', unique=True

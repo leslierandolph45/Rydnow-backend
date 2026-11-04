@@ -2,6 +2,7 @@
 import os
 import json
 import requests
+from .models import CustomerProfile
 from decimal import Decimal, ROUND_HALF_UP
 
 #  DJANGO CORE IMPORTS
@@ -61,117 +62,77 @@ def user_login(request):
 
 @csrf_exempt
 def customer_register(request):
-    from djanjo.contrib.auth.password_validation import validate_password
-    from django.core.exceptions import ValidationError
-    from django.core.validators import validate_email as django_validate_email
-    from django.db import transaction, IntegrityError
-    from django.contrib.auth.models import User
-    from .models import CustomerProfile
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
 
-    def require_str(field_name,value):
-        if not isinstance(value,str):
-            return None
-            raw_email = request.data.get('email')
-            raw_phone = request.data.get('phone')
-            raw_full_name = request.data.get('full_name')
-            raw_password = request.data.get('password')
-    
-    errors = {}
 
-    type_err = require_str('email', raw_email)
-    if type_err:
-        errors['email']= type_err
-    else:
-        email = raw_email.strip()
-    type_err = requires_str('phone' , raw_phone)
-    if type_err:
-        errors ['phone'] = type_err
-    else:
-        phone = raw_phone.strip()
-    type_err = require_str('full_name', raw_full_name)
-    if type_err:
-        errors['full_name'] = type_err
-    else:
-        full_name = raw_full_name.strip()
-    if not isinstance(raw_password, str):
-        errors['password'] = 'Password must be a text value.'
-    else: 
-        password = raw_password.strip()
-    if errors:
-        return Response({'errors': errors}, status=status.HTTP_400_BAD_REQUEST)
+    data = json.loads(request.body)
 
-    if not email:
-        errors['email'] = 'Email is required.'
-    if not phone:
-        errors['phone'] = 'Phone number is required.'
-    if not full_name:
-        errors['full_name'] = 'Full name is required.'
-    if not password:
-        errors['password'] = 'Password is required.'
-
-    if errors:
-        return Response({'errors' : errors}, status = status.HTTP_400_BAD_REQUEST)
-
-    try:    
-        django_validate_email(email)
-    except ValidationError:
-        errors['email'] ='Please enter a valid email address'
-        return Response({'errors': errors} , status=status.HTTP_400_BAD_REQUEST) 
-
-    if len(email) > 150:
-        errors['email'] = 'Email address is too long. Please use an email under 150 characters'
-        return Response ({'errors' : errors}, status=status.HTTP_400_BAD_REQUEST)
-    try:
-        validate_password(password)
-    except ValidateError as e:
-        errors['password'] = list (e.messages)
-        return Response ({'errors' : errors}  , status=status.HTTP_400_BAD_REQUEST)
-
-    if user.objects.filter(username=email).exists():
-        return Response(
-            {'email': 'This  email is already registered.'},
-            status=status.HTTP_409_CONFLICT
-    ) 
-    if customer_profile.objects.filter(phone=phone).exists():
-        return Response(
-            {'phone' : 'This phone number is already registered.'},
-            status=status.HTTP_409_CONFLICT
-    )
 
     try:
+        # Get values from the request
+        raw_full_name = data.get('full_name')
+        raw_email = data.get('email')
+        phone = data.get('phone')
+        raw_password = data.get('password')
+        raw_username = data.get('username') or raw_email.split('@')[0]
+
+
+        # Validate inputs
+        errors = {}
+        if not raw_full_name:
+            errors['full_name'] = 'Full name is required.'
+        if not raw_email:
+            errors['email'] = 'Email is required.'
+        if not phone:
+            errors['phone'] = 'Phone number is required.'
+        if not raw_password or len(raw_password) < 8:
+            errors['password'] = 'Password must be at least 8 characters.'
+
+
+        if User.objects.filter(email=raw_email).exists():
+            errors['email'] = 'This email is already registered.'
+
+
+        if errors:
+            return JsonResponse({'errors': errors}, status=400)
+
+
+        # Create user and profile
         with transaction.atomic():
             user = User.objects.create_user(
-                username=email,
-                email=email,
-                password=password,
+                username=raw_username,
+                email=raw_email,
+                password=raw_password,
+                first_name=raw_full_name.split()[0],
+                last_name=' '.join(raw_full_name.split()[1:])
             )
-
-        # Split full name safely
-            name_parts = full_name.split() if full_else else []
-            first_name = name_parts[0] if name_parts else ''
-            last_name = ''.join(name_parts[1:]) if len (name_parts) > 1 else ''
-
-            customer_profile= CustomerProfile.objects.create(
+            CustomerProfile.objects.create(
                 user=user,
-                full_name=full_name,
-                phone=phone
+                phone=phone,
+                full_name=raw_full_name,
+                email=raw_email  # ✅ Important — your model has this field!
             )
-    except IntegrityError:
-        import logging
-        logger= logging.getLogger(__name)
-        logger.error ('Registration: unexpected database integrity constraint violation', exc_info=True)
-        return Response({'detail':'Registration could not be completed. Please try again later.'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR )
 
-    return Response ({
-        'message': 'Registration Successful',
-        'user' : {
-            'id': user.id,
-            'email' : user.email,
-            'full_name' : customer_profile.full_name,
-            'phone': customer_profile.phone
-            }
-    }, status=status.HTTP_201_CREATED)
+
+        # Success response
+        return JsonResponse({
+            'success': True,
+            'message': 'Account created successfully!',
+            'user_id': user.id
+        }, status=201)
+
+
+    # ✅ Step 4: Exception handlers — INSIDE the function, AFTER the try block
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON data.'}, status=400)
+
+
+    except Exception as e:
+        print('Server error:', str(e))
+        return JsonResponse({'error': 'Server error. Please try again.'}, status=500)
+
+
 
 
 def record_job_payment(request):
