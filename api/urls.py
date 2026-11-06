@@ -12,26 +12,31 @@ Security notes:
 """
 
 from django.urls import path
-from . import views
-from . import rider_views  # ✅ Added missing import
+from .import views
+from django.contrib import admin
+from django.urls import path, include
 
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("api/", include("api.urls")),
+]
 
 urlpatterns = [
     # ───────────────────────
     # Auth
     # ───────────────────────
-    path("auth/register/", views.customer_register, name="register"),
+    path("auth/register/", views.customer_register, name="customer-register"),
     path("auth/login/", views.user_login, name="login"),
-    path("auth/send-code/", views.send_verification_code, name="send-code"),
-    path("auth/verify-code/", views.verify_code, name="verify-code"),
+    #path("auth/send-code/", views.send_verification_code, name="send-code"),
+    #path("auth/verify-code/", views.verify_code, name="verify-code"),
 
     # ───────────────────────
-    # Rider onboarding
+    #Rider onboarding
     # ───────────────────────
-    path("api/rider-register/", rider_views.rider_register, name="rider-register"),
+    path("api/rider-register/", views.rider_register, name="rider-register"),
   
     path("rider-signup/", views.rider_register, name="rider-signup"),
-    path("api/rider/submit-documents/", rider_views.rider_submit_verification, name="rider-verify"),
+    path("api/rider/submit-documents/", views.rider_submit_documents, name="rider-verify"),
 
     # ───────────────────────
     # Profile
@@ -55,7 +60,7 @@ urlpatterns = [
     # ───────────────────────
     # Paystack
     # ───────────────────────
-    path("paystack/initialize/", views.initialize_payment, name="paystack-initialize"),
-    path("paystack/verify/", views.verify_payment, name="paystack-verify"),
-    path("paystack/webhook/", views.paystack_webhook, name="paystack-webhook"),
+    #path("paystack/initialize/", views.initialize_payment, name="paystack-initialize"),
+    #path("paystack/verify/", views.verify_payment, name="paystack-verify"),
+    #path("paystack/webhook/", views.paystack_webhook, name="paystack-webhook"),
 ]
