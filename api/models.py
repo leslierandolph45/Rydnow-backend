@@ -1581,3 +1581,23 @@ class ServiceQualification(models.Model):
         self.save(
             update_fields=["is_approved", "approved_at", "approved_by", "updated_at"]
         )
+# ═══════════════════════════════════════════════════════════════
+# PROMO CODES
+# ═══════════════════════════════════════════════════════════════
+class PromoCode(models.Model):
+    """Discount/promo codes for riders/customers."""
+    code = models.CharField(max_length=50, unique=True)
+    discount = models.DecimalField(max_digits=10, decimal_places=2, help_text="Discount amount or percentage")
+    is_percentage = models.BooleanField(default=False, help_text="If checked, discount is a %")
+    is_active = models.BooleanField(default=True)
+    usage_limit = models.PositiveIntegerField(null=True, blank=True, help_text="Max times this can be used")
+    times_used = models.PositiveIntegerField(default=0)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.code} — {self.discount}{'%' if self.is_percentage else 'GHS'}"
+
