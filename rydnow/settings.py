@@ -395,3 +395,8 @@ if _sentry_dsn:
         traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", 0.1)),
         send_default_pii=False,  # keep rider ID data out of error reports
     )
+
+
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_DIRS = []
