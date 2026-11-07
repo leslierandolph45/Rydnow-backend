@@ -33,7 +33,6 @@ urlpatterns = [
     # ───────────────────────
     #Rider onboarding
     # ───────────────────────
-    path("api/rider-register/", views.rider_register, name="rider-register"),
   
     path("rider-signup/", views.rider_register, name="rider-signup"),
     path("api/rider/submit-documents/", views.rider_submit_documents, name="rider-verify"),

@@ -450,6 +450,21 @@ def rider_register(request):
         requires_approval=True,
     )
 
+    # ✅ CREATE AUTH TOKEN for document uploads
+    token, _ = Token.objects.get_or_create(user=user)  # ← ADD THIS LINE
+
+    logger.info("Rider registered: rider_id=%s", rider.id)
+    return ok(
+        "Registration submitted. Upload your documents to complete verification.",
+        status=status.HTTP_201_CREATED,
+        rider_id=rider.id,
+        email=user.email,
+        phone=rider.phone,
+        verification_status=rider.verification_status,
+        requires_approval=True,
+        token=token.key,  # ← ADD THIS — send token to frontend
+    )
+
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser, FormParser])
