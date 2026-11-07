@@ -2,19 +2,27 @@
 Django settings for the Rydnow project (rides, delivery & waste collection).
 
 All environment-specific values come from environment variables.
-Required in production:  DJANGO_SECRET_KEY, DATABASE_URL
-Optional:                DEBUG, ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS,
-                         CSRF_TRUSTED_ORIGINS, REDIS_URL, SENTRY_DSN,
-                         EMAIL_*, LOG_LEVEL
+
+Required in production:
+    DJANGO_SECRET_KEY, DATABASE_URL
+
+Optional:
+    DEBUG, ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS,
+    REDIS_URL, SENTRY_DSN, LOG_LEVEL, EMAIL_*,
+    AWS_STORAGE_BUCKET_NAME (+ AWS_* for S3 / Cloudflare R2 file storage)
+
+Local development: set DEBUG=True in your shell or .env file.
 """
 
 import os
-from datetime import timedelta  # noqa: F401  (handy if you add JWT later)
+import warnings
 from pathlib import Path
+from dotenv import load_dotenv
 
 import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
 
+load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -22,7 +30,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Env helpers
 # ---------------------------------------------------------------------------
 def env_bool(name: str, default: bool = False) -> bool:
-    return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes"}
+    return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be an integer, got {raw!r}.") from exc
 
 
 def env_list(name: str, default=None) -> list:
@@ -34,13 +52,14 @@ def env_list(name: str, default=None) -> list:
 # ---------------------------------------------------------------------------
 # Core
 # ---------------------------------------------------------------------------
-DEBUG = env_bool("DEBUG", True)
+# Secure by default: production never runs with DEBUG on by accident.
+DEBUG = env_bool("DEBUG", False)
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
     if DEBUG:
         # Dev-only fallback. Never reached in production.
-        SECRET_KEY = "dev-only-insecure-key-do-not-use-in-production"
+        SECRET_KEY = "dev-insecure-key"
     else:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DEBUG is False.")
 
@@ -57,8 +76,9 @@ ROOT_URLCONF = "rydnow.urls"
 WSGI_APPLICATION = "rydnow.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# NOTE: If you plan a custom user (recommended: rider / driver / collector
-# roles), set AUTH_USER_MODEL = "api.User" NOW, before your first migration.
+# NOTE: For a custom user (rider / driver / collector roles) set
+# AUTH_USER_MODEL = "api.User" BEFORE the first migration. Changing it after
+# migrations exist requires a manual migration. Leave unset if already migrated.
 # AUTH_USER_MODEL = "api.User"
 
 
@@ -83,8 +103,10 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # CORS must sit above anything that can generate a response
+    # (WhiteNoise, CommonMiddleware), so error responses carry CORS headers.
+    "corsheaders.middleware.CorsMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-    "corsheaders.middleware.CorsMiddleware",  # before CommonMiddleware
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -128,7 +150,10 @@ if not DEBUG and DATABASES["default"]["ENGINE"].endswith("sqlite3"):
 
 
 # ---------------------------------------------------------------------------
-# Cache (Redis if available; useful for throttling, rate limits, geo lookups)
+# Cache
+# Redis is strongly recommended in production: DRF throttle counters live in
+# the cache, and the local-memory fallback is NOT shared between workers, so
+# rate limits are only approximate without Redis.
 # ---------------------------------------------------------------------------
 if os.environ.get("REDIS_URL"):
     CACHES = {
@@ -148,6 +173,9 @@ else:
 
 # ---------------------------------------------------------------------------
 # Auth & passwords
+# NOTE: create_user() does not run these validators. Call
+# django.contrib.auth.password_validation.validate_password() in your
+# registration serializers so the rules below are actually enforced.
 # ---------------------------------------------------------------------------
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -177,8 +205,6 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
-# Render's disk is ephemeral: for user uploads (proof-of-delivery photos,
-# waste photos, driver documents) use S3/Cloudflare R2 via django-storages.
 
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
@@ -187,28 +213,58 @@ STORAGES = {
     },
 }
 
+# User uploads (rider ID documents, proof-of-delivery and waste photos) must
+# live in object storage. Render's disk is ephemeral, so local files vanish on
+# every deploy. Needs: pip install django-storages boto3
+#
+# Works with AWS S3 or Cloudflare R2 (set AWS_S3_ENDPOINT_URL for R2).
+# The bucket must be PRIVATE: files are served through short-lived signed URLs.
+if os.environ.get("AWS_STORAGE_BUCKET_NAME"):
+    STORAGES["default"] = {"BACKEND": "storages.backends.s3.S3Storage"}
+    AWS_STORAGE_BUCKET_NAME = os.environ["AWS_STORAGE_BUCKET_NAME"]
+    AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    AWS_S3_ENDPOINT_URL = os.environ.get("AWS_S3_ENDPOINT_URL") or None
+    AWS_S3_REGION_NAME = os.environ.get("AWS_S3_REGION_NAME") or None
+    AWS_S3_SIGNATURE_VERSION = "s3v4"
+    AWS_DEFAULT_ACL = None  # inherit the bucket's private policy
+    AWS_QUERYSTRING_AUTH = True  # signed, expiring URLs
+    AWS_QUERYSTRING_EXPIRE = env_int("AWS_QUERYSTRING_EXPIRE", 300)  # seconds
+    AWS_S3_FILE_OVERWRITE = False  # never silently replace an existing file
+elif not DEBUG:
+    warnings.warn(
+        "No object storage configured (AWS_STORAGE_BUCKET_NAME). Uploaded files "
+        "will be written to Render's ephemeral disk and LOST on the next deploy.",
+        RuntimeWarning,
+        stacklevel=1,
+    )
+
+# Cap in-memory upload size; larger files stream to a temp file on disk.
+# (DATA_UPLOAD_MAX_MEMORY_SIZE does not count uploaded files, only the rest of
+# the request body, so the 5 MB per-document limit is enforced in serializers.)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # CORS / CSRF
-# Never combine CORS_ALLOW_ALL_ORIGINS with credentials. Whitelist explicitly.
+# Whitelist origins explicitly; never combine CORS_ALLOW_ALL_ORIGINS with
+# credentials. Origins are the FRONTEND's, not the API's own host.
+# Token auth sends credentials in a header, so cookies are off by default.
 # ---------------------------------------------------------------------------
 CORS_ALLOWED_ORIGINS = env_list(
     "CORS_ALLOWED_ORIGINS",
     default=[
-        "https://rydnow.app",
         "https://www.rydnow.app",
     ]
     + (["http://localhost:3000", "http://127.0.0.1:3000"] if DEBUG else []),
 )
-CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_CREDENTIALS = env_bool("CORS_ALLOW_CREDENTIALS", False)
 
+# Needed for the Django admin over HTTPS behind Render's proxy.
 CSRF_TRUSTED_ORIGINS = env_list(
     "CSRF_TRUSTED_ORIGINS",
-    default=[
-        "https://rydnow-backend.onrender.com",
-        "https://rydnow.app",
-        "https://www.rydnow.app",
-    ],
+    default=["https://rydnow-backend.onrender.com"],
 )
 
 
@@ -216,12 +272,14 @@ CSRF_TRUSTED_ORIGINS = env_list(
 # Django REST Framework
 # ---------------------------------------------------------------------------
 REST_FRAMEWORK = {
-    # Secure by default: endpoints must opt OUT of authentication explicitly.
+    # Secure by default: endpoints must opt OUT of authentication explicitly
+    # (e.g. registration and login views set AllowAny).
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
-    # Token auth for mobile apps. Session auth only for the browsable API/admin
-    # in dev. BasicAuthentication removed (sends credentials on every request).
+    # Token auth for mobile and web clients. Session auth only for the
+    # browsable API in dev. BasicAuthentication is intentionally absent
+    # (it sends credentials on every request).
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.TokenAuthentication",
     ]
@@ -238,7 +296,8 @@ REST_FRAMEWORK = {
     # Never return unbounded lists (order history, nearby riders, etc.)
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
-    # Abuse protection; tune per-view with `throttle_scope` (e.g. "login", "otp")
+    # Abuse protection. Apply a scope per view with `throttle_scope`,
+    # e.g. throttle_scope = "register" on the rider registration view.
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
         "rest_framework.throttling.UserRateThrottle",
@@ -249,17 +308,16 @@ REST_FRAMEWORK = {
         "user": "300/min",
         "login": "5/min",
         "otp": "3/min",
+        "register": "10/hour",
     },
-}
-
-REST_FRAMEWORK = {
-    # ... your other DRF settings ...
+    # Must exist at api/exception_handler.py. Keep error bodies shaped as
+    # {"detail": "..."} so the Next.js pages can display them.
     "EXCEPTION_HANDLER": "api.exception_handler.rydnow_exception_handler",
 }
 
 
 # ---------------------------------------------------------------------------
-# Security (production)
+# Security
 # ---------------------------------------------------------------------------
 if not DEBUG:
     # Render terminates TLS at its proxy
@@ -269,9 +327,10 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
 
-    SECURE_HSTS_SECONDS = int(os.environ.get("SECURE_HSTS_SECONDS", 31536000))  # 1 year
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
+    SECURE_HSTS_SECONDS = env_int("SECURE_HSTS_SECONDS", 31536000)  # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", True)
+    # Preload is very hard to undo; opt in deliberately.
+    SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
 
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
@@ -279,10 +338,6 @@ CSRF_COOKIE_SAMESITE = "Lax"
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
 X_FRAME_OPTIONS = "DENY"
-
-# Cap in-memory upload size (photos); larger files stream to disk
-DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
-FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +348,7 @@ if DEBUG and not os.environ.get("EMAIL_HOST"):
 else:
     EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
     EMAIL_HOST = os.environ.get("EMAIL_HOST", "")
-    EMAIL_PORT = int(os.environ.get("EMAIL_PORT", 587))
+    EMAIL_PORT = env_int("EMAIL_PORT", 587)
     EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
     EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
     EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", True)
@@ -335,7 +390,8 @@ if _sentry_dsn:
 
     sentry_sdk.init(
         dsn=_sentry_dsn,
+        environment=os.environ.get("SENTRY_ENVIRONMENT", "development" if DEBUG else "production"),
+        release=os.environ.get("RENDER_GIT_COMMIT"),
         traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", 0.1)),
-        send_default_pii=False,
+        send_default_pii=False,  # keep rider ID data out of error reports
     )
-
