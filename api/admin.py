@@ -8,6 +8,8 @@ Design principles
   (a LogEntry is written per object so every change is traceable).
 * Every changelist avoids N+1 queries via list_select_related.
 * Personal data is shown masked in list views where possible.
+* Every model is registered exactly once (Django raises AlreadyRegistered
+  on duplicates, which crashes the app at import time).
 """
 from __future__ import annotations
 
@@ -19,58 +21,49 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from django.utils.html import format_html
 
-
+# NOTE: adjust the import path if your models live elsewhere
+# (e.g. `from api.models import (...)` or a models package).
 from .models import (
-    # RIDERS & PROFILES
-    RiderProfile,
-    RiderComplaint,
-    RiderEmergencyContact,
-    RiderIncident,
-    RiderProfileAdminNote,
-    RiderWallet,
-    
-    #  DOCUMENTS & QUALIFICATION 
-    ServiceQualification,
-    RiderDocument,
-    
-    #  WITHDRAWALS & DEPOSITS 
-    WalletDeposit,
-    WalletTransaction,
-    WithdrawalRequest,
-    
-    # ─PROMOS & REFERRALS 
-    PromoCode,
-    PromoRedemption,
-    ReferralCode,
-    Referral,
-    
-    # BUSINESS ACCOUNTS 
-    BusinessAccount,
-    WasteSubscription,
-    
-    #  LOYALTY 
-    LoyaltyAccount,
-    LoyaltyTransaction,
-    
-    #  CUSTOMERS 
+    # Customer
     CustomerProfile,
     SavedAddress,
     CustomerWallet,
-    
-    #  PAYMENTS 
-    Payment,
-    Refund,
-    WebhookEvent,
-    
-    #  BOOKINGS 
+    CustomerRiderPreference,
+    # Rider
+    RiderProfile,
+    RiderStatusHistory,
+    ServiceQualification,
+    RiderDocument,
+    RiderPayoutAccount,
+    RiderEmergencyContact,
+    RiderOnlineSession,
+    RiderLocationPing,
+    RiderProfileAdminNote,
+    RiderIncident,
+    RiderComplaint,
+    # Bookings
     Booking,
     BookingStatusHistory,
     ParcelDetail,
     BookingOffer,
     Review,
+    # Finance
+    RiderWallet,
+    WalletTransaction,
+    WalletDeposit,
+    WithdrawalRequest,
+    Payment,
+    Refund,
+    LoyaltyAccount,
+    LoyaltyTransaction,
+    # Growth & business
+    Referral,
+    ReferralCode,
+    BusinessAccount,
+    WasteSubscription,
+    PromoCode,
+    PromoRedemption,
 )
-
-
 
 logger = logging.getLogger(__name__)
 
@@ -176,24 +169,24 @@ def _badge(label: str, color: str):
     )
 
 
+class BaseAdmin(admin.ModelAdmin):
+    """Safe defaults for models whose fields are not customised yet."""
+
+    list_display = ("__str__", "pk")
+    ordering = ("-pk",)
+    list_per_page = 50
+
+
+class LedgerAdmin(ReadOnlyAdminMixin, BaseAdmin):
+    """Immutable financial / audit records: view-only by design."""
+
+    list_per_page = 100
+
+
 # ══════════════════════════════════════════════════════════
 # 👥 CUSTOMER PROFILE
 # ══════════════════════════════════════════════════════════
 @admin.register(CustomerProfile)
-@admin.site.register(SavedAddress)
-@admin.site.register(CustomerWallet)
-@admin.site.register(WalletTransaction)
-@admin.site.register(WithdrawalRequest)
-@admin.site.register(Payment)
-@admin.site.register(Refund)
-@admin.site.register(LoyaltyAccount)
-@admin.site.register(LoyaltyTransaction)
-@admin.site.register(Booking)
-@admin.site.register(BookingStatusHistory)
-@admin.site.register(ParcelDetail)
-@admin.site.register(BookingOffer)
-@admin.site.register(Review)
-@admin.site.register(CustomerRiderPreference)
 class CustomerProfileAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ("user__username", "user__email")
@@ -204,17 +197,25 @@ class CustomerProfileAdmin(admin.ModelAdmin):
     list_per_page = 50
 
 
+@admin.register(SavedAddress)
+class SavedAddressAdmin(BaseAdmin):
+    pass
+
+
+@admin.register(CustomerRiderPreference)
+class CustomerRiderPreferenceAdmin(admin.ModelAdmin):
+    list_display = ("customer", "preference", "rider", "created_at")
+    list_filter = ("preference", "created_at")
+    search_fields = ("customer__user__username", "rider__user__username")
+    readonly_fields = ("created_at",)
+    ordering = ("-created_at",)
+    list_per_page = 50
+
+
 # ══════════════════════════════════════════════════════════
 # 👤 RIDER PROFILE
 # ══════════════════════════════════════════════════════════
-@admin.site.register(RiderProfile)
-@admin.site.register(RiderStatusHistory)
-@admin.site.register(ServiceQualification)
-@admin.site.register(RiderDocument)
-@admin.site.register(RiderPayoutAccount)
-@admin.site.register(RiderEmergencyContact)
-@admin.site.register(RiderOnlineSession)
-@admin.site.register(RiderLocationPing)
+@admin.register(RiderProfile)
 class RiderProfileAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ("user__username", "user__email")
@@ -223,14 +224,88 @@ class RiderProfileAdmin(admin.ModelAdmin):
     ordering = ("-created_at",)
 
 
+@admin.register(RiderStatusHistory)
+class RiderStatusHistoryAdmin(LedgerAdmin):
+    """Status changes are an audit trail and must not be edited."""
+
+
+@admin.register(ServiceQualification)
+class ServiceQualificationAdmin(BaseAdmin):
+    pass
+
+
+@admin.register(RiderDocument)
+class RiderDocumentAdmin(NoDeleteAdminMixin, BaseAdmin):
+    """Verification documents are retained for compliance."""
+
+
+@admin.register(RiderPayoutAccount)
+class RiderPayoutAccountAdmin(NoDeleteAdminMixin, BaseAdmin):
+    """Payout details are sensitive; deletion is disabled."""
+
+
+@admin.register(RiderEmergencyContact)
+class RiderEmergencyContactAdmin(admin.ModelAdmin):
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    search_fields = ("full_name",)
+    readonly_fields = ("created_at", "updated_at")
+    list_select_related = ("rider_profile",)
+    ordering = ("-created_at",)
+    list_per_page = 50
+
+
+@admin.register(RiderOnlineSession)
+class RiderOnlineSessionAdmin(LedgerAdmin):
+    pass
+
+
+@admin.register(RiderLocationPing)
+class RiderLocationPingAdmin(LedgerAdmin):
+    """High-volume telemetry: view-only."""
+
+
+@admin.register(RiderProfileAdminNote)
+class RiderProfileAdminNoteAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
+    list_display = ("__str__", "pk", "author", "created_at")
+    list_filter = ("created_at", "author")
+    search_fields = ("note",)
+    readonly_fields = ("author", "created_at")
+    list_select_related = ("rider_profile", "author")
+    date_hierarchy = "created_at"
+    ordering = ("-created_at",)
+
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.author = request.user
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(RiderIncident)
+class RiderIncidentAdmin(NoDeleteAdminMixin, BaseAdmin):
+    list_display = ("__str__", "pk")
+    list_filter = ()
+    search_fields = ("reference_code", "title", "description")
+    list_select_related = ("rider_profile", "assigned_to")
+    ordering = ("-pk",)
+    list_per_page = 50
+
+
+@admin.register(RiderComplaint)
+class RiderComplaintAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    search_fields = ("description",)
+    readonly_fields = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
+
+
 # ══════════════════════════════════════════════════════════
 # 📋 BOOKING MANAGEMENT
 # ══════════════════════════════════════════════════════════
 @admin.register(Booking)
-@admin.site.register(BookingStatusHistory)
-@admin.site.register(ParcelDetaial)
-@admin.site.register(BookingOffer)
-@admin.site.register(Review)
 class BookingAdmin(BulkStatusActionMixin, admin.ModelAdmin):
     list_display = ("__str__", "pk", "status", "created_at")
     list_filter = ("status", "created_at")
@@ -252,16 +327,30 @@ class BookingAdmin(BulkStatusActionMixin, admin.ModelAdmin):
         self._apply_status(request, queryset, "cancelled")
 
 
+@admin.register(BookingStatusHistory)
+class BookingStatusHistoryAdmin(LedgerAdmin):
+    """Status changes are an audit trail and must not be edited."""
+
+
+@admin.register(ParcelDetail)
+class ParcelDetailAdmin(BaseAdmin):
+    pass
+
+
+@admin.register(BookingOffer)
+class BookingOfferAdmin(BaseAdmin):
+    pass
+
+
+@admin.register(Review)
+class ReviewAdmin(NoDeleteAdminMixin, BaseAdmin):
+    pass
+
+
 # ══════════════════════════════════════════════════════════
 # 💰 FINANCE & WALLET
-# ═══════════════════
+# ══════════════════════════════════════════════════════════
 @admin.register(RiderWallet)
-@admin.site.register(WalletTransaction)
-@admin.site.register(WithdrawalRequest)
-@admin.site.register(Payment)
-@admin.site.register(Refund)
-@admin.site.register(LoyaltyAccount)
-@admin.site.register(LoyaltyTransaction)
 class RiderWalletAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     """Balances are only ever changed through ledger-backed services."""
 
@@ -274,9 +363,15 @@ class RiderWalletAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
         return False
 
 
-@admin.site.register(WalletTransaction)
-@admin.site.register(WithdrawalRequest)
-@admin.site.register(RiderWallet)
+@admin.register(CustomerWallet)
+class CustomerWalletAdmin(NoDeleteAdminMixin, BaseAdmin):
+    """Balances are only ever changed through ledger-backed services."""
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(WalletTransaction)
 class WalletTransactionAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     """Immutable ledger: view-only by design."""
 
@@ -289,7 +384,7 @@ class WalletTransactionAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     list_per_page = 100
 
 
-@admin.site.register(WithdrawalRequest)
+@admin.register(WithdrawalRequest)
 class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("__str__", "pk", "status", "created_at")
     list_filter = ("status", "created_at")
@@ -313,7 +408,7 @@ class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, admin.Mo
         self._apply_status(request, queryset, "failed")
 
 
-@admin.site.register(WalletDeposit)
+@admin.register(WalletDeposit)
 class WalletDepositAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     """Payment-gateway records are never edited manually."""
 
@@ -326,119 +421,59 @@ class WalletDepositAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     list_per_page = 100
 
 
-# ══════════════════════════════════════════════════════════
-# 📝 RIDER PROFILE ADMIN NOTES
-# ══════════════════════════════════════════════════════════
-@admin.site.register(RiderProfileAdminNote)
-class RiderProfileAdminNoteAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
-    list_display = ("__str__", "pk", "author", "created_at")
-    list_filter = ("created_at", "author")
-    search_fields = ("note",)
-    readonly_fields = ("author", "created_at")
-    list_select_related = ("rider_profile", "author")
-    date_hierarchy = "created_at"
-    ordering = ("-created_at",)
-
-    def save_model(self, request, obj, form, change):
-        if not change:
-            obj.author = request.user
-        super().save_model(request, obj, form, change)
+@admin.register(Payment)
+class PaymentAdmin(LedgerAdmin):
+    """Payment records are immutable."""
 
 
-# ══════════════════════════════════════════════════════════
-# 🚨 RIDER INCIDENTS
-# ══════════════════════════════════════════════════════════
-SEVERITY_COLORS = {
-    "low": "#2e7d32",
-    "medium": "#f9a825",
-    "high": "#ef6c00",
-    "critical": "#c62828",
-}
-STATUS_COLORS = {
-    "reported": "#1565c0",
-    "under_review": "#f9a825",
-    "resolved": "#2e7d32",
-    "closed": "#616161",
-}
+@admin.register(Refund)
+class RefundAdmin(LedgerAdmin):
+    """Refund records are immutable."""
 
 
-@admin.site.register(RiderIncident)
-class RiderIncidentAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
-    list_display = ("__str__", "pk")
-    list_filter = ()
-    search_fields = ("reference_code", "title", "description")
-    list_select_related = ("rider_profile", "assigned_to")
-    ordering = ("-pk",)
-    list_per_page = 50
+@admin.register(LoyaltyAccount)
+class LoyaltyAccountAdmin(LedgerAdmin):
+    """Loyalty balances change only through the ledger."""
 
+
+@admin.register(LoyaltyTransaction)
+class LoyaltyTransactionAdmin(LedgerAdmin):
+    """Immutable loyalty ledger."""
 
 
 # ══════════════════════════════════════════════════════════
-# 🛡️ COMPLAINTS & EMERGENCY CONTACTS
+# 🎁 REFERRALS, PROMOS & BUSINESS
 # ══════════════════════════════════════════════════════════
-@admin.site.register(RiderComplaint)
-class RiderComplaintAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
-    list_display = ("__str__", "pk", "created_at")
-    list_filter = ("created_at",)
-    search_fields = ("description",)
-    readonly_fields = ("created_at",)
-    ordering = ("-created_at",)
-    date_hierarchy = "created_at"
-    list_per_page = 50
-
-
-@admin.site.register(RiderEmergencyContact)
-class RiderEmergencyContactAdmin(admin.ModelAdmin):
-    list_display = ("__str__", "pk", "created_at")
-    list_filter = ("created_at",)
-    search_fields = ("full_name",)
-    readonly_fields = ("created_at", "updated_at")
-    list_select_related = ("rider_profile",)
-    ordering = ("-created_at",)
-    list_per_page = 50
-
-
-# ══════════════════════════════════════════════════════════
-# 🎁 REFERRALS & PROMOS
-# ══════════════════════════════════════════════════════════
-@admin.site.register(Referral)
+@admin.register(Referral)
 class ReferralAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
-@admin.site.register(ReferralCode)
+@admin.register(ReferralCode)
 class ReferralCodeAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
-@admin.site.register(BusinessAccount)
+@admin.register(BusinessAccount)
 class BusinessAccountAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
-@admin.site.register(WasteSubscription)
+
+@admin.register(WasteSubscription)
 class WasteSubscriptionAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
-@admin.site.register(PromoCode)
+@admin.register(PromoCode)
 class PromoCodeAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
-@admin.site.register(PromoRedemption)
+@admin.register(PromoRedemption)
 class PromoRedemptionAdmin(admin.ModelAdmin):
-    list_display = ("__str__", "pk", "created_at")
-    search_fields = ()
-
-
-class CustomerRiderPreferenceAdmin(admin.ModelAdmin):
-    list_display = ('customer', 'rider', 'created_at')
-    search_fields = ('customer__user__username', 'rider__user__username')
-    readonly_fields = ('created_at',)
-    ordering = ('-created_at',)
-    list_per_page = 50
+    list_display = ("
