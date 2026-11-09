@@ -68,7 +68,7 @@ from .models import (
     ParcelDetail,
     BookingOffer,
     Review,
-    CustomerRiderPreference,
+    CustomerRiderPreferenceAdmin,
 )
 
 
