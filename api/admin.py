@@ -31,6 +31,12 @@ from .models import (
     WalletDeposit,
     WalletTransaction,
     WithdrawalRequest,
+    PromoCode,
+    PromoRedemption,
+    ReferralCode,
+    Referral,
+    BusinessAccount,
+    WasteSubscription,
 )
 
 logger = logging.getLogger(__name__)
@@ -391,3 +397,41 @@ class RiderEmergencyContactAdmin(admin.ModelAdmin):
             "classes": ("collapse",),
         }),
     )
+
+
+
+@admin.register(Referral)
+class ReferralAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'pk')
+    search_fields = ()
+
+
+@admin.register(ReferralCode)
+class ReferralCodeAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'pk', 'created_at')
+    search_fields = ()
+
+
+@admin.register(BusinessAccount)
+class BusinessAccountAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'pk')
+    search_fields = ()
+
+
+@admin.register(WasteSubscription)
+class WasteSubscriptionAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'pk', 'created_at')
+    search_fields = ()
+
+
+@admin.register(PromoCode)
+class PromoCodeAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'pk', 'created_at')
+    search_fields = ()
+
+
+@admin.register(PromoRedemption)
+class PromoRedemptionAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'pk', 'created_at')
+    search_fields = ()
+

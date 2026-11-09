@@ -2071,6 +2071,59 @@ class Referral(models.Model):
             ref.status, ref.reward_amount, ref.rewarded_at = cls.Status.REWARDED, bonus, timezone.now()
             ref.save()
 
+class ReferralCode(models.Model):
+    """
+    Unique referral code per user.
+    Used to track who invited whom and manage referral bonuses/credits.
+    One user = one active code by default.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='referral_code',
+        verbose_name='Owner',
+    )
+    code = models.CharField(
+        max_length=16,
+        unique=True,
+        db_index=True,
+        help_text='Unique alphanumeric referral code',
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    times_used = models.PositiveIntegerField(default=0, help_text='How many times this code has been used')
+    max_uses = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text='Optional limit — leave blank for unlimited'
+    )
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ('-created_at',)
+        verbose_name = 'Referral Code'
+        verbose_name_plural = 'Referral Codes'
+
+    def __str__(self):
+        return f"{self.code} — {self.user.username}"
+
+    @property
+    def is_valid(self):
+        """Code can be used only if active, not expired, and under usage limit."""
+        if not self.is_active:
+            return False
+        if self.expires_at and timezone.now() > self.expires_at:
+            return False
+        if self.max_uses and self.times_used >= self.max_uses:
+            return False
+        return True
+
+    def increment_usage(self):
+        """Call this when someone successfully uses this code."""
+        self.times_used += 1
+        self.save(update_fields=['times_used', 'updated_at'])
+
 
 class BusinessAccount(models.Model):
     """B2B: shops, pharmacies and offices ship on credit and get one invoice per cycle."""
