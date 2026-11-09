@@ -20,54 +20,49 @@ from django.db import transaction
 from django.utils.html import format_html
 
 
-#===========
-# RIDERS
-#==============
 from .models import (
+    # RIDERS & PROFILES
     RiderProfile,
     RiderComplaint,
     RiderEmergencyContact,
     RiderIncident,
     RiderProfileAdminNote,
     RiderWallet,
+    
+    #  DOCUMENTS & QUALIFICATION 
+    ServiceQualification,
+    RiderDocument,
+    
+    #  WITHDRAWALS & DEPOSITS 
     WalletDeposit,
     WalletTransaction,
     WithdrawalRequest,
+    
+    # ─PROMOS & REFERRALS 
     PromoCode,
     PromoRedemption,
     ReferralCode,
     Referral,
+    
+    # BUSINESS ACCOUNTS 
     BusinessAccount,
     WasteSubscription,
-    BookingStatusHistory,
+    
+    #  LOYALTY 
     LoyaltyAccount,
     LoyaltyTransaction,
-
-)
-
-#==============================
-#       CUSTOMER  LIST 
-#==============================
- from .models import (
+    
+    #  CUSTOMERS 
     CustomerProfile,
     SavedAddress,
     CustomerWallet,
+    
+    #  PAYMENTS 
     Payment,
     Refund,
-    Booking,
-    BookingStatusHistory,
-    ParcelDetail,
-    BookingOffer,
-    Review,
-    CustomerRiderPreference
-
- )
-
-#=========
-#  BOOKING MANAGEMENT
-#==========
-
-from .models import(
+    WebhookEvent,
+    
+    #  BOOKINGS 
     Booking,
     BookingStatusHistory,
     ParcelDetail,
@@ -76,19 +71,6 @@ from .models import(
     CustomerRiderPreference,
 )
 
-#============================
-#FINANCE & WALLETS
-#====================
-from .models import(
-    RiderWallet,
-    WalletTransaction,
-    WithdrawalRequest,
-    Payment,
-    LoyaltyAccount,
-    LoyaltyTransaction,
-    WalletDeposit,
-    WebhookEvent,
-)
 
 
 logger = logging.getLogger(__name__)
