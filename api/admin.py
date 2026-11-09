@@ -385,7 +385,7 @@ class ParcelDetailAdmin(BaseAdmin):
 class BookingOfferAdmin(BaseAdmin):
     """Rider offers on bookings. Related records are chosen by ID lookup, not dropdown."""
 
-    list_display = ("__str__", "pk", "booking", "rider", "price", "status")
+    list_display = ("__str__", "pk", "booking", "rider", "status")
     list_filter = ("status",)
     search_fields = ("rider__user__username", "rider__user__email")
     list_select_related = ("booking", "rider", "rider__user")
