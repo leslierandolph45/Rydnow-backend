@@ -1,5 +1,5 @@
 """
-Django admin configuration.
+Django admin configuration for RYDNOW.
 
 Design principles
 ——————
@@ -41,8 +41,9 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+
 # ──────────────────────────────────────────────────────────
-# Site branding (rename to match your product)
+# Site branding
 # ──────────────────────────────────────────────────────────
 admin.site.site_header = "Operations Console"
 admin.site.site_title = "Operations Admin"
@@ -147,8 +148,8 @@ def _badge(label: str, color: str):
 # ══════════════════════════════════════════════════════════
 @admin.register(CustomerProfile)
 class CustomerProfileAdmin(admin.ModelAdmin):
-    list_display = ("full_name", "phone", "created_at")
-    search_fields = ("user__username", "user__email", "full_name", "phone")
+    list_display = ("__str__", "pk", "created_at")
+    search_fields = ("user__username", "user__email")
     readonly_fields = ("created_at",)
     list_select_related = ("user",)
     ordering = ("-created_at",)
@@ -161,13 +162,11 @@ class CustomerProfileAdmin(admin.ModelAdmin):
 # ══════════════════════════════════════════════════════════
 @admin.register(RiderProfile)
 class RiderProfileAdmin(admin.ModelAdmin):
-    list_display = ("full_name", "user", "phone", "created_at")
-    search_fields = ("full_name", "user__username", "user__email", "phone")
+    list_display = ("__str__", "pk", "created_at")
+    search_fields = ("user__username", "user__email")
     readonly_fields = ("created_at",)
     list_select_related = ("user",)
     ordering = ("-created_at",)
-
-
 
 
 # ══════════════════════════════════════════════════════════
@@ -175,9 +174,9 @@ class RiderProfileAdmin(admin.ModelAdmin):
 # ══════════════════════════════════════════════════════════
 @admin.register(Booking)
 class BookingAdmin(BulkStatusActionMixin, admin.ModelAdmin):
-    list_display = ("id", "service_type", "pickup", "destination", "status", "created_at")
-    list_filter = ("service_type", "status", "created_at")
-    search_fields = ("pickup", "destination")
+    list_display = ("__str__", "pk", "status", "created_at")
+    list_filter = ("status", "created_at")
+    search_fields = ()
     readonly_fields = ("created_at",)
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
@@ -202,9 +201,9 @@ class BookingAdmin(BulkStatusActionMixin, admin.ModelAdmin):
 class RiderWalletAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     """Balances are only ever changed through ledger-backed services."""
 
-    list_display = ("rider", "balance")
-    search_fields = ("rider__user__username", "rider__user__email")
-    readonly_fields = ("balance",)
+    list_display = ("__str__", "pk")
+    search_fields = ()
+    readonly_fields = ()
     list_select_related = ("rider",)
 
     def has_add_permission(self, request):
@@ -215,10 +214,10 @@ class RiderWalletAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
 class WalletTransactionAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     """Immutable ledger: view-only by design."""
 
-    list_display = ("id", "type", "amount", "status", "created_at")
-    list_filter = ("type", "status", "created_at")
-    search_fields = ("description",)
-    readonly_fields = ("amount", "created_at")
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    search_fields = ()
+    readonly_fields = ("created_at",)
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
     list_per_page = 100
@@ -226,9 +225,9 @@ class WalletTransactionAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
 
 @admin.register(WithdrawalRequest)
 class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, admin.ModelAdmin):
-    list_display = ("id", "amount", "status", "created_at")
+    list_display = ("__str__", "pk", "status", "created_at")
     list_filter = ("status", "created_at")
-    readonly_fields = ("amount", "created_at")
+    readonly_fields = ("created_at",)
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
     list_per_page = 50
@@ -252,17 +251,10 @@ class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, admin.Mo
 class WalletDepositAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     """Payment-gateway records are never edited manually."""
 
-    list_display = (
-        "reference", "user", "amount", "currency", "status", "gateway_fee", "created_at",
-    )
-    list_filter = ("status", "currency", "created_at")
-    search_fields = ("reference", "user__username", "user__email")
-    readonly_fields = (
-        "reference", "user", "wallet", "amount", "currency", "status",
-        "authorization_url", "gateway_fee", "gateway_payload", "ip_address",
-        "created_at", "updated_at",
-    )
-    list_select_related = ("user", "wallet")
+    list_display = ("__str__", "pk", "status", "created_at")
+    list_filter = ("status", "created_at")
+    search_fields = ("reference",)
+    readonly_fields = ("created_at", "updated_at")
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
     list_per_page = 100
@@ -273,18 +265,13 @@ class WalletDepositAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
 # ══════════════════════════════════════════════════════════
 @admin.register(RiderProfileAdminNote)
 class RiderProfileAdminNoteAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
-    list_display = ("rider_profile", "short_note", "author", "created_at")
+    list_display = ("__str__", "pk", "author", "created_at")
     list_filter = ("created_at", "author")
-    search_fields = ("note", "rider_profile__full_name", "rider_profile__phone")
+    search_fields = ("note",)
     readonly_fields = ("author", "created_at")
-    autocomplete_fields = ("rider_profile",)
     list_select_related = ("rider_profile", "author")
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
-
-    @admin.display(description="Note")
-    def short_note(self, obj):
-        return obj.note[:60] + ("…" if len(obj.note) > 60 else "")
 
     def save_model(self, request, obj, form, change):
         if not change:
@@ -311,28 +298,13 @@ STATUS_COLORS = {
 
 @admin.register(RiderIncident)
 class RiderIncidentAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
-    list_display = (
-        "reference_code", "title", "rider_profile", "incident_type",
-        "severity_badge", "status_badge", "assigned_to", "date_reported",
-    )
-    list_display_links = ("reference_code", "title")
-    list_filter = ("status", "severity", "incident_type", "service", "assigned_to", "date_reported")
-    search_fields = (
-        "reference_code", "title", "description", "location", "rider_profile__full_name",
-    )
-    autocomplete_fields = ("rider_profile",)
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    search_fields = ("reference_code", "title", "description")
     list_select_related = ("rider_profile", "assigned_to")
-    date_hierarchy = "date_reported"
-    ordering = ("-date_reported",)
+    date_hierarchy = "created_at"
+    ordering = ("-created_at",)
     list_per_page = 50
-
-    @admin.display(description="Severity", ordering="severity")
-    def severity_badge(self, obj):
-        return _badge(obj.get_severity_display(), SEVERITY_COLORS.get(obj.severity, "#666"))
-
-    @admin.display(description="Status", ordering="status")
-    def status_badge(self, obj):
-        return _badge(obj.get_status_display(), STATUS_COLORS.get(obj.status, "#666"))
 
 
 # ══════════════════════════════════════════════════════════
@@ -340,98 +312,60 @@ class RiderIncidentAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
 # ══════════════════════════════════════════════════════════
 @admin.register(RiderComplaint)
 class RiderComplaintAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
-    list_display = ("subject", "complaint_type", "status", "created_at")
-    list_filter = ("complaint_type", "status", "created_at")
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
     search_fields = ("description",)
     readonly_fields = ("created_at",)
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
     list_per_page = 50
 
-    @admin.display(description="Complaint", ordering="pk")
-    def subject(self, obj):
-        return f"#{str(obj.pk)[:8]}"
-
 
 @admin.register(RiderEmergencyContact)
 class RiderEmergencyContactAdmin(admin.ModelAdmin):
-    list_display = (
-        "full_name", "relationship", "masked_phone", "rider_profile",
-        "is_primary", "notify_on_emergency", "is_verified", "is_deleted", "created_at",
-    )
-    list_filter = (
-        "relationship", "is_primary", "notify_on_emergency",
-        "is_verified", "is_deleted", "preferred_language", "created_at",
-    )
-    search_fields = (
-        "full_name", "phone_number", "alternative_phone",
-        "relationship_note", "rider_profile__full_name",
-    )
-    autocomplete_fields = ("rider_profile",)
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    search_fields = ("full_name",)
+    readonly_fields = ("created_at", "updated_at")
     list_select_related = ("rider_profile",)
-    readonly_fields = (
-        "id", "created_at", "updated_at", "verified_at",
-        "last_contacted_at", "masked_phone",
-    )
     ordering = ("-created_at",)
     list_per_page = 50
 
-    fieldsets = (
-        ("Contact Information", {
-            "fields": (
-                "rider_profile", "full_name", "relationship", "relationship_note",
-                "phone_number", "alternative_phone", "address", "preferred_language",
-            ),
-        }),
-        ("Priority & Notifications", {
-            "fields": ("is_primary", "notify_on_emergency"),
-        }),
-        ("Verification & Status", {
-            "fields": (
-                "is_verified", "verified_at", "last_contacted_at",
-                "is_deleted", "deleted_at", "masked_phone",
-            ),
-        }),
-        ("System Timestamps", {
-            "fields": ("id", "created_at", "updated_at"),
-            "classes": ("collapse",),
-        }),
-    )
 
-
-
+# ══════════════════════════════════════════════════════════
+# 🎁 REFERRALS & PROMOS
+# ══════════════════════════════════════════════════════════
 @admin.register(Referral)
 class ReferralAdmin(admin.ModelAdmin):
-    list_display = ('__str__', 'pk')
+    list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
 @admin.register(ReferralCode)
 class ReferralCodeAdmin(admin.ModelAdmin):
-    list_display = ('__str__', 'pk', 'created_at')
+    list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
 @admin.register(BusinessAccount)
 class BusinessAccountAdmin(admin.ModelAdmin):
-    list_display = ('__str__', 'pk')
+    list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
 @admin.register(WasteSubscription)
 class WasteSubscriptionAdmin(admin.ModelAdmin):
-    list_display = ('__str__', 'pk', 'created_at')
+    list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
 @admin.register(PromoCode)
 class PromoCodeAdmin(admin.ModelAdmin):
-    list_display = ('__str__', 'pk', 'created_at')
+    list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
 @admin.register(PromoRedemption)
 class PromoRedemptionAdmin(admin.ModelAdmin):
-    list_display = ('__str__', 'pk', 'created_at')
+    list_display = ("__str__", "pk", "created_at")
     search_fields = ()
-
