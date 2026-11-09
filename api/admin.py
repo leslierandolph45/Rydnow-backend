@@ -469,24 +469,54 @@ class WalletDepositAdmin(LedgerAdmin):
     list_per_page = 100
 
 
+
 @admin.register(Payment)
 class PaymentAdmin(LedgerAdmin):
     """Payment records are immutable."""
+
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 100
+
+
 
 
 @admin.register(Refund)
 class RefundAdmin(LedgerAdmin):
     """Refund records are immutable."""
 
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 100
+
+
 
 @admin.register(LoyaltyAccount)
 class LoyaltyAccountAdmin(LedgerAdmin):
     """Loyalty balances change only through the ledger."""
 
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 100
+
+
 
 @admin.register(LoyaltyTransaction)
 class LoyaltyTransactionAdmin(LedgerAdmin):
     """Immutable loyalty ledger."""
+
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 100
+
 
 
 # ══════════════════════════════════════════════════════════
@@ -495,34 +525,62 @@ class LoyaltyTransactionAdmin(LedgerAdmin):
 @admin.register(Referral)
 class ReferralAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
     search_fields = ()
+
 
 
 @admin.register(ReferralCode)
 class ReferralCodeAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
     search_fields = ()
 
 
 @admin.register(BusinessAccount)
 class BusinessAccountAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
     search_fields = ()
 
 
 @admin.register(WasteSubscription)
 class WasteSubscriptionAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
     search_fields = ()
+
 
 
 @admin.register(PromoCode)
 class PromoCodeAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
     search_fields = ()
+
+
 
 
 @admin.register(PromoRedemption)
 class PromoRedemptionAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
     search_fields = ()
