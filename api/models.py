@@ -1299,7 +1299,7 @@ class RiderStatusHistory(models.Model):
     class Status(models.TextChoices):
         ACTIVE = 'active', 'Active'
         SUSPENDED = 'suspended', 'Suspended'
-        PENDING = 'pending', ; 'Pending'
+        PENDING = 'pending', 'Pending'
 
 
     class Category(models.TextChoices):
