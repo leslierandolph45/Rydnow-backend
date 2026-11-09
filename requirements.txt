@@ -1,4 +1,4 @@
-﻿annotated-types==0.8.0
+annotated-types==0.8.0
 asgiref==3.12.1
 beautifulsoup4==4.15.0
 certifi==2026.7.22
@@ -7,7 +7,7 @@ charset-normalizer==3.5.2
 colorama==0.4.6
 cryptography==50.0.2
 dj-database-url==2.3.0
-Django==4.2,<5.0
+Django>=5.2,<6.0
 django-bootstrap-v5==1.0.11
 django-cors-headers==4.9.0
 django-phonenumber-field==8.0.0
@@ -50,3 +50,4 @@ tzdata==2026.5
 uritemplate==4.2.0
 urllib3==2.8.0
 whitenoise==6.12.0
+
