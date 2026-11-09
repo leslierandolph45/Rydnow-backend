@@ -298,13 +298,13 @@ STATUS_COLORS = {
 
 @admin.register(RiderIncident)
 class RiderIncidentAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
-    list_display = ("__str__", "pk", "created_at")
-    list_filter = ("created_at",)
+    list_display = ("__str__", "pk")
+    list_filter = ()
     search_fields = ("reference_code", "title", "description")
     list_select_related = ("rider_profile", "assigned_to")
-    date_hierarchy = "created_at"
-    ordering = ("-created_at",)
+    ordering = ("-pk",)
     list_per_page = 50
+
 
 
 # ══════════════════════════════════════════════════════════
