@@ -385,14 +385,11 @@ class ParcelDetailAdmin(BaseAdmin):
 class BookingOfferAdmin(BaseAdmin):
     """Rider offers on bookings. Related records are chosen by ID lookup, not dropdown."""
 
-    list_display = ("__str__", "pk", "booking", "rider", "price", "status", "created_at")
-    list_filter = ("status", "created_at")
+    list_display = ("__str__", "pk", "booking", "rider", "price", "status")
+    list_filter = ("status",)
     search_fields = ("rider__user__username", "rider__user__email")
     list_select_related = ("booking", "rider", "rider__user")
     raw_id_fields = ("booking", "rider")
-    readonly_fields = ("created_at",)
-    ordering = ("-created_at",)
-    date_hierarchy = "created_at"
     list_per_page = 50
 
 
@@ -499,10 +496,10 @@ class RefundAdmin(LedgerAdmin):
 class LoyaltyAccountAdmin(LedgerAdmin):
     """Loyalty balances change only through the ledger."""
 
-    list_display = ("__str__", "pk", "created_at")
-    list_filter = ("created_at",)
-    ordering = ("-created_at",)
-    date_hierarchy = "created_at"
+    list_display = ("__str__", "pk")
+    #list_filter = ("created_at",)
+    #ordering = ("-created_at",)
+    #date_hierarchy = "created_at"
     list_per_page = 100
 
 
