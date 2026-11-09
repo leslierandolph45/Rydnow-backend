@@ -1,13 +1,139 @@
-from django.contrib import admin
-from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from django.contrib.auth.models import User
-from django.utils import timezone
+"""
+Django admin configuration.
+
+Design principles
+——————
+* Financial records (deposits, ledger, wallets) are immutable from the admin.
+* Bulk status actions are atomic, row-locked, state-guarded and audited
+  (a LogEntry is written per object so every change is traceable).
+* Every changelist avoids N+1 queries via list_select_related.
+* Personal data is shown masked in list views where possible.
+"""
+from __future__ import annotations
+
+import logging
+
+from django.contrib import admin, messages
+from django.contrib.admin.models import CHANGE, LogEntry
+from django.contrib.contenttypes.models import ContentType
+from django.db import transaction
+from django.utils.html import format_html
+
 from .models import (
-    Rider, Booking, CustomerProfile, RiderProfile,
-    RiderWallet, WithdrawalRequest, RiderComplaint
+    RiderProfile,
+    Booking,
+    CustomerProfile,
+    RiderComplaint,
+    RiderEmergencyContact,
+    RiderIncident,
+    RiderProfileAdminNote,
+    RiderWallet,
+    WalletDeposit,
+    WalletTransaction,
+    WithdrawalRequest,
 )
 
+logger = logging.getLogger(__name__)
 
+# ──────────────────────────────────────────────────────────
+# Site branding (rename to match your product)
+# ──────────────────────────────────────────────────────────
+admin.site.site_header = "Operations Console"
+admin.site.site_title = "Operations Admin"
+admin.site.index_title = "Platform Management"
+
+
+# ══════════════════════════════════════════════════════════
+# 🧩 SHARED MIXINS & HELPERS
+# ══════════════════════════════════════════════════════════
+class ReadOnlyAdminMixin:
+    """View-only admin: no add, edit or delete for anyone."""
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class NoDeleteAdminMixin:
+    """Prevents deletion of records that must be retained for auditing."""
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class BulkStatusActionMixin:
+    """
+    Safe bulk status transitions.
+
+    * Runs in a single transaction and locks the rows being changed.
+    * Skips objects already in a final state (no re-opening / overwriting).
+    * Writes one admin LogEntry per changed object for auditability.
+    * Reports changed vs. skipped counts to the operator.
+
+    Subclasses set final_statuses.
+    """
+
+    final_statuses: tuple[str, ...] = ()
+
+    def _apply_status(self, request, queryset, new_status: str) -> None:
+        manager = self.model._default_manager
+        selected_ids = list(queryset.values_list("pk", flat=True))
+
+        with transaction.atomic():
+            eligible_ids = list(
+                manager.select_for_update()
+                .filter(pk__in=selected_ids)
+                .exclude(status__in=self.final_statuses)
+                .values_list("pk", flat=True)
+            )
+            changed = manager.filter(pk__in=eligible_ids).update(status=new_status)
+
+            if eligible_ids:
+                content_type = ContentType.objects.get_for_model(self.model)
+                LogEntry.objects.bulk_create(
+                    LogEntry(
+                        user_id=request.user.pk,
+                        content_type_id=content_type.pk,
+                        object_id=str(obj.pk),
+                        object_repr=str(obj)[:200],
+                        action_flag=CHANGE,
+                        change_message=f"Bulk action: status set to '{new_status}'.",
+                    )
+                    for obj in manager.filter(pk__in=eligible_ids)
+                )
+
+        skipped = len(selected_ids) - changed
+        logger.info(
+            "%s bulk status -> %s by user=%s changed=%s skipped=%s",
+            self.model.__name__, new_status, request.user.pk, changed, skipped,
+        )
+
+        if changed:
+            self.message_user(
+                request,
+                f"{changed} record(s) marked as {new_status}.",
+                messages.SUCCESS,
+            )
+        if skipped:
+            self.message_user(
+                request,
+                f"{skipped} record(s) skipped because they were already in a final state.",
+                messages.WARNING,
+            )
+
+
+def _badge(label: str, color: str):
+    return format_html(
+        '<span style="background:{};color:#fff;padding:2px 8px;border-radius:10px;'
+        'font-size:11px;font-weight:600;white-space:nowrap;">{}</span>',
+        color,
+        label,
+    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -15,69 +141,25 @@ from .models import (
 # ══════════════════════════════════════════════════════════
 @admin.register(CustomerProfile)
 class CustomerProfileAdmin(admin.ModelAdmin):
-    list_display = ('full_name', 'phone', 'created_at')
-    search_fields = ('user__username', 'user__email', 'full_name', 'phone')
-    readonly_fields = ('created_at',)
-
-
-
-
-# ══════════════════════════════════════════════════════════
-# 👥 USER ADMIN
-# ══════════════════════════════════════════════════════════
-admin.site.unregister(User)
-admin.site.register(User, BaseUserAdmin)
-
-
+    list_display = ("full_name", "phone", "created_at")
+    search_fields = ("user__username", "user__email", "full_name", "phone")
+    readonly_fields = ("created_at",)
+    list_select_related = ("user",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
 
 
 # ══════════════════════════════════════════════════════════
-# 👥 RIDER MANAGEMENT
+# 👤 RIDER PROFILE
 # ══════════════════════════════════════════════════════════
-@admin.register(Rider)
-class RiderAdmin(admin.ModelAdmin):
-    list_display = ('id', 'phone', 'verification_status', 'created_at')
-    list_filter = ('verification_status','created_at',)
-    search_fields = ('user__username', 'phone', 'user__email')
-    list_per_page = 30
-
-
-    fieldsets = (
-        ('Personal Info', {'fields': ('user', 'phone', 'location')}),
-        ('Status', {'fields': ('verification_status', 'is_online')}),
-    )
-
-
-    actions = ['approve_rider', 'reject_rider', 'mark_online', 'mark_offline']
-
-
-    def approve_rider(self, request, queryset):
-        queryset.update(verification_status='approved')
-    approve_rider.short_description = "✅ Mark selected as APPROVED"
-
-
-    def reject_rider(self, request, queryset):
-        queryset.update(verification_status='rejected')
-    reject_rider.short_description = "❌ Mark selected as REJECTED"
-
-
-    def mark_online(self, request, queryset):
-        queryset.update(is_online=True)
-    mark_online.short_description = "🟢 Mark as Online"
-
-
-    def mark_offline(self, request, queryset):
-        queryset.update(is_online=False)
-    mark_offline.short_description = "⚪ Mark as Offline"
-
-
-
-
 @admin.register(RiderProfile)
 class RiderProfileAdmin(admin.ModelAdmin):
-    list_display= ('phone', 'created_at')
-    search_fields= ('user__username', 'phone', 'user__email')
-    readonly_fields= ('created_at',)
+    list_display = ("full_name", "user", "phone", "created_at")
+    search_fields = ("full_name", "user__username", "user__email", "phone")
+    readonly_fields = ("created_at",)
+    list_select_related = ("user",)
+    ordering = ("-created_at",)
 
 
 
@@ -86,83 +168,226 @@ class RiderProfileAdmin(admin.ModelAdmin):
 # 📋 BOOKING MANAGEMENT
 # ══════════════════════════════════════════════════════════
 @admin.register(Booking)
-class BookingAdmin(admin.ModelAdmin):
-    list_display= ('service_type', 'pickup', 'destination',
-                   'status', 'created_at')
-    list_filter= ('service_type', 'status', 'created_at')
-    search_fields = ('pickup', 'destination')
-    readonly_fields = ('created_at', )
+class BookingAdmin(BulkStatusActionMixin, admin.ModelAdmin):
+    list_display = ("id", "service_type", "pickup", "destination", "status", "created_at")
+    list_filter = ("service_type", "status", "created_at")
+    search_fields = ("pickup", "destination")
+    readonly_fields = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
+    actions = ("mark_completed", "mark_cancelled")
 
+    final_statuses = ("completed", "cancelled")
 
-    actions = ['mark_completed', 'mark_cancelled']
-
-
+    @admin.action(description="Mark selected bookings as completed", permissions=["change"])
     def mark_completed(self, request, queryset):
-        queryset.update(status='completed')
-    mark_completed.short_description = "✅ Mark as Completed"
+        self._apply_status(request, queryset, "completed")
 
-
+    @admin.action(description="Mark selected bookings as cancelled", permissions=["change"])
     def mark_cancelled(self, request, queryset):
-        queryset.update(status='cancelled')
-    mark_cancelled.short_description = "❌ Mark as Cancelled"
-
-
+        self._apply_status(request, queryset, "cancelled")
 
 
 # ══════════════════════════════════════════════════════════
 # 💰 FINANCE & WALLET
 # ══════════════════════════════════════════════════════════
 @admin.register(RiderWallet)
-class RiderWalletAdmin(admin.ModelAdmin):
-    list_display= ('rider', 'balance',)
-    search_fields = ('rider__user__username', 'rider__user__email')
-    readonly_fields = ('balance',)
+class RiderWalletAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
+    """Balances are only ever changed through ledger-backed services."""
+
+    list_display = ("rider", "balance")
+    search_fields = ("rider__user__username", "rider__user__email")
+    readonly_fields = ("balance",)
+    list_select_related = ("rider",)
+
+    def has_add_permission(self, request):
+        return False
 
 
-from .models import WalletTransaction
 @admin.register(WalletTransaction)
-class WalletTransactionAdmin(admin.ModelAdmin):
-    list_display= ('id', 'transaction_type', 'amount', 'status', 'created_at')
-    list_filter = ('transaction_type', 'status', 'created_at')
-    search_fields = ('description',)
-    readonly_fields = ('amount', 'created_at')
+class WalletTransactionAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
+    """Immutable ledger: view-only by design."""
 
-
+    list_display = ("id", "type", "amount", "status", "created_at")
+    list_filter = ("type", "status", "created_at")
+    search_fields = ("description",)
+    readonly_fields = ("amount", "created_at")
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 100
 
 
 @admin.register(WithdrawalRequest)
-class WithdrawalRequestAdmin(admin.ModelAdmin):
-    list_display= ('id', 'amount', 'status', 'created_at')
-    list_filter = ('status', 'created_at')
-    readonly_fields = ('amount', 'created_at')
+class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, admin.ModelAdmin):
+    list_display = ("id", "amount", "status", "created_at")
+    list_filter = ("status", "created_at")
+    readonly_fields = ("amount", "created_at")
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
+    actions = ("mark_completed", "mark_failed")
 
+    final_statuses = ("completed", "failed")
 
-    actions = ['mark_completed', 'mark_failed']
+    def has_add_permission(self, request):
+        return False
 
-
+    @admin.action(description="Mark selected withdrawals as completed", permissions=["change"])
     def mark_completed(self, request, queryset):
-        queryset.update(status='completed')
-    mark_completed.short_description = "✅ Mark as Completed"
+        self._apply_status(request, queryset, "completed")
 
-
+    @admin.action(description="Mark selected withdrawals as failed", permissions=["change"])
     def mark_failed(self, request, queryset):
-        queryset.update(status='failed')
-    mark_failed.short_description = "❌ Mark as Failed"
+        self._apply_status(request, queryset, "failed")
 
 
+@admin.register(WalletDeposit)
+class WalletDepositAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
+    """Payment-gateway records are never edited manually."""
+
+    list_display = (
+        "reference", "user", "amount", "currency", "status", "gateway_fee", "created_at",
+    )
+    list_filter = ("status", "currency", "created_at")
+    search_fields = ("reference", "user__username", "user__email")
+    readonly_fields = (
+        "reference", "user", "wallet", "amount", "currency", "status",
+        "authorization_url", "gateway_fee", "gateway_payload", "ip_address",
+        "created_at", "updated_at",
+    )
+    list_select_related = ("user", "wallet")
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 100
 
 
 # ══════════════════════════════════════════════════════════
-# 🛡️ COMPLAINTS & REVIEWS
+# 📝 RIDER PROFILE ADMIN NOTES
+# ══════════════════════════════════════════════════════════
+@admin.register(RiderProfileAdminNote)
+class RiderProfileAdminNoteAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
+    list_display = ("rider_profile", "short_note", "author", "created_at")
+    list_filter = ("created_at", "author")
+    search_fields = ("note", "rider_profile__full_name", "rider_profile__phone")
+    readonly_fields = ("author", "created_at")
+    autocomplete_fields = ("rider_profile",)
+    list_select_related = ("rider_profile", "author")
+    date_hierarchy = "created_at"
+    ordering = ("-created_at",)
+
+    @admin.display(description="Note")
+    def short_note(self, obj):
+        return obj.note[:60] + ("…" if len(obj.note) > 60 else "")
+
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.author = request.user
+        super().save_model(request, obj, form, change)
+
+
+# ══════════════════════════════════════════════════════════
+# 🚨 RIDER INCIDENTS
+# ══════════════════════════════════════════════════════════
+SEVERITY_COLORS = {
+    "low": "#2e7d32",
+    "medium": "#f9a825",
+    "high": "#ef6c00",
+    "critical": "#c62828",
+}
+STATUS_COLORS = {
+    "reported": "#1565c0",
+    "under_review": "#f9a825",
+    "resolved": "#2e7d32",
+    "closed": "#616161",
+}
+
+
+@admin.register(RiderIncident)
+class RiderIncidentAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
+    list_display = (
+        "reference_code", "title", "rider_profile", "incident_type",
+        "severity_badge", "status_badge", "assigned_to", "date_reported",
+    )
+    list_display_links = ("reference_code", "title")
+    list_filter = ("status", "severity", "incident_type", "service", "assigned_to", "date_reported")
+    search_fields = (
+        "reference_code", "title", "description", "location", "rider_profile__full_name",
+    )
+    autocomplete_fields = ("rider_profile",)
+    list_select_related = ("rider_profile", "assigned_to")
+    date_hierarchy = "date_reported"
+    ordering = ("-date_reported",)
+    list_per_page = 50
+
+    @admin.display(description="Severity", ordering="severity")
+    def severity_badge(self, obj):
+        return _badge(obj.get_severity_display(), SEVERITY_COLORS.get(obj.severity, "#666"))
+
+    @admin.display(description="Status", ordering="status")
+    def status_badge(self, obj):
+        return _badge(obj.get_status_display(), STATUS_COLORS.get(obj.status, "#666"))
+
+
+# ══════════════════════════════════════════════════════════
+# 🛡️ COMPLAINTS & EMERGENCY CONTACTS
 # ══════════════════════════════════════════════════════════
 @admin.register(RiderComplaint)
-class RiderComplaintAdmin(admin.ModelAdmin):
-    list_display= ('subject', 'complaint_type', 'status', 'created_at')
-    list_filter = ('complaint_type', 'status', 'created_at')
-    search_fields = ('description',)
-    readonly_fields = ('created_at',)
+class RiderComplaintAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
+    list_display = ("subject", "complaint_type", "status", "created_at")
+    list_filter = ("complaint_type", "status", "created_at")
+    search_fields = ("description",)
+    readonly_fields = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
 
-
+    @admin.display(description="Complaint", ordering="pk")
     def subject(self, obj):
-        return str(obj.id)
-    subject.short_description = 'Complaint'
+        return f"#{str(obj.pk)[:8]}"
+
+
+@admin.register(RiderEmergencyContact)
+class RiderEmergencyContactAdmin(admin.ModelAdmin):
+    list_display = (
+        "full_name", "relationship", "masked_phone", "rider_profile",
+        "is_primary", "notify_on_emergency", "is_verified", "is_deleted", "created_at",
+    )
+    list_filter = (
+        "relationship", "is_primary", "notify_on_emergency",
+        "is_verified", "is_deleted", "preferred_language", "created_at",
+    )
+    search_fields = (
+        "full_name", "phone_number", "alternative_phone",
+        "relationship_note", "rider_profile__full_name",
+    )
+    autocomplete_fields = ("rider_profile",)
+    list_select_related = ("rider_profile",)
+    readonly_fields = (
+        "id", "created_at", "updated_at", "verified_at",
+        "last_contacted_at", "masked_phone",
+    )
+    ordering = ("-created_at",)
+    list_per_page = 50
+
+    fieldsets = (
+        ("Contact Information", {
+            "fields": (
+                "rider_profile", "full_name", "relationship", "relationship_note",
+                "phone_number", "alternative_phone", "address", "preferred_language",
+            ),
+        }),
+        ("Priority & Notifications", {
+            "fields": ("is_primary", "notify_on_emergency"),
+        }),
+        ("Verification & Status", {
+            "fields": (
+                "is_verified", "verified_at", "last_contacted_at",
+                "is_deleted", "deleted_at", "masked_phone",
+            ),
+        }),
+        ("System Timestamps", {
+            "fields": ("id", "created_at", "updated_at"),
+            "classes": ("collapse",),
+        }),
+    )

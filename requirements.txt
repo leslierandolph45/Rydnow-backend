@@ -10,3 +10,4 @@ gunicorn>=21.2.0,<24.0
 whitenoise>=6.6
 django-cors-headers>=4.3
 requests>=2.31.0
+django-phonenumber-field>=7.0.0

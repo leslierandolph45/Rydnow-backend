@@ -1,0 +1,56 @@
+{% extends "admin/change_list.html" %}
+
+{% block content %}
+{% if rider_stats %}
+<style>
+  .rd-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin:0 0 16px}
+  .rd-card{background:var(--darkened-bg,#f8f8f8);border:1px solid var(--hairline-color,#ddd);border-radius:8px;padding:10px 12px}
+  .rd-card b{display:block;font-size:22px;line-height:1.2}
+  .rd-card span{font-size:11px;text-transform:uppercase;letter-spacing:.04em;opacity:.7}
+  .rd-warn b{color:#dc2626}.rd-good b{color:#16a34a}
+  .rd-lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-bottom:18px}
+  .rd-lists table{width:100%}
+</style>
+
+<div class="rd-cards">
+  <div class="rd-card"><b>{{ rider_stats.total }}</b><span>Total riders</span></div>
+  <div class="rd-card rd-good"><b>{{ rider_stats.online }}</b><span>Online now</span></div>
+  <div class="rd-card"><b>{{ rider_stats.worked_today }}</b><span>Worked today</span></div>
+  <div class="rd-card"><b>{{ rider_stats.verified }}</b><span>Verified</span></div>
+  <div class="rd-card"><b>{{ rider_stats.under_review }}</b><span>Awaiting review</span></div>
+  <div class="rd-card {% if rider_stats.suspended %}rd-warn{% endif %}"><b>{{ rider_stats.suspended }}</b><span>Suspended</span></div>
+  <div class="rd-card {% if rider_stats.attention %}rd-warn{% endif %}"><b>{{ rider_stats.attention }}</b><span>Need coaching</span></div>
+  <div class="rd-card {% if rider_stats.licence_issues %}rd-warn{% endif %}"><b>{{ rider_stats.licence_issues }}</b><span>Licence issues</span></div>
+  <div class="rd-card"><b>{{ rider_stats.avg_rating }}</b><span>Avg rating</span></div>
+  <div class="rd-card"><b>{{ rider_stats.avg_acceptance }}</b><span>Avg acceptance</span></div>
+  <div class="rd-card"><b>{{ rider_stats.avg_response }}</b><span>Avg response time</span></div>
+</div>
+
+<div class="rd-lists">
+  <div>
+    <h3>Top performers</h3>
+    <table>
+      <thead><tr><th>Rider</th><th>Trips</th><th>Rating</th><th>Accepted</th><th>Grade</th></tr></thead>
+      <tbody>
+      {% for r in top_riders %}
+        <tr><td><a href="{{ r.url }}">{{ r.name }}</a></td><td>{{ r.trips }}</td><td>{{ r.rating }}</td><td>{{ r.acceptance }}</td><td>{{ r.grade }}</td></tr>
+      {% empty %}<tr><td colspan="5">No data yet.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div>
+    <h3>Need coaching (lowest acceptance first)</h3>
+    <table>
+      <thead><tr><th>Rider</th><th>Trips</th><th>Rating</th><th>Accepted</th><th>Grade</th></tr></thead>
+      <tbody>
+      {% for r in coaching_riders %}
+        <tr><td><a href="{{ r.url }}">{{ r.name }}</a></td><td>{{ r.trips }}</td><td>{{ r.rating }}</td><td>{{ r.acceptance }}</td><td>{{ r.grade }}</td></tr>
+      {% empty %}<tr><td colspan="5">Nobody needs coaching right now.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{{ block.super }}
+{% endblock %}
+

@@ -2,32 +2,31 @@ from django.urls import path
 from . import views
 from django.contrib import admin
 from django.views.decorators.csrf import csrf_exempt
+from api.models import RiderWallet
+from django.urls import path, include
 
 urlpatterns = [
-    # Auth
-    path('auth/register/', views.customer_register, name='register'),
-    path('auth/login/', views.user_login, name='login'),
-    path('auth/send-code/', views.send_verification_code, name='send-code'),
-    path('auth/verify-code/', views.send_verification_code, name='verify-code'),
+    # === Rider Wallet ===
+    path("rider/wallet/", views.get_rider_wallet, name="rider-wallet"),
+    path("rider/deposit/", views.wallet_deposit, name="wallet-deposit"),
+    path("rider/transactions/", views.get_transaction_history, name="transaction-history"),
+    path("rider/withdraw/", views.request_withdrawal, name="request-withdrawal"),
+    path("rider/deposits/", views.deposit_history, name="deposit-history"),
+    path("rider/transactions/", views.get_transaction_history, name="transaction-history"),
+    path("deposit/transactions/", views.deposit_initiate, name="deposit_initiate"),
+    path("rider/transactions/<str:reference>/verify/", views.deposit_verify, name="deposit-verify"),
 
-    # Rider registration
-    path('auth/rider-register/', views.rider_register, name='rider-register'),
-    path('rider/submit-docs/', views.rider_submit_documents, name='rider-submit-docs'),
 
-    # Profile
-    path('customer/profile/', views.customer_profile, name='customer-profile'),
+    # === Location & Discovery ===
+    path("rider/update-location/", views.update_rider_location, name="update-rider-location"),
+    path("riders/nearby/", views.get_nearby_riders, name="get-nearby-riders"),
 
-    # Location
-    path('rider/update-location/', views.update_rider_location, name='update-rider-location'),
-    path('riders/nearby/', views.get_nearby_riders, name='get-nearby-riders'),
-
-    # Wallet
-    path('rider/wallet/', views.get_rider_wallet, name='rider-wallet'),
-    path('rider/deposit/', views.wallet_deposit, name='wallet-deposit'),
-    path('rider/transactions/', views.rider_transactions, name='rider-transactions'),
-    path('payment/withdraw/', views.request_withdrawal, name='request-withdraw'),
-
-    # Paystack
-    path('paystack/initialize/', views.initialize_payment, name='paystack-initialize'),
-    path('paystack/verify/', views.verify_payment, name='paystack-verify'),
+    # === Paystack Payments ===
+    path("payments/paystack/webhook/", views.paystack_webhook, name="paystack-webhook"),
+    path("paystack/initialize/", views.initialize_payment, name="paystack-initialize"),
+    path("paystack/verify/", views.verify_payment, name="paystack-verify"),
 ]
+
+
+
+   
