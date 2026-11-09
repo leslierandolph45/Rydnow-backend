@@ -18,7 +18,7 @@ import os
 import warnings
 from pathlib import Path
 from dotenv import load_dotenv
-
+from decimal import Decimal
 import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
 
@@ -336,4 +336,25 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "wallet_read": "60/min",
     },
+}
+
+
+
+
+# —————————————————————
+# DISPATCH SETTINGS
+# —————————————————————
+DISPATCH = {
+    "offer_timeout_s": 45,              # ⏱️ Rider has 45 secs to accept
+    "radius_steps_km": (3.0, 5.0, 8.0), # 🔍 Search grows: 3km → 5km → 8km
+    "candidates_per_round": 15,         # Top 15 riders considered each round
+    "max_offers_per_booking": 8,        # Max 8 offers before giving up
+    "min_wallet": Decimal("50.00"),     # 💰 Riders need GHS 50 minimum
+    "location_max_age_s": 90,           # 📍 GPS valid for 90 seconds
+    # Scoring weights (must add up to 1.0)
+    "w_proximity": 0.50,     # Closest = most important
+    "w_rating": 0.20,        # Good performance
+    "w_acceptance": 0.15,    # Usually accepts
+    "w_reliability": 0.10,   # Rarely cancels
+    "w_fairness": 0.05,      # Share jobs fairly
 }

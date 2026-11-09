@@ -2320,6 +2320,18 @@ class Booking(models.Model):
     cancelled_by_role = models.CharField(max_length=10, blank=True)
     cancellation_reason = models.TextField(blank=True)
 
+    
+class Status(models.TextChoices):
+    SEARCHING = "searching", "Searching"
+    ASSIGNED = "assigned", "Assigned"
+    NO_RIDER_FOUND = "no_rider_found", "No Rider Found"
+    # Add your existing statuses below here if you have them:
+    PENDING = "pending", "Pending"
+    CONFIRMED = "confirmed", "Confirmed"
+    IN_PROGRESS = "in_progress", "In Progress"
+    COMPLETED = "completed", "Completed"
+    CANCELLED = "cancelled", "Cancelled"
+
     class Meta:
         ordering = ["-created_at"]
         indexes = [
@@ -3959,3 +3971,52 @@ class WalletTransaction(models.Model):
 
     def __str__(self):
         return f"{self.reference} {self.direction} {self.amount}"
+
+
+
+
+class DispatchOffer(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACCEPTED = "accepted", "Accepted"
+        DECLINED = "declined", "Declined"
+        EXPIRED = "expired", "Expired"
+        CANCELLED = "cancelled", "Cancelled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="dispatch_offers")
+    rider = models.ForeignKey(RiderProfile, on_delete=models.CASCADE, related_name="dispatch_offers")
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    round_no = models.PositiveSmallIntegerField(default=1)
+    distance_km = models.DecimalField(max_digits=6, decimal_places=2)
+    score = models.FloatField(default=0)
+    decline_reason = models.CharField(max_length=60, blank=True)
+    offered_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "dispatch_offers"
+        ordering = ["-offered_at"]
+        indexes = [
+            models.Index(fields=["status", "expires_at"])
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["booking"],
+                condition=Q(status__in=["pending", "accepted"]),
+                name="uniq_live_offer_per_booking",
+            ),
+            models.UniqueConstraint(
+                fields=["rider"],
+                condition=Q(status="pending"),
+                name="uniq_pending_offer_per_rider",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Offer {self.id} → {self.rider_id} [{self.status}]"
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
