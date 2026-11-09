@@ -49,7 +49,7 @@ def env_list(name: str, default=None) -> list:
 
 # ─────────────────────────── Core ───────────────────────────
 # Secure by default: production never runs with DEBUG on by accident.
-DEBUG = env_bool("DEBUG", False)
+DEBUG = env_bool("DEBUG", True)
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
