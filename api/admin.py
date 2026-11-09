@@ -68,7 +68,6 @@ from .models import (
     ParcelDetail,
     BookingOffer,
     Review,
-    CustomerRiderPreferenceAdmin,
 )
 
 
@@ -216,7 +215,6 @@ class CustomerProfileAdmin(admin.ModelAdmin):
 @admin.site.register(RiderEmergencyContact)
 @admin.site.register(RiderOnlineSession)
 @admin.site.register(RiderLocationPing)
-@admin.site.register(RiderProfileAdminNote)
 class RiderProfileAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ("user__username", "user__email")
@@ -233,7 +231,6 @@ class RiderProfileAdmin(admin.ModelAdmin):
 @admin.site.register(ParcelDetaial)
 @admin.site.register(BookingOffer)
 @admin.site.register(Review)
-@admin.site.regsiter(CustomerRiderPreference)
 class BookingAdmin(BulkStatusActionMixin, admin.ModelAdmin):
     list_display = ("__str__", "pk", "status", "created_at")
     list_filter = ("status", "created_at")
@@ -437,3 +434,11 @@ class PromoCodeAdmin(admin.ModelAdmin):
 class PromoRedemptionAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
+
+
+class CustomerRiderPreferenceAdmin(admin.ModelAdmin):
+    list_display = ('customer', 'rider', 'created_at')
+    search_fields = ('customer__user__username', 'rider__user__username')
+    readonly_fields = ('created_at',)
+    ordering = ('-created_at',)
+    list_per_page = 50
