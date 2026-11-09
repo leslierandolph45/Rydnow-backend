@@ -3,11 +3,14 @@ Django admin configuration for RYDNOW.
 
 Design principles
 ——————
-* Financial records (deposits, ledger, wallets) are immutable from the admin.
+* Every registered model has an "Add" page and can be operated manually.
+* Financial and audit records (wallets, ledgers, payments, histories) can be
+  created or edited by superusers only, and are never deletable from the admin.
 * Bulk status actions are atomic, row-locked, state-guarded and audited
   (a LogEntry is written per object so every change is traceable).
 * Every changelist avoids N+1 queries via list_select_related.
-* Personal data is shown masked in list views where possible.
+* Foreign keys use ID-lookup widgets instead of dropdowns, so the Add/Change
+  pages stay fast and never try to render thousands of options.
 * Every model is registered exactly once (Django raises AlreadyRegistered
   on duplicates, which crashes the app at import time).
 """
@@ -80,7 +83,11 @@ admin.site.index_title = "RYDNOW Platform Management"
 # 🧩 SHARED MIXINS & HELPERS
 # ══════════════════════════════════════════════════════════
 class ReadOnlyAdminMixin:
-    """View-only admin: no add, edit or delete for anyone."""
+    """
+    View-only admin: no add, edit or delete for anyone.
+
+    Not used by default any more; apply it to a model to lock it down again.
+    """
 
     def has_add_permission(self, request):
         return False
@@ -97,6 +104,43 @@ class NoDeleteAdminMixin:
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+class SuperuserWriteAdminMixin:
+    """
+    Financial / audit records: superusers may add and edit them manually,
+    nobody may delete them. Other staff keep view access via Django permissions.
+    """
+
+    def has_add_permission(self, request):
+        return request.user.is_superuser and super().has_add_permission(request)
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_superuser and super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class AutoRawIdMixin:
+    """
+    Use ID-lookup widgets for every concrete ForeignKey / OneToOne field,
+    unless raw_id_fields is set explicitly on the admin class.
+
+    This replaces giant dropdowns (the usual cause of slow or crashing
+    Add/Change pages) without hard-coding field names.
+    """
+
+    def __init__(self, model, admin_site):
+        if not self.raw_id_fields:
+            self.raw_id_fields = tuple(
+                field.name
+                for field in model._meta.get_fields()
+                if field.is_relation
+                and field.concrete
+                and (field.many_to_one or field.one_to_one)
+            )
+        super().__init__(model, admin_site)
 
 
 class BulkStatusActionMixin:
@@ -169,16 +213,16 @@ def _badge(label: str, color: str):
     )
 
 
-class BaseAdmin(admin.ModelAdmin):
-    """Safe defaults for models whose fields are not customised yet."""
+class BaseAdmin(AutoRawIdMixin, admin.ModelAdmin):
+    """Safe defaults for every model: fast FK widgets, sensible list view."""
 
     list_display = ("__str__", "pk")
     ordering = ("-pk",)
     list_per_page = 50
 
 
-class LedgerAdmin(ReadOnlyAdminMixin, BaseAdmin):
-    """Immutable financial / audit records: view-only by design."""
+class LedgerAdmin(SuperuserWriteAdminMixin, BaseAdmin):
+    """Financial / audit records: superuser add + edit, never deletable."""
 
     list_per_page = 100
 
@@ -187,7 +231,7 @@ class LedgerAdmin(ReadOnlyAdminMixin, BaseAdmin):
 # 👥 CUSTOMER PROFILE
 # ══════════════════════════════════════════════════════════
 @admin.register(CustomerProfile)
-class CustomerProfileAdmin(admin.ModelAdmin):
+class CustomerProfileAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ("user__username", "user__email")
     readonly_fields = ("created_at",)
@@ -203,7 +247,7 @@ class SavedAddressAdmin(BaseAdmin):
 
 
 @admin.register(CustomerRiderPreference)
-class CustomerRiderPreferenceAdmin(admin.ModelAdmin):
+class CustomerRiderPreferenceAdmin(BaseAdmin):
     list_display = ("customer", "preference", "rider", "created_at")
     list_filter = ("preference", "created_at")
     search_fields = ("customer__user__username", "rider__user__username")
@@ -216,7 +260,7 @@ class CustomerRiderPreferenceAdmin(admin.ModelAdmin):
 # 👤 RIDER PROFILE
 # ══════════════════════════════════════════════════════════
 @admin.register(RiderProfile)
-class RiderProfileAdmin(admin.ModelAdmin):
+class RiderProfileAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ("user__username", "user__email")
     readonly_fields = ("created_at",)
@@ -226,7 +270,7 @@ class RiderProfileAdmin(admin.ModelAdmin):
 
 @admin.register(RiderStatusHistory)
 class RiderStatusHistoryAdmin(LedgerAdmin):
-    """Status changes are an audit trail and must not be edited."""
+    """Audit trail: superuser add + edit, never deletable."""
 
 
 @admin.register(ServiceQualification)
@@ -245,7 +289,7 @@ class RiderPayoutAccountAdmin(NoDeleteAdminMixin, BaseAdmin):
 
 
 @admin.register(RiderEmergencyContact)
-class RiderEmergencyContactAdmin(admin.ModelAdmin):
+class RiderEmergencyContactAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
     search_fields = ("full_name",)
@@ -262,11 +306,11 @@ class RiderOnlineSessionAdmin(LedgerAdmin):
 
 @admin.register(RiderLocationPing)
 class RiderLocationPingAdmin(LedgerAdmin):
-    """High-volume telemetry: view-only."""
+    """High-volume telemetry."""
 
 
 @admin.register(RiderProfileAdminNote)
-class RiderProfileAdminNoteAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
+class RiderProfileAdminNoteAdmin(NoDeleteAdminMixin, BaseAdmin):
     list_display = ("__str__", "pk", "author", "created_at")
     list_filter = ("created_at", "author")
     search_fields = ("note",)
@@ -292,7 +336,7 @@ class RiderIncidentAdmin(NoDeleteAdminMixin, BaseAdmin):
 
 
 @admin.register(RiderComplaint)
-class RiderComplaintAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
+class RiderComplaintAdmin(NoDeleteAdminMixin, BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
     search_fields = ("description",)
@@ -306,7 +350,7 @@ class RiderComplaintAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
 # 📋 BOOKING MANAGEMENT
 # ══════════════════════════════════════════════════════════
 @admin.register(Booking)
-class BookingAdmin(BulkStatusActionMixin, admin.ModelAdmin):
+class BookingAdmin(BulkStatusActionMixin, BaseAdmin):
     list_display = ("__str__", "pk", "status", "created_at")
     list_filter = ("status", "created_at")
     search_fields = ()
@@ -329,7 +373,7 @@ class BookingAdmin(BulkStatusActionMixin, admin.ModelAdmin):
 
 @admin.register(BookingStatusHistory)
 class BookingStatusHistoryAdmin(LedgerAdmin):
-    """Status changes are an audit trail and must not be edited."""
+    """Audit trail: superuser add + edit, never deletable."""
 
 
 @admin.register(ParcelDetail)
@@ -339,7 +383,17 @@ class ParcelDetailAdmin(BaseAdmin):
 
 @admin.register(BookingOffer)
 class BookingOfferAdmin(BaseAdmin):
-    pass
+    """Rider offers on bookings. Related records are chosen by ID lookup, not dropdown."""
+
+    list_display = ("__str__", "pk", "booking", "rider", "price", "status", "created_at")
+    list_filter = ("status", "created_at")
+    search_fields = ("rider__user__username", "rider__user__email")
+    list_select_related = ("booking", "rider", "rider__user")
+    raw_id_fields = ("booking", "rider")
+    readonly_fields = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+    list_per_page = 50
 
 
 @admin.register(Review)
@@ -351,29 +405,23 @@ class ReviewAdmin(NoDeleteAdminMixin, BaseAdmin):
 # 💰 FINANCE & WALLET
 # ══════════════════════════════════════════════════════════
 @admin.register(RiderWallet)
-class RiderWalletAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
-    """Balances are only ever changed through ledger-backed services."""
+class RiderWalletAdmin(LedgerAdmin):
+    """Manual balance edits are superuser-only and logged by Django admin."""
 
     list_display = ("__str__", "pk")
     search_fields = ()
     readonly_fields = ()
     list_select_related = ("rider",)
 
-    def has_add_permission(self, request):
-        return False
-
 
 @admin.register(CustomerWallet)
-class CustomerWalletAdmin(NoDeleteAdminMixin, BaseAdmin):
-    """Balances are only ever changed through ledger-backed services."""
-
-    def has_add_permission(self, request):
-        return False
+class CustomerWalletAdmin(LedgerAdmin):
+    """Manual balance edits are superuser-only and logged by Django admin."""
 
 
 @admin.register(WalletTransaction)
-class WalletTransactionAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
-    """Immutable ledger: view-only by design."""
+class WalletTransactionAdmin(LedgerAdmin):
+    """Ledger entries: superuser add + edit, never deletable."""
 
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
@@ -385,7 +433,7 @@ class WalletTransactionAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(WithdrawalRequest)
-class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, admin.ModelAdmin):
+class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, BaseAdmin):
     list_display = ("__str__", "pk", "status", "created_at")
     list_filter = ("status", "created_at")
     readonly_fields = ("created_at",)
@@ -409,8 +457,8 @@ class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, admin.Mo
 
 
 @admin.register(WalletDeposit)
-class WalletDepositAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
-    """Payment-gateway records are never edited manually."""
+class WalletDepositAdmin(LedgerAdmin):
+    """Payment-gateway records: superuser add + edit, never deletable."""
 
     list_display = ("__str__", "pk", "status", "created_at")
     list_filter = ("status", "created_at")
@@ -445,36 +493,36 @@ class LoyaltyTransactionAdmin(LedgerAdmin):
 # 🎁 REFERRALS, PROMOS & BUSINESS
 # ══════════════════════════════════════════════════════════
 @admin.register(Referral)
-class ReferralAdmin(admin.ModelAdmin):
+class ReferralAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
 @admin.register(ReferralCode)
-class ReferralCodeAdmin(admin.ModelAdmin):
+class ReferralCodeAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
 @admin.register(BusinessAccount)
-class BusinessAccountAdmin(admin.ModelAdmin):
+class BusinessAccountAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
 @admin.register(WasteSubscription)
-class WasteSubscriptionAdmin(admin.ModelAdmin):
+class WasteSubscriptionAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
 @admin.register(PromoCode)
-class PromoCodeAdmin(admin.ModelAdmin):
+class PromoCodeAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
 @admin.register(PromoRedemption)
-class PromoRedemptionAdmin(admin.ModelAdmin):
+class PromoRedemptionAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
