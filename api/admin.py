@@ -19,10 +19,12 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from django.utils.html import format_html
 
+
+#===========
+# RIDERS
+#==============
 from .models import (
     RiderProfile,
-    Booking,
-    CustomerProfile,
     RiderComplaint,
     RiderEmergencyContact,
     RiderIncident,
@@ -37,7 +39,57 @@ from .models import (
     Referral,
     BusinessAccount,
     WasteSubscription,
+    BookingStatusHistory,
+    LoyaltyAccount,
+    LoyaltyTransaction,
+
 )
+
+#==============================
+#       CUSTOMER  LIST 
+#==============================
+ from .models import (
+    CustomerProfile,
+    SavedAddress,
+    CustomerWallet,
+    Payment,
+    Refund,
+    Booking,
+    BookingStatusHistory,
+    ParcelDetail,
+    BookingOffer,
+    Review,
+    CustomerRiderPreference
+
+ )
+
+#=========
+#  BOOKING MANAGEMENT
+#==========
+
+from .models import(
+    Booking,
+    BookingStatusHistory,
+    ParcelDetail,
+    BookingOffer,
+    Review,
+    CustomerRiderPreference,
+)
+
+#============================
+#FINANCE & WALLETS
+#====================
+from .models import(
+    RiderWallet,
+    WalletTransaction,
+    WithdrawalRequest,
+    Payment,
+    LoyaltyAccount,
+    LoyaltyTransaction,
+    WalletDeposit,
+    WebhookEvent,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +99,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────
 admin.site.site_header = "Operations Console"
 admin.site.site_title = "Operations Admin"
-admin.site.index_title = "Platform Management"
+admin.site.index_title = "RYDNOW Platform Management"
 
 
 # ══════════════════════════════════════════════════════════
@@ -147,6 +199,20 @@ def _badge(label: str, color: str):
 # 👥 CUSTOMER PROFILE
 # ══════════════════════════════════════════════════════════
 @admin.register(CustomerProfile)
+@admin.site.register(SavedAddress)
+@admin.site.register(CustomerWallet)
+@admin.site.register(WalletTransaction)
+@admin.site.register(WithdrawalRequest)
+@admin.site.register(Payment)
+@admin.site.register(Refund)
+@admin.site.register(LoyaltyAccount)
+@admin.site.register(LoyaltyTransaction)
+@admin.site.register(Booking)
+@admin.site.register(BookingStatusHistory)
+@admin.site.register(ParcelDetail)
+@admin.site.register(BookingOffer)
+@admin.site.register(Review)
+@admin.site.register(CustomerRiderPreference)
 class CustomerProfileAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ("user__username", "user__email")
@@ -160,7 +226,15 @@ class CustomerProfileAdmin(admin.ModelAdmin):
 # ══════════════════════════════════════════════════════════
 # 👤 RIDER PROFILE
 # ══════════════════════════════════════════════════════════
-@admin.register(RiderProfile)
+@admin.site.register(RiderProfile)
+@admin.site.register(RiderStatusHistory)
+@admin.site.register(ServiceQualification)
+@admin.site.register(RiderDocument)
+@admin.site.register(RiderPayoutAccount)
+@admin.site.register(RiderEmergencyContact)
+@admin.site.register(RiderOnlineSession)
+@admin.site.register(RiderLocationPing)
+@admin.site.register(RiderProfileAdminNote)
 class RiderProfileAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ("user__username", "user__email")
@@ -173,6 +247,11 @@ class RiderProfileAdmin(admin.ModelAdmin):
 # 📋 BOOKING MANAGEMENT
 # ══════════════════════════════════════════════════════════
 @admin.register(Booking)
+@admin.site.register(BookingStatusHistory)
+@admin.site.register(ParcelDetaial)
+@admin.site.register(BookingOffer)
+@admin.site.register(Review)
+@admin.site.regsiter(CustomerRiderPreference)
 class BookingAdmin(BulkStatusActionMixin, admin.ModelAdmin):
     list_display = ("__str__", "pk", "status", "created_at")
     list_filter = ("status", "created_at")
@@ -196,8 +275,14 @@ class BookingAdmin(BulkStatusActionMixin, admin.ModelAdmin):
 
 # ══════════════════════════════════════════════════════════
 # 💰 FINANCE & WALLET
-# ══════════════════════════════════════════════════════════
+# ═══════════════════
 @admin.register(RiderWallet)
+@admin.site.register(WalletTransaction)
+@admin.site.register(WithdrawalRequest)
+@admin.site.register(Payment)
+@admin.site.register(Refund)
+@admin.site.register(LoyaltyAccount)
+@admin.site.register(LoyaltyTransaction)
 class RiderWalletAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     """Balances are only ever changed through ledger-backed services."""
 
@@ -210,7 +295,9 @@ class RiderWalletAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
         return False
 
 
-@admin.register(WalletTransaction)
+@admin.site.register(WalletTransaction)
+@admin.site.register(WithdrawalRequest)
+@admin.site.register(RiderWallet)
 class WalletTransactionAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     """Immutable ledger: view-only by design."""
 
@@ -223,7 +310,7 @@ class WalletTransactionAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     list_per_page = 100
 
 
-@admin.register(WithdrawalRequest)
+@admin.site.register(WithdrawalRequest)
 class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("__str__", "pk", "status", "created_at")
     list_filter = ("status", "created_at")
@@ -247,7 +334,7 @@ class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, admin.Mo
         self._apply_status(request, queryset, "failed")
 
 
-@admin.register(WalletDeposit)
+@admin.site.register(WalletDeposit)
 class WalletDepositAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
     """Payment-gateway records are never edited manually."""
 
@@ -263,7 +350,7 @@ class WalletDepositAdmin(ReadOnlyAdminMixin, admin.ModelAdmin):
 # ══════════════════════════════════════════════════════════
 # 📝 RIDER PROFILE ADMIN NOTES
 # ══════════════════════════════════════════════════════════
-@admin.register(RiderProfileAdminNote)
+@admin.site.register(RiderProfileAdminNote)
 class RiderProfileAdminNoteAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("__str__", "pk", "author", "created_at")
     list_filter = ("created_at", "author")
@@ -296,7 +383,7 @@ STATUS_COLORS = {
 }
 
 
-@admin.register(RiderIncident)
+@admin.site.register(RiderIncident)
 class RiderIncidentAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("__str__", "pk")
     list_filter = ()
@@ -310,7 +397,7 @@ class RiderIncidentAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
 # ══════════════════════════════════════════════════════════
 # 🛡️ COMPLAINTS & EMERGENCY CONTACTS
 # ══════════════════════════════════════════════════════════
-@admin.register(RiderComplaint)
+@admin.site.register(RiderComplaint)
 class RiderComplaintAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
@@ -321,7 +408,7 @@ class RiderComplaintAdmin(NoDeleteAdminMixin, admin.ModelAdmin):
     list_per_page = 50
 
 
-@admin.register(RiderEmergencyContact)
+@admin.site.register(RiderEmergencyContact)
 class RiderEmergencyContactAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
@@ -335,37 +422,36 @@ class RiderEmergencyContactAdmin(admin.ModelAdmin):
 # ══════════════════════════════════════════════════════════
 # 🎁 REFERRALS & PROMOS
 # ══════════════════════════════════════════════════════════
-@admin.register(Referral)
+@admin.site.register(Referral)
 class ReferralAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
-@admin.register(ReferralCode)
+@admin.site.register(ReferralCode)
 class ReferralCodeAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
-@admin.register(BusinessAccount)
+@admin.site.register(BusinessAccount)
 class BusinessAccountAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
-
-@admin.register(WasteSubscription)
+@admin.site.register(WasteSubscription)
 class WasteSubscriptionAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
-@admin.register(PromoCode)
+@admin.site.register(PromoCode)
 class PromoCodeAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
 
 
-@admin.register(PromoRedemption)
+@admin.site.register(PromoRedemption)
 class PromoRedemptionAdmin(admin.ModelAdmin):
     list_display = ("__str__", "pk", "created_at")
     search_fields = ()
