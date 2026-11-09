@@ -476,4 +476,5 @@ class PromoCodeAdmin(admin.ModelAdmin):
 
 @admin.register(PromoRedemption)
 class PromoRedemptionAdmin(admin.ModelAdmin):
-    list_display = ("
+    list_display = ("__str__", "pk", "created_at")
+    search_fields = ()
