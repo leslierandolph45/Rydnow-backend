@@ -1039,24 +1039,24 @@ class TransactionPagination(PageNumberPagination):
     
 def _apply_filters(qs, f):
     tz = timezone.get_current_timezone()
-if "type" in f:
-    qs = qs.filter(transaction_type=f["type"])
-if "status" in f:
-    qs = qs.filter(status=f["status"])
-if "direction" in f:
-    qs = qs.filter(direction=f["direction"])
-if "date_from" in f:
-    qs = qs.filter(created_at__gte=timezone.make_aware(datetime.combine(f["date_from"], time.min), tz))
-if "date_to" in f:
-    end = datetime.combine(f["date_to"] + timedelta(days=1), time.min)
-    qs = qs.filter(created_at__lt=timezone.make_aware(end, tz))
-if "min_amount" in f:
-    qs = qs.filter(amount__gte=f["min_amount"])
-if "max_amount" in f:
-    qs = qs.filter(amount__lte=f["max_amount"])
-if f.get("search"):
-    term = f["search"].strip()
-    qs = qs.filter(Q(reference__icontains=term) | Q(description__icontains=term))
+    if "type" in f:
+        qs = qs.filter(transaction_type=f["type"])
+    if "status" in f:
+        qs = qs.filter(status=f["status"])
+    if "direction" in f:
+        qs = qs.filter(direction=f["direction"])
+    if "date_from" in f:
+        qs = qs.filter(created_at__gte=timezone.make_aware(datetime.combine(f["date_from"], time.min), tz))
+    if "date_to" in f:
+        end = datetime.combine(f["date_to"] + timedelta(days=1), time.min)
+        qs = qs.filter(created_at__lt=timezone.make_aware(end, tz))
+    if "min_amount" in f:
+        qs = qs.filter(amount__gte=f["min_amount"])
+    if "max_amount" in f:
+        qs = qs.filter(amount__lte=f["max_amount"])
+    if f.get("search"):
+        term = f["search"].strip()
+        qs = qs.filter(Q(reference__icontains=term) | Q(description__icontains=term))
     return qs.order_by(f["ordering"], "-id")
 
 def _summary(qs):
