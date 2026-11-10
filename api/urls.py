@@ -5,10 +5,21 @@ from django.contrib import admin
 from django.views.decorators.csrf import csrf_exempt
 from api.models import RiderWallet
 from django.urls import path, include
-from .views import register_customer, register_rider
+from .views import (
+    customer_register,
+    rider_register, 
+    rider_submit_documents,
+    customer_profile,
+)
+from .views import MyRiderProfileView
 urlpatterns = [
     # Other URLS
     path('api/auth/login/', obtain_auth_token, name='api-login'),
+
+    path("auth/register/customer", customer_register, name="customer-register"),
+    path("auth/register/rider/",rider_register, name="rider-register"),
+    path("rider/verify", rider_submit_documents, name="rider-verify"),
+
     # === Rider Wallet ===
     path("rider/wallet/", views.get_rider_wallet, name="rider-wallet"),
     path("rider/deposit/", views.wallet_deposit, name="wallet-deposit"),
