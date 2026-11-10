@@ -140,6 +140,16 @@ OTP_MAX_ATTEMPTS = 5
 OTP_MAX_SENDS_PER_HOUR = 5
 
 
+
+def fill_null_defaults(data):
+    """Replace None values with sensible defaults in API responses."""
+    if isinstance(data, dict):
+        return {k: fill_null_defaults(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [fill_null_defaults(item) for item in data]
+    return data
+
+
 def ok(message=None, http_status=status.HTTP_200_OK, **payload):
     """Success envelope: {"success": true, "message"?, ...payload}."""
     body = {"success": True}
