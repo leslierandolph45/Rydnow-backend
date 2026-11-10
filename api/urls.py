@@ -10,8 +10,6 @@ from .views import (
     rider_register, 
     rider_submit_documents,
     customer_profile,
-    customer_login,
-    rider_login,
 )
 
 from .views import MyRiderProfileView
