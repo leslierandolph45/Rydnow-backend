@@ -1,5 +1,5 @@
 from django.urls import path
-from rest_framework.authtoken.views
+from rest_framework.authtoken.views import obtain_auth_token
 import obtain_auth_token
 from . import views
 from django.contrib import admin
@@ -8,6 +8,8 @@ from api.models import RiderWallet
 from django.urls import path, include
 
 urlpatterns = [
+    # Other URLS
+    path('api/auth/login/', obtain_auth_token, name='api-login'),
     # === Rider Wallet ===
     path("rider/wallet/", views.get_rider_wallet, name="rider-wallet"),
     path("rider/deposit/", views.wallet_deposit, name="wallet-deposit"),
