@@ -468,7 +468,6 @@ def rider_submit_documents(request, rider):
         status=HTTP_201_CREATED,
         id=document.id,
         document_type=document.document_type,
-        status=document.status,
     )
 
 
