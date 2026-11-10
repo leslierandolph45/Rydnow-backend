@@ -437,10 +437,10 @@ class MyRiderProfileView(generics.RetrieveUpdateAPIView):
     permission_classes = [IsAuthenticated]
     http_method_names = ["get", "patch", "head", "options"]
 
-       def get_object(self):
-        return get_object_or_404(
-            RiderProfile.objects.select_related("user"), user=self.request.user
-        )
+def get_object(self):
+    return get_object_or_404(
+        RiderProfile.objects.select_related("user"), user=self.request.user
+    )
 
 
 @api_view(["POST"])
