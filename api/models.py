@@ -42,7 +42,6 @@ from .wallet_deposit import WalletDeposit
 logger = logging.getLogger(__name__)
 AUTH_USER = settings.AUTH_USER_MODEL
 
-
 # =====================================================================
 # 0. VALIDATORS, HELPERS, CONSTANTS
 # =====================================================================
@@ -159,7 +158,9 @@ def generate_incident_reference():
     return f"INC-{timezone.now():%Y%m%d}-{secrets.token_hex(3).upper()}"
 
 
-# ---- Business rules ----------------------------------------------------
+
+#        ---- Business rules ----------------------------------------------------
+
 COMMISSION_RATE = Decimal("0.15")            # default platform cut
 RIDER_PAYOUT_RATE = Decimal("1.00") - COMMISSION_RATE
 # Riders who perform better keep more of every fare — a retention lever.
@@ -191,6 +192,7 @@ POINTS_PER_GHS_REDEEMED = 100                # 100 pts = GH₵1 bonus credit
 LOYALTY_TIERS = [("platinum", 5000, Decimal("1.5")), ("gold", 2000, Decimal("1.25")),
                  ("silver", 500, Decimal("1.1")), ("bronze", 0, Decimal("1.0"))]
 PROVIDER_METHODS = ("momo", "visa", "debit")
+
 
 
 def compute_fare_split(total_fare, rate=COMMISSION_RATE):
@@ -278,7 +280,6 @@ WITHDRAWAL_STATUS = [
     ("reversed", "System Reversed — Check Notes"),
     ("timeout", "Provider Timeout — Funds Restored"),
 ]
-
 
 # =====================================================================
 # 1. PLATFORM CONFIG, SERVICES, ZONES, PRICING
@@ -376,7 +377,6 @@ class Zone(models.Model):
                 best, best_d = z, d
         return best
 
-
 class PricingRule(models.Model):
     """Per-service (optionally per-zone) fare card. Zone rule beats the global rule."""
     service = models.ForeignKey(Service, on_delete=models.PROTECT, related_name="pricing_rules")
@@ -421,7 +421,6 @@ class PricingRule(models.Model):
             "cancellation_fee": rule.cancellation_fee,
         }
 
-
 class SurgeRule(models.Model):
     """Time-boxed demand pricing (rain, rush hour, festive peaks). Create manually or from a Celery demand job."""
     service = models.ForeignKey(Service, null=True, blank=True, on_delete=models.CASCADE, related_name="surge_rules")
@@ -452,6 +451,7 @@ class SurgeRule(models.Model):
 # =====================================================================
 # 2. CUSTOMERS
 # =====================================================================
+
 class WalletError(Exception):
     pass
 
@@ -479,36 +479,46 @@ class CustomerProfile(models.Model):
         AGENT = "agent", "Field Agent"
         OTHER = "other", "Other"
 
+    # ---- REQUIRED: user (auth account holding the password), full_name, email, phone ----
     user = models.OneToOneField(AUTH_USER, on_delete=models.PROTECT, related_name="customer_profile")
     full_name = models.CharField(max_length=200, blank=True)
     email = models.EmailField(blank=True)
     phone = models.CharField(max_length=30, blank=True, null=True, validators=[validate_phone_number])
+
+    # ---- everything below is OPTIONAL ----
     mobile = PhoneNumberField(region="GH", blank=True, null=True)
     profile_photo = models.ImageField(upload_to="profiles/customer/%Y/%m/", blank=True, null=True)
 
     # CRM
-    preferred_language = models.CharField(max_length=5, choices=Language.choices, default=Language.ENGLISH)
-    acquisition_source = models.CharField(max_length=20, choices=Source.choices, default=Source.ORGANIC)
-    marketing_opt_in = models.BooleanField(default=False, help_text="Explicit consent for promo SMS/push.")
-    segment = models.CharField(max_length=10, choices=Segment.choices, default=Segment.NEW, db_index=True)
-    total_bookings = models.PositiveIntegerField(default=0)
-    total_spent = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    preferred_language = models.CharField(max_length=5, choices=Language.choices, default=Language.ENGLISH,
+                                          blank=True, null=True)
+    acquisition_source = models.CharField(max_length=20, choices=Source.choices, default=Source.ORGANIC,
+                                          blank=True, null=True)
+    marketing_opt_in = models.BooleanField(default=False, help_text="Explicit consent for promo SMS/push.",
+                                           blank=True, null=True)
+    segment = models.CharField(max_length=10, choices=Segment.choices, default=Segment.NEW, db_index=True,
+                               blank=True, null=True)
+    total_bookings = models.PositiveIntegerField(default=0, blank=True, null=True)
+    total_spent = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"),
+                                      blank=True, null=True)
     last_booking_at = models.DateTimeField(null=True, blank=True)
-    rating_average = models.FloatField(default=5.0, validators=[MinValueValidator(0), MaxValueValidator(5)])
-    rating_count = models.PositiveIntegerField(default=0)
+    rating_average = models.FloatField(default=5.0, validators=[MinValueValidator(0), MaxValueValidator(5)],
+                                       blank=True, null=True)
+    rating_count = models.PositiveIntegerField(default=0, blank=True, null=True)
     outstanding_fees = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"),
-                                           help_text="Unpaid cancellation fees; block new bookings until cleared.")
-    internal_notes = models.TextField(blank=True, help_text="Staff only.")
-    is_blocked = models.BooleanField(default=False, db_index=True)
-    blocked_reason = models.CharField(max_length=255, blank=True)
+                                           help_text="Unpaid cancellation fees; block new bookings until cleared.",
+                                           blank=True, null=True)
+    internal_notes = models.TextField(blank=True, null=True, help_text="Staff only.")
+    is_blocked = models.BooleanField(default=False, db_index=True, blank=True, null=True)
+    blocked_reason = models.CharField(max_length=255, blank=True, null=True)
 
     # Growth
-    referral_code = models.CharField(max_length=16, unique=True, blank=True, editable=False)
+    referral_code = models.CharField(max_length=16, unique=True, blank=True, null=True, editable=False)
     referred_by = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL,
                                     related_name="referrals_made")
 
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True, blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True, blank=True, null=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -519,13 +529,14 @@ class CustomerProfile(models.Model):
         return name or f"CustomerProfile-{str(self.pk)[:8]}"
 
     def save(self, *args, **kwargs):
+        fill_null_defaults(self)
         if not self.referral_code:
             self.referral_code = unique_code(CustomerProfile, "referral_code", "RYD", 6)
         super().save(*args, **kwargs)
 
     @property
     def can_book(self):
-        return not self.is_blocked and self.outstanding_fees <= 0
+        return not self.is_blocked and (self.outstanding_fees or Decimal("0")) <= 0
 
     @property
     def loyalty_tier(self):
@@ -538,13 +549,15 @@ class CustomerProfile(models.Model):
 
     def recompute_segment(self, save=True):
         now = timezone.now()
-        if self.total_bookings == 0:
+        bookings = self.total_bookings or 0
+        spent = self.total_spent or Decimal("0")
+        if bookings == 0:
             seg = self.Segment.NEW
         elif self.last_booking_at and self.last_booking_at < now - timedelta(days=60):
             seg = self.Segment.CHURNED
         elif self.last_booking_at and self.last_booking_at < now - timedelta(days=30):
             seg = self.Segment.AT_RISK
-        elif self.total_bookings >= 20 or self.total_spent >= Decimal("1000"):
+        elif bookings >= 20 or spent >= Decimal("1000"):
             seg = self.Segment.VIP
         else:
             seg = self.Segment.ACTIVE
@@ -565,12 +578,13 @@ class CustomerProfile(models.Model):
     def apply_rating(self, rating):
         with transaction.atomic():
             c = CustomerProfile.objects.select_for_update().get(pk=self.pk)
-            total = c.rating_average * c.rating_count + rating
-            c.rating_count += 1
+            avg = c.rating_average if c.rating_average is not None else 5.0
+            count = c.rating_count or 0
+            total = avg * count + rating
+            c.rating_count = count + 1
             c.rating_average = round(total / c.rating_count, 2)
             c.save(update_fields=["rating_average", "rating_count", "updated_at"])
         self.rating_average, self.rating_count = c.rating_average, c.rating_count
-
 
 class SavedAddress(models.Model):
     class Label(models.TextChoices):
@@ -778,6 +792,7 @@ class LoyaltyTransaction(models.Model):
         ordering = ["-created_at"]
 
 
+
 # =====================================================================
 # 3. RIDERS
 # =====================================================================
@@ -936,6 +951,7 @@ class RiderProfile(models.Model):
 
     objects = RiderProfileQuerySet.as_manager()
 
+
     @property
     def is_verified(self):
         return self.verification_status == VerificationStatus.VERIFIED
@@ -962,6 +978,7 @@ class RiderProfile(models.Model):
         return f"{self.full_name} — {self.get_verification_status_display()}"
 
     def save(self, *args, **kwargs):
+        fill_null_defaults(self)
         if not self.rider_code:
             self.rider_code = unique_code(RiderProfile, "rider_code", "RDR", 6)
         super().save(*args, **kwargs)
@@ -979,7 +996,7 @@ class RiderProfile(models.Model):
 
     @property
     def is_restricted_now(self):
-        return self.is_restricted and (self.restricted_until is None or self.restricted_until > timezone.now())
+        return bool(self.is_restricted) and (self.restricted_until is None or self.restricted_until > timezone.now())
 
     @property
     def licence_expired(self):
@@ -993,7 +1010,7 @@ class RiderProfile(models.Model):
 
     @property
     def can_accept_jobs(self):
-        return (self.is_verified and self.is_active and self.deleted_at is None
+        return (self.is_verified and bool(self.is_active) and self.deleted_at is None
                 and not self.licence_expired and not self.is_restricted_now)
 
     @property
@@ -1216,8 +1233,10 @@ class RiderProfile(models.Model):
     def apply_rating(self, rating):
         with transaction.atomic():
             r = RiderProfile.objects.select_for_update().get(pk=self.pk)
-            total = r.rating_average * r.rating_count + rating
-            r.rating_count += 1
+            avg = r.rating_average if r.rating_average is not None else 5.0
+            count = r.rating_count or 0
+            total = avg * count + rating
+            r.rating_count = count + 1
             r.rating_average = round(total / r.rating_count, 2)
             r.save(update_fields=["rating_average", "rating_count", "updated_at"])
         self.rating_average, self.rating_count = r.rating_average, r.rating_count
@@ -1631,6 +1650,7 @@ class RiderProfileAdminNote(models.Model):
 
     def __str__(self):
         return f"Note on {self.rider_profile}: {self.note[:40]}{'…' if len(self.note) > 40 else ''}"
+   
 
 
 # =====================================================================
@@ -4024,3 +4044,6 @@ class DispatchOffer(models.Model):
     @property
     def is_expired(self) -> bool:
         return timezone.now() >= self.expires_at
+
+
+
