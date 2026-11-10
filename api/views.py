@@ -277,9 +277,7 @@ def customer_register(request):
     serializer.is_valid(raise_exception=True)
 
     try:
-        serializer.is_valid(raise_exception= True)
         user= serializer.save()
-
         return Response ({
             "message": "Account created succefully",
             "user_id":  "user.id",
