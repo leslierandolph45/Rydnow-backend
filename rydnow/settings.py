@@ -167,12 +167,17 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
+# Allow frontend to communicate with backend
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://rydnow.app",
     "https://www.rydnow.app",
 ]
+
+
+# Optional: For development only - cookies & auth headers 
+CORS_ALLOW_CREDENTIALS = True
 
 
 # ─────────────────── Internationalization ───────────────────
@@ -184,7 +189,8 @@ USE_TZ = True
 
 # ───────────────────── Static & Media ─────────────────────
 STATIC_URL = "/static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"
+STATIC_ROOT = BASE_DIR / "staticfiles" # Where Django collects them
+STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.ManifestStatisFIlesStorage'
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
