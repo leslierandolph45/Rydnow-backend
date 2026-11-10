@@ -89,9 +89,9 @@ from .models import COMMISSION_RATE, Booking, CustomerProfile, Service, ServiceQ
 
 from .rider_domain import RiderDocument, RiderProfile
 from .serializers import (
+    CustomerRegisterSerializer,
     AccountSerializer,
     AccountUpdateSerializer,
-    RegistrationSerializer,
     ChangePasswordSerializer,
     CustomerProfileSerializer,
     CustomerSerializer,
@@ -266,34 +266,6 @@ def user_login(request):
 
     return ok(token=token.key, user=user_payload)
 
-
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-@throttle_classes([RegistrationThrottle])
-def customer_register(request):
-    """Register a new customer account."""
-    serializer = CustomerRegisterSerializer(data=request.data)
-    serializer.is_valid(raise_exception=True)
-
-    try:
-        user= serializer.save()
-        return Response ({
-            "message": "Account created succefully",
-            "user_id":  "user.id",
-            "email": user.email,
-        }, status= status.HTTP_201_CREATED)
-
-    except IntegrityError:
-        return Response({
-            "error":"An account with these details already exists.",
-        }, status=status.HTTP_409_CONFLICT)
-
-    except Exception as e:
-        logger.exception(f"Customer registration failed:{e}")
-        return Response({
-            "error": "Something went wrong. Please try again.",
-        }, status=status.HTTP_500_INTERNAL_SEVER_ERROR)
 
 
 # ===========================================================================
@@ -520,8 +492,6 @@ def customer_register(request):
         return Response({
             "error": "Something went wrong. Please try again.",
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 
 
 
