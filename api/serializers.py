@@ -89,8 +89,8 @@ logger = logging.getLogger(__name__)
 # 1. CONSTANTS, HELPERS, THROTTLES, DECORATORS
 # ===========================================================================
 CURRENCY = getattr(settings, "PAYMENT_CURRENCY", "GHS")
-MINIMUM_WALLET_BALANCE = Decimal(str(getattr(settings, "MINIMUM_WALLET_BALANCE", "50.00")))
-MIN_WITHDRAWAL_AMOUNT = Decimal(str(getattr(settings, "MIN_WITHDRAWAL_AMOUNT", "10.00")))
+MINIMUM_WALLET_BALANCE = Decimal(getattr(settings, "MINIMUM_WALLET_BALANCE", "50.00"))
+MIN_WITHDRAWAL_AMOUNT = Decimal(getattr(settings, "MIN_WITHDRAWAL_AMOUNT", "10.00"))
 AMOUNT_TOLERANCE = Decimal("0.01")
 TWO_PLACES = Decimal("0.01")
 
@@ -1038,95 +1038,95 @@ class TransactionPagination(PageNumberPagination):
     max_page_size = 100
     
     
-    def _apply_filters(qs, f):
-    tz = timezone.get_current_timezone()
-    if "type" in f:
-        qs = qs.filter(transaction_type=f["type"])
-    if "status" in f:
-        qs = qs.filter(status=f["status"])
-    if "direction" in f:
-        qs = qs.filter(direction=f["direction"])
-    if "date_from" in f:
-        qs = qs.filter(created_at__gte=timezone.make_aware(datetime.combine(f["date_from"], time.min), tz))
-    if "date_to" in f:
-        end = datetime.combine(f["date_to"] + timedelta(days=1), time.min)
-        qs = qs.filter(created_at__lt=timezone.make_aware(end, tz))
-    if "min_amount" in f:
-        qs = qs.filter(amount__gte=f["min_amount"])
-    if "max_amount" in f:
-        qs = qs.filter(amount__lte=f["max_amount"])
-    if f.get("search"):
-        term = f["search"].strip()
-        qs = qs.filter(Q(reference__icontains=term) | Q(description__icontains=term))
-    return qs.order_by(f["ordering"], "-id")
-    
-    def _summary(qs):
-    agg = qs.filter(status=WalletTransaction.Status.SUCCESS).aggregate(
-        total_in=Coalesce(Sum("amount", filter=Q(transaction_type="deposit")), ZERO),
-        total_out=Coalesce(Sum("amount", filter=Q(transaction_type="withdrawal")), ZERO),
-        count=Count("id"),
+def _apply_filters(qs, f):
+tz = timezone.get_current_timezone()
+if "type" in f:
+    qs = qs.filter(transaction_type=f["type"])
+if "status" in f:
+    qs = qs.filter(status=f["status"])
+if "direction" in f:
+    qs = qs.filter(direction=f["direction"])
+if "date_from" in f:
+    qs = qs.filter(created_at__gte=timezone.make_aware(datetime.combine(f["date_from"], time.min), tz))
+if "date_to" in f:
+    end = datetime.combine(f["date_to"] + timedelta(days=1), time.min)
+    qs = qs.filter(created_at__lt=timezone.make_aware(end, tz))
+if "min_amount" in f:
+    qs = qs.filter(amount__gte=f["min_amount"])
+if "max_amount" in f:
+    qs = qs.filter(amount__lte=f["max_amount"])
+if f.get("search"):
+    term = f["search"].strip()
+    qs = qs.filter(Q(reference__icontains=term) | Q(description__icontains=term))
+return qs.order_by(f["ordering"], "-id")
+
+def _summary(qs):
+agg = qs.filter(status=WalletTransaction.Status.SUCCESS).aggregate(
+    total_in=Coalesce(Sum("amount", filter=Q(transaction_type="deposit")), ZERO),
+    total_out=Coalesce(Sum("amount", filter=Q(transaction_type="withdrawal")), ZERO),
+    count=Count("id"),
+)
+agg["net"] = agg["total_in"] - agg["total_out"]
+return agg
+
+def _monthly_trend(wallet, months=6):
+    since = (timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        - timedelta(days=31 * (months - 1)))
+rows = (
+    wallet.transactions.filter(status=WalletTransaction.Status.SUCCESS, created_at__gte=since)
+    .annotate(month=TruncMonth("created_at"))
+    .values("month")
+    .annotate(
+        money_in=Coalesce(Sum("amount", filter=Q(transaction_type="deposit")), ZERO),
+        money_out=Coalesce(Sum("amount", filter=Q(transaction_type="withdrawal")), ZERO),
     )
-    agg["net"] = agg["total_in"] - agg["total_out"]
-    return agg
-    
-    def _monthly_trend(wallet, months=6):
-        since = (timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-             - timedelta(days=31 * (months - 1)))
-    rows = (
-        wallet.transactions.filter(status=WalletTransaction.Status.SUCCESS, created_at__gte=since)
-        .annotate(month=TruncMonth("created_at"))
-        .values("month")
-        .annotate(
-            money_in=Coalesce(Sum("amount", filter=Q(transaction_type="deposit")), ZERO),
-            money_out=Coalesce(Sum("amount", filter=Q(transaction_type="withdrawal")), ZERO),
-        )
-        .order_by("month")
+    .order_by("month")
+)
+return [
+    {"month": r["month"].strftime("%Y-%m"), "money_in": r["money_in"], "money_out": r["money_out"]}
+    for r in rows
+]
+
+
+def _top_up_nudge(wallet):
+    low = wallet.balance < LOW_BALANCE_THRESHOLD
+    return {
+        "low_balance": low,
+        "message": "Your balance is running low. Top up to keep riding without interruption." if low else None,
+    }
+
+
+def _csv_safe(value):
+    s = "" if value is None else str(value)
+    return "'" + s if s[:1] in ("=", "+", "-", "@") else s
+
+
+class _Echo:
+    def write(self, value):
+        return value
+
+
+def _csv_response(qs, currency):
+    qs = qs[:MAX_EXPORT_ROWS]
+    writer = csv.writer(_Echo())
+
+def rows():
+    yield writer.writerow(
+        ["Date", "Reference", "Type", "Status", f"Amount ({currency})",
+        "Description"]
     )
-    return [
-        {"month": r["month"].strftime("%Y-%m"), "money_in": r["money_in"], "money_out": r["money_out"]}
-        for r in rows
-    ]
-    
-    
-    def _top_up_nudge(wallet):
-        low = wallet.balance < LOW_BALANCE_THRESHOLD
-        return {
-            "low_balance": low,
-            "message": "Your balance is running low. Top up to keep riding without interruption." if low else None,
-        }
+    for t in qs.iterator(chunk_size=1000):
+        yield writer.writerow([
+            timezone.localtime(t.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+            _csv_safe(t.reference), t.get_transaction_type_display(),
+            t.get_status_display(), t.amount, _csv_safe(t.description),
+        ])
 
-
-    def _csv_safe(value):
-        s = "" if value is None else str(value)
-        return "'" + s if s[:1] in ("=", "+", "-", "@") else s
-
-
-    class _Echo:
-        def write(self, value):
-            return value
-
-
-    def _csv_response(qs, currency):
-        qs = qs[:MAX_EXPORT_ROWS]
-        writer = csv.writer(_Echo())
-
-    def rows():
-        yield writer.writerow(
-            ["Date", "Reference", "Type", "Status", f"Amount ({currency})",
-             "Description"]
-        )
-        for t in qs.iterator(chunk_size=1000):
-            yield writer.writerow([
-                timezone.localtime(t.created_at).strftime("%Y-%m-%d %H:%M:%S"),
-                _csv_safe(t.reference), t.get_transaction_type_display(),
-                t.get_status_display(), t.amount, _csv_safe(t.description),
-            ])
-
-    resp = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
-    stamp = timezone.now().strftime("%Y%m%d")
-    resp["Content-Disposition"] = f'attachment; filename="wallet-statement-{stamp}.csv"'
-    resp["Cache-Control"] = "no-store"
-    return resp
+resp = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
+stamp = timezone.now().strftime("%Y%m%d")
+resp["Content-Disposition"] = f'attachment; filename="wallet-statement-{stamp}.csv"'
+resp["Cache-Control"] = "no-store"
+return resp
 
 
 @api_view(["GET"])
