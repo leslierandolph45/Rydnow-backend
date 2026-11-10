@@ -273,12 +273,12 @@ def user_login(request):
 @throttle_classes([RegistrationThrottle])
 def customer_register(request):
     """Register a new customer account."""
-    serializer = CustomerSerializer(data=request.data)
+    serializer = CustomerRegisterSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
 
     try:
         serializer.is_valid(raise_exception= True)
-        user= serializer.sabe()
+        user= serializer.save()
 
         return Response ({
             "message": "Account created succefully",
