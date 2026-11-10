@@ -492,6 +492,40 @@ def rider_submit_documents(request, rider):
 # ===========================================================================
 # 5. CUSTOMER PROFILE
 # ===========================================================================
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([RegistrationThrottle])
+def customer_register(request):
+    """Register a new customer account."""
+    serializer = CustomerRegisterSerializer(data=request.data)
+    try:
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        return Response({
+            "message": "Account created successfully",
+            "user_id": user.id,
+            "email": user.email,
+        }, status=status.HTTP_201_CREATED)
+    except serializers.ValidationError as e:
+        return Response({
+            "error": e.detail,
+        }, status=status.HTTP_400_BAD_REQUEST)
+    except IntegrityError:
+        return Response({
+            "error": "An account with these details already exists.",
+        }, status=status.HTTP_409_CONFLICT)
+    except Exception as e:
+        logger.exception(f"Customer registration failed:{e}")
+        return Response({
+            "error": "Something went wrong. Please try again.",
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+
+
 @api_view(["GET", "PATCH"])
 @permission_classes([IsAuthenticated])
 def customer_profile(request):
