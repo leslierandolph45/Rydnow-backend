@@ -89,7 +89,7 @@ from .models import COMMISSION_RATE, Booking, CustomerProfile, Service, ServiceQ
 
 from .rider_domain import RiderDocument, RiderProfile
 from .serializers import (
-    CustomerRegisterSerializer,
+    RegistrationSerializer,
     AccountSerializer,
     AccountUpdateSerializer,
     ChangePasswordSerializer,

@@ -1,1316 +1,1460 @@
-from rest_framework import serializers
-from django.contrib.auth import get_user_model
-from .validators import validate_email, validate_phone_number
-from django.contrib.auth.password_validation import validate_password
-from .models import Booking, CustomerProfile
-from .models import RiderProfile, Service
-import re
+"""
+Rydnow API views.
+
+Sections
+    1. Constants, response helpers, throttles, decorators
+    2. Authentication & customer registration
+    3. Phone verification (OTP)
+    4. Rider onboarding
+    5. Customer profile
+    6. Rider location & nearby-rider search
+    7. Rider wallet
+    8. Payments (Paystack)
+"""
+
+
+import hashlib
+import hmac
+import json
+import logging
+import math
+import secrets
+import time
+import uuid
+from datetime import timedelta
+from decimal import ROUND_HALF_UP, Decimal
+from functools import wraps
+from urllib.parse import quote
+
+
+import requests
 from django.conf import settings
-from rest_framework import serializers
+from django.contrib.auth import authenticate, get_user_model
+from django.contrib.auth.models import update_last_login
+from django.core.cache import cache
+from django.db import IntegrityError, transaction
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from django.utils.module_loading import import_string
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+from rest_framework import generics, status, serializers
+from rest_framework.authtoken.models import Token
+from rest_framework.decorators import (
+    api_view,
+    authentication_classes,
+    parser_classes,
+    permission_classes,
+    throttle_classes,
+)
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
+
+
 from .models import (
-    RiderProfile,
-    RiderDocumentType,
-    RiderStatusHistory,
-    VerificationStatus,
-    RiderTier,
-    CustomerProfile,
+    COMMISSION_RATE, Booking, CustomerProfile, Service, ServiceQualification,
+    RiderWallet, WalletTransaction, WithdrawalRequest
+)
+from .rider_domain import RiderDocument, RiderProfile
+from .serializers import (
+    RegistrationSerializer,
+    AccountSerializer,
+    AccountUpdateSerializer,
+    ChangePasswordSerializer,
+    CustomerProfileSerializer,
+    CustomerSerializer,
+    InitializePaymentSerializer,
+    LoginSerializer,
+    NearbyRidersQuerySerializer,
+    PhoneSerializer,
+    RiderDocumentSerializer,
+    RiderLocationSerializer,
+    RiderProfileSerializer,
+    RiderRegistrationSerializer,
+    VerifyCodeSerializer,
+    VerifyPaymentSerializer,
+    TransactionSerializer,
+    TransactionQuerySerializer,
+    AmountSerializer,
 )
 
-class MobileNumberField(serializers.CharField):
-    """
-    Validates a mobile number and normalizes it to E.164 (e.g. "+14155552671").
-
-    Accepted input:
-      - International format: "+1 (415) 555-2671", "+44 7911 123456"
-      - "00" prefix:          "0044 7911 123456"
-      - National format:      "0803 123 4567", only when a default country
-        calling code is configured.
-
-    Configuration:
-      - Per field:  MobileNumberField(default_country_code="233")
-      - Project:    DEFAULT_PHONE_COUNTRY_CODE = "233" in settings.py
-    """
-
-    default_error_messages = {
-        "invalid": (
-            "Enter a valid mobile number in international format, "
-            "e.g. +14155552671."
-        ),
-    }
-
-    _SEPARATORS = re.compile(r"[\s\-().]")
-    _E164 = re.compile(r"^\+[1-9]\d{7,14}$")
-
-    def __init__(self, *args, default_country_code=None, **kwargs):
-        kwargs.setdefault("max_length", 20)
-        super().__init__(*args, **kwargs)
-        code = default_country_code or getattr(
-            settings, "DEFAULT_PHONE_COUNTRY_CODE", None
-        )
-        self.default_country_code = str(code).lstrip("+") if code else None
-
-    def to_internal_value(self, data):
-        value = super().to_internal_value(data)
-        number = self._SEPARATORS.sub("", value)
-
-        if number.startswith("00"):
-            number = f"+{number[2:]}"
-        elif not number.startswith("+") and self.default_country_code:
-            number = f"+{self.default_country_code}{number.lstrip('0')}"
-
-        if not self._E164.match(number):
-            self.fail("invalid")
-
-        return number
-
-
-class RiderRegistrationSerializer(serializers.Serializer):
-    """
-    RiderProfileSerializer for rider registration - Phase 1
-    Validates input without assuming Rider.user exists
-    """
-    full_name = serializers.CharField(
-        max_length=200,
-        required=True,
-        trim_whitespace=True,
-    )
-    email = serializers.EmailField(
-        required=True,
-        validators=[validate_email]
-    )
-    phone = serializers.CharField(
-        max_length=30,
-        required=True,
-        trim_whitespace=True,
-    )
-    password = serializers.CharField(
-        write_only=True,
-        required=False,
-        allow_blank=False,
-    )
-    motorbike_model = serializers.CharField(
-        max_length=200,
-        required=False,
-        allow_blank=True,
-    )
-    license_number = serializers.CharField(
-        max_length=100,
-        required=False,
-        allow_blank=True,
-    )
-
-
-    def validate_email(self, value):
-        """Prevent duplicate email accounts"""
-        if User.objects.filter(email__iexact=value).exists():
-            raise serializers.ValidationError(
-                "An account with this email already exists"
-            )
-        return value.lower()
-
-
-    def validate_phone(self, value):
-        """Prevent duplicate phone registrations — accept both formats"""
-        cleaned = value.replace(' ', '').strip()
-
-        # Accept: 0XXXXXXXXX
-        if cleaned.startswith('0') and len(cleaned) == 10 and cleaned.isdigit():
-            normalized = cleaned
-        # Accept: +233XXXXXXXXX
-        elif cleaned.startswith('+233') and len(cleaned) == 13:
-            normalized = '0' + cleaned[4:]  # Convert to local format for DB
-        # Accept: 9 digits only → prepend 0
-        elif len(cleaned) == 9 and cleaned.isdigit():
-            normalized = '0' + cleaned
-        else:
-            raise serializers.ValidationError(
-                "Enter a valid Ghanaian number — e.g. 0241234567 or +233241234567"
-            )
-
-        if Rider.objects.filter(phone=normalized).exists():
-            raise serializers.ValidationError(
-                "This phone number is already registered with us"
-            )
-        return normalized
-
-
-class RiderSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Riderfields = [
-            'id',
-            'name',
-            'phone',
-            'is_online',
-            'verification_status',
-            'current_lat',
-            'current_lng'
-    ]
-
-
-class BookingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Booking
-        fields = [
-            'id', 'booking_ref', 'service_type', 'customer',
-            'pickup', 'pickup_lat', 'pickup_lng',
-            'destination', 'destination_lat', 'destination_lng',
-            'estimated_distance_km', 'estimated_duration_min',
-            'status', 'assigned_rider', 'accepted_at',
-            'total_fare', 'platform_commission', 'rider_payout',
-            'payment_status', 'payment_method', 'payment_ref', 'provider_ref',
-            'created_at', 'updated_at'
-        ]
-        read_only_fields = [
-            'id', 'booking_ref', 'total_fare', 'platform_commission',
-            'rider_payout', 'payment_status', 'payment_ref', 'provider_ref',
-            'assigned_rider', 'accepted_at', 'created_at', 'updated_at'
-        ]
-
-
-
-#================ Serializer =============
-class RiderProfileAdminNoteSerializer(serializers.ModelSerializer):
-    author_name = serializers.SerializerMethodField()
-
-    class Meta:
-        model = RiderProfileAdminNotefields = ["id", "rider_profile", "author", "author_name", "note", "created_at"]
-        read_only_fields = ["id", "author", "author_name", "created_at"]
-
-    def get_author_name(self, obj):
-        if not obj.author:
-            return None
-        return obj.author.get_full_name() or obj.author.get_username()
-
-    def validate_note(self, value):
-        value = value.strip()
-        if not value:
-            raise serializers.ValidationError("Note cannot be empty.")
-        return value
-
-    def update(self, instance, validated_data):
-        validated_data.pop("rider_profile", None)
-        return super().update(instance, validated_data)
-
-
-
-# —————————————————————————
-# SERIALIZERS
-# —————————————————————————
-class RiderIncidentReportSerializer(serializers.ModelSerializer):
-    """What a rider sends when reporting an incident (no admin fields)."""
-
-    class Meta:
-        model = RiderIncidentfields = (
-            "id", "reference_code", "incident_type", "severity", "service", "title",
-            "description", "location", "incident_date", "status", "date_reported",
-            "resolution_notes", "resolved_at",
-        )
-        read_only_fields = ("id", "reference_code", "status", "date_reported",
-                            "resolution_notes", "resolved_at")
-
-    def validate_incident_date(self, value):
-        if value > timezone.now():
-            raise serializers.ValidationError("Incident date cannot be in the future.")
-        return value
-
-
-class RiderIncidentAdminSerializer(serializers.ModelSerializer):
-    """Full view for administrators."""
-
-    rider_name = serializers.CharField(source="rider_profile.full_name", read_only=True)
-    rider_phone = serializers.CharField(source="rider_profile.phone", read_only=True)
-    incident_type_display = serializers.CharField(source="get_incident_type_display", read_only=True)
-    severity_display = serializers.CharField(source="get_severity_display", read_only=True)
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
-    assigned_to_name = serializers.CharField(
-        source="assigned_to.get_full_name", read_only=True, default=None
-    )
-    is_open = serializers.BooleanField(read_only=True)
-
-    class Meta:
-        model = RiderIncidentfields = (
-            "id", "reference_code", "rider_profile", "rider_name", "rider_phone",
-            "service", "incident_type", "incident_type_display", "severity",
-            "severity_display", "title", "description", "location", "incident_date",
-            "date_reported", "updated_at", "reported_by", "assigned_to",
-            "assigned_to_name", "status", "status_display", "is_open",
-            "resolution_notes", "resolved_at", "resolved_by",
-        )
-        read_only_fields = ("id", "reference_code", "date_reported", "updated_at",
-                            "reported_by", "resolved_at", "resolved_by")
-
-    def validate(self, attrs):
-        status = attrs.get("status", getattr(self.instance, "status", None))
-        notes = attrs.get("resolution_notes", getattr(self.instance, "resolution_notes", ""))
-        if status in RiderIncident.FINAL_STATUSES and not (notes or "").strip():
-            raise serializers.ValidationError(
-                {"resolution_notes": "Resolution notes are required to resolve or close an incident."}
-            )
-        return attrs
-
-
-import re
-from decimal import Decimal
-
-from django.db import models
-from rest_framework import serializers
-
-
-class PaymentType(models.TextChoices):
-    WALLET_TOPUP = "wallet_topup", "Wallet Top-up"
-    BOOKING_PAYMENT = "booking_payment", "Booking Payment"
-    WITHDRAWAL = "withdrawal", "Withdrawal"
-
-
-SUPPORTED_CURRENCIES = ("GHS",)
-MIN_AMOUNT = Decimal("1.00")
-MAX_AMOUNT = Decimal("50000.00")
-REFERENCE_PATTERN = re.compile(r"^[A-Za-z0-9_\-\.]+$")
-
-
-class InitializePaymentSerializer(serializers.Serializer):
-    """Validates and normalizes a request to initialize a payment."""
-
-    amount = serializers.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        min_value=MIN_AMOUNT,
-        max_value=MAX_AMOUNT,
-        help_text="Payment amount in major currency units (e.g. 25.50).",
-    )
-    currency = serializers.CharField(
-        max_length=3,
-        default="GHS",
-        help_text="ISO 4217 currency code. Currently only GHS is supported.",
-    )
-    payment_type = serializers.ChoiceField(
-        choices=PaymentType.choices,
-        help_text="Purpose of the payment.",
-    )
-    booking_id = serializers.IntegerField(
-        required=False,
-        min_value=1,
-        help_text="Required when payment_type is 'booking_payment'.",
-    )
-    reference = serializers.CharField(
-        max_length=255,
-        required=False,
-        allow_blank=True,
-        help_text="Optional client reference. Generated server-side if omitted.",
-    )
-    description = serializers.CharField(
-        max_length=500,
-        required=False,
-        allow_blank=True,
-        trim_whitespace=True,
-    )
-
-    def validate_currency(self, value):
-        value = value.strip().upper()
-        if value not in SUPPORTED_CURRENCIES:
-            raise serializers.ValidationError(
-                f"Unsupported currency. Supported: {', '.join(SUPPORTED_CURRENCIES)}."
-            )
-        return value
-
-    def validate_reference(self, value):
-        value = value.strip()
-        if not value:
-            return None  # Let the service layer generate one
-        if not REFERENCE_PATTERN.match(value):
-            raise serializers.ValidationError(
-                "Reference may only contain letters, numbers, hyphens, underscores and dots."
-            )
-        return value
-
-    def validate(self, attrs):
-        payment_type = attrs["payment_type"]
-
-        if payment_type == PaymentType.BOOKING_PAYMENT and not attrs.get("booking_id"):
-            raise serializers.ValidationError(
-                {"booking_id": "This field is required for booking payments."}
-            )
-
-        if payment_type != PaymentType.BOOKING_PAYMENT and attrs.get("booking_id"):
-            raise serializers.ValidationError(
-                {"booking_id": "Only valid for booking payments."}
-            )
-
-        if payment_type == PaymentType.WITHDRAWAL:
-            user = getattr(self.context.get("request"), "user", None)
-            wallet = getattr(user, "wallet", None)
-            if wallet is not None and attrs["amount"] > wallet.balance:
-                raise serializers.ValidationError(
-                    {"amount": "Withdrawal amount exceeds available wallet balance."}
-                )
-
-        return attrs
-
-
-from django.contrib.auth import authenticate
-from rest_framework import serializers
-
-
-class LoginSerializer(serializers.Serializer):
-    """Validates credentials and returns the authenticated user in validated_data["user"]."""
-
-    email = serializers.EmailField(max_length=254)
-    password = serializers.CharField(
-        write_only=True,
-        trim_whitespace=False,  # never alter a password
-        max_length=128,
-        style={"input_type": "password"},
-    )
-
-    # Single generic message so the API never reveals whether an email exists
-    INVALID_CREDENTIALS = "Invalid email or password."
-
-    default_error_messages = {
-        "inactive": "This account has been deactivated. Please contact support.",
-    }
-
-    def validate_email(self, value):
-        return value.strip().lower()
-
-    def validate(self, attrs):
-        request = self.context.get("request")
-
-        user = authenticate(
-            request=request,
-            username=attrs["email"],  # works when USERNAME_FIELD = "email"
-            password=attrs["password"],
-        )
-
-        if user is None:
-            raise serializers.ValidationError(
-                {"non_field_errors": [self.INVALID_CREDENTIALS]}, code="authorization"
-            )
-
-        if not user.is_active:
-            self.fail("inactive")
-
-        attrs["user"] = user
-        return attrs
-
-class CoordinatesSerializer(serializers.Serializer):
-    """Validates latitude/longitude query parameters."""
-    lat = serializers.FloatField(required=True, min_value=-90.0, max_value=90.0)
-    lng = serializers.FloatField(required=True, min_value=-180.0, max_value=180.0)
-
-
-class NearbyRiderProfilesSerializer(serializers.ModelSerializer):
-    """Public representation of a rider shown to customers."""
-
-    full_name = serializers.SerializerMethodField()
-    distance_km = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Riderfields = [
-            "id",
-            "full_name",
-            "phone",
-            "profile_photo",
-            "motorbike_model",
-            "current_lat",
-            "current_lng",
-            "distance_km",
-            "rating",
-            "is_available",
-        ]
-        read_only_fields = [
-            "id",
-            "full_name",
-            "phone",
-            "profile_photo",
-            "motorbike_model",
-            "current_lat",
-            "current_lng",
-            "distance_km",
-            "rating",
-            "is_available",
-        ]
-
-    def get_full_name(self, obj: Rider) -> str:
-        return obj.user.get_full_name() or obj.user.get_username()
-
-    def get_distance_km(self, obj: Rider) -> float | None:
-        distance = getattr(obj, "distance_km", None)
-        return None if distance is None else round(distance, 2)
-
-
-class NearbyRiderQuerySerializer(CoordinatesSerializer):
-    """Validates query parameters for the nearby-riders endpoint."""
-
-    radius_km = serializers.FloatField(
-        required=False, default=5.0, min_value=0.1, max_value=50.0
-    )
-    limit = serializers.IntegerField(
-        required=False, default=20, min_value=1, max_value=50
-    )
-    service = serializers.PrimaryKeyRelatedField(
-        queryset=Service.objects.all(), required=False
-    )
-
-from rest_framework import serializers
-
-class PhoneSerializer(serializers.Serializer):
-    """Simple serializer for validating and accepting a phone number only."""
-    phone = MobileNumberField()
-
-
-import re
-
-from django.contrib.auth import get_user_model
-from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import transaction
-from rest_framework import serializers
-
-from .models import CustomerProfile
 
 User = get_user_model()
-
-_PHONE_RE = re.compile(r"^\+?[0-9]{9,15}$")
-
-
-class MobileNumberField(serializers.CharField):
-    """Strips spaces/dashes/brackets and validates a 9-15 digit number."""
-
-    default_error_messages = {"invalid": "Enter a valid mobile number."}
-
-    def to_internal_value(self, data):
-        value = super().to_internal_value(data)
-        cleaned = re.sub(r"[\s\-().]", "", value)
-        if not _PHONE_RE.match(cleaned):
-            self.fail("invalid")
-        return cleaned
+logger = logging.getLogger(__name__)
 
 
-class CustomerRegisterSerializer(serializers.Serializer):
-    full_name = serializers.CharField(max_length=100, trim_whitespace=True)
-    email = serializers.EmailField(required=False, allow_blank=True)
-    phone = MobileNumberField()
-    password = serializers.CharField(write_only=True, min_length=6, max_length=128)
+# ===========================================================================
+# 1. CONSTANTS, HELPERS, THROTTLES, DECORATORS
+# ===========================================================================
+CURRENCY = getattr(settings, "PAYMENT_CURRENCY", "GHS")
+MINIMUM_WALLET_BALANCE = Decimal(str(getattr(settings, "MINIMUM_WALLET_BALANCE", "50.00")))
+MIN_WITHDRAWAL_AMOUNT = Decimal(str(getattr(settings, "MIN_WITHDRAWAL_AMOUNT", "10.00")))
+AMOUNT_TOLERANCE = Decimal("0.01")
+TWO_PLACES = Decimal("0.01")
 
-    def validate_email(self, value):
-        value = value.strip().lower()
-        if value and User.objects.filter(email__iexact=value).exists():
-            raise serializers.ValidationError("An account with this email already exists.")
-        return value
 
-    def validate_phone(self, value):
-        if CustomerProfile.objects.filter(phone=value).exists() or User.objects.filter(username=value).exists():
-            raise serializers.ValidationError("An account with this phone number already exists.")
-        return value
+CUSTOMER_EDITABLE_FIELDS = ("full_name", "phone")
 
-    def validate(self, attrs):
+
+LOCATION_STALE_AFTER = timedelta(minutes=5)
+EARTH_RADIUS_KM = 6371.0
+KM_PER_DEGREE = 111.0
+MAX_NEARBY_CANDIDATES = 200
+
+
+PAYSTACK_BASE_URL = "https://api.paystack.co"
+PAYSTACK_TIMEOUT = (5, 15)  # (connect, read) seconds
+PURPOSE_BOOKING = "booking"
+PURPOSE_DEPOSIT = "wallet_deposit"
+PAID_STATUSES = ("held", "released")
+
+
+OTP_LENGTH = 6
+OTP_TTL_SECONDS = 600
+OTP_COOLDOWN_SECONDS = 60
+OTP_MAX_ATTEMPTS = 5
+OTP_MAX_SENDS_PER_HOUR = 5
+
+
+def fill_null_defaults(data):
+    """Replace None values with sensible defaults in API responses."""
+    if isinstance(data, dict):
+        return {k: fill_null_defaults(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [fill_null_defaults(item) for item in data]
+    return data
+
+
+def ok(message=None, http_status=status.HTTP_200_OK, **payload):
+    """Success envelope: {"success": true, "message"?, ...payload}."""
+    body = {"success": True}
+    if message:
+        body["message"] = message
+    body.update(payload)
+    return Response(body, status=http_status)
+
+
+def fail(error, http_status=status.HTTP_400_BAD_REQUEST, errors=None):
+    """Error envelope: {"success": false, "error": "...", "errors"?}."""
+    body = {"success": False, "error": error}
+    if errors:
+        body["errors"] = errors
+    return Response(body, status=http_status)
+
+
+def validation_fail(serializer):
+    return fail("Validation failed.", status.HTTP_400_BAD_REQUEST, serializer.errors)
+
+
+def money(value):
+    """Format money as a fixed 2-decimal string (never floats for currency)."""
+    return str(Decimal(str(value)).quantize(TWO_PLACES, rounding=ROUND_HALF_UP))
+
+
+def split_name(full_name):
+    first, _, last = full_name.strip().partition(" ")
+    return first, last.strip()
+
+
+def haversine_km(lat1, lng1, lat2, lng2):
+    lat1, lng1, lat2, lng2 = map(math.radians, (lat1, lng1, lat2, lng2))
+    a = (
+        math.sin((lat2 - lat1) / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin((lng2 - lng1) / 2) ** 2
+    )
+    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
+
+
+class LoginThrottle(AnonRateThrottle):
+    scope = "login"
+    rate = "10/min"
+
+
+class RegistrationThrottle(AnonRateThrottle):
+    scope = "register"
+    rate = "5/min"
+
+
+class OTPThrottle(AnonRateThrottle):
+    scope = "otp"
+    rate = "5/min"
+
+
+class LocationThrottle(UserRateThrottle):
+    scope = "location"
+    rate = "120/min"
+
+
+class WalletReadThrottle(UserRateThrottle):
+    scope = "wallet_read"
+
+
+def rider_required(view):
+    """Inject the authenticated user's RiderProfile as `rider`, or return 404."""
+    @wraps(view)
+    def wrapper(request, *args, **kwargs):
+        rider = RiderProfile.objects.filter(user=request.user).first()
+        if rider is None:
+            return fail("Rider profile not found.", status.HTTP_404_NOT_FOUND)
+        return view(request, *args, rider=rider, **kwargs)
+    return wrapper
+
+
+def _get_wallet(user, *, lock=False):
+    """Fetch (or create) a rider's wallet. lock=True requires transaction.atomic()."""
+    manager = RiderWallet.objects.select_for_update() if lock else RiderWallet.objects
+    wallet, _ = manager.get_or_create(user=user)
+    return wallet
+
+
+def _can_go_online(rider, wallet):
+    return rider.is_verified and rider.is_active and wallet.balance >= MINIMUM_WALLET_BALANCE
+
+
+# ===========================================================================
+# 2. AUTHENTICATION & CUSTOMER REGISTRATION
+# ===========================================================================
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([LoginThrottle])
+def user_login(request):
+    serializer = LoginSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+
+    identifier = serializer.validated_data["username"].strip()
+    if "@" in identifier:
+        identifier = identifier.lower()
+
+    user = authenticate(
+        request=request,
+        username=identifier,
+        password=serializer.validated_data["password"],
+    )
+    if user is None:
+        return fail("Invalid credentials.", status.HTTP_401_UNAUTHORIZED)
+
+    update_last_login(None, user)
+    token, _ = Token.objects.get_or_create(user=user)
+    rider = RiderProfile.objects.filter(user=user).first()
+
+    user_payload = {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "role": "rider" if rider else "customer",
+    }
+    if rider:
+        user_payload["is_verified"] = rider.is_verified
+
+    return ok(token=token.key, user=user_payload)
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([RegistrationThrottle])
+def customer_register(request):
+    """Register a new customer account."""
+    serializer = RegistrationSerializer(data=request.data)
+    try:
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        return Response({
+            "message": "Account created successfully",
+            "user_id": user.id,
+            "email": user.email,
+        }, status=status.HTTP_201_CREATED)
+    except serializers.ValidationError as e:
+        return Response({
+            "error": e.detail,
+        }, status=status.HTTP_400_BAD_REQUEST)
+    except IntegrityError:
+        return Response({
+            "error": "An account with these details already exists.",
+        }, status=status.HTTP_409_CONFLICT)
+    except Exception as e:
+        logger.exception(f"Customer registration failed: {e}")
+        return Response({
+            "error": "Something went wrong. Please try again.",
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ===========================================================================
+# 3. PHONE VERIFICATION (OTP)
+# ===========================================================================
+def _otp_hash(phone, code):
+    return hmac.new(
+        settings.SECRET_KEY.encode(), f"{phone}:{code}".encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def _send_sms(phone, message):
+    """Deliver an SMS through the configured backend. Returns True on success."""
+    backend_path = getattr(settings, "SMS_BACKEND", None)
+    if backend_path:
         try:
-            validate_password(attrs["password"])
-        except DjangoValidationError as exc:
-            raise serializers.ValidationError({"password": list(exc.messages)})
-        return attrs
+            import_string(backend_path)(phone, message)
+            return True
+        except Exception:
+            logger.exception("SMS backend failed for %s", phone)
+            return False
+    if settings.DEBUG:
+        logger.warning("SMS not sent (dev mode) to %s: %s", phone, message)
+        return True
+    logger.error("SMS_BACKEND is not configured; cannot send verification codes.")
+    return False
 
-    @transaction.atomic
-    def create(self, validated_data):
-        user = User.objects.create_user(
-            username=validated_data["phone"],
-            email=validated_data.get("email", ""),
-            password=validated_data["password"],
-            first_name=validated_data["full_name"],
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([OTPThrottle])
+def send_verification_code(request):
+    serializer = PhoneSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+    phone = serializer.validated_data["phone"]
+
+    hourly_key = f"otp:hourly:{phone}"
+    if cache.get(hourly_key, 0) >= OTP_MAX_SENDS_PER_HOUR:
+        return fail("Too many codes requested. Try again later.", status.HTTP_429_TOO_MANY_REQUESTS)
+
+    cooldown_key = f"otp:cooldown:{phone}"
+    if not cache.add(cooldown_key, 1, OTP_COOLDOWN_SECONDS):
+        return fail("Please wait before requesting another code.", status.HTTP_429_TOO_MANY_REQUESTS)
+
+    code = f"{secrets.randbelow(10 ** OTP_LENGTH):0{OTP_LENGTH}d}"
+    message = f"Your Rydnow verification code is {code}. It expires in {OTP_TTL_SECONDS // 60} minutes."
+
+    if not _send_sms(phone, message):
+        cache.delete(cooldown_key)
+        return fail(
+            "Verification service is unavailable. Please try again.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
         )
-        return CustomerProfile.objects.create(
-            user=user,
-            full_name=validated_data["full_name"],
-            phone=validated_data["phone"],
+
+    cache.set(
+        f"otp:code:{phone}",
+        {"hash": _otp_hash(phone, code), "attempts": 0, "expires_at": time.time() + OTP_TTL_SECONDS},
+        OTP_TTL_SECONDS,
+    )
+    cache.add(hourly_key, 0, 3600)
+    cache.incr(hourly_key)
+
+    return ok("Verification code sent.", expires_in=OTP_TTL_SECONDS)
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([OTPThrottle])
+def verify_code(request):
+    serializer = VerifyCodeSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+    phone = serializer.validated_data["phone"]
+    code = serializer.validated_data["code"]
+
+    key = f"otp:code:{phone}"
+    entry = cache.get(key)
+    if not entry:
+        return fail("Code expired or was never requested.", status.HTTP_400_BAD_REQUEST)
+
+    if entry["attempts"] >= OTP_MAX_ATTEMPTS:
+        cache.delete(key)
+        return fail("Too many attempts. Request a new code.", status.HTTP_429_TOO_MANY_REQUESTS)
+
+    if not hmac.compare_digest(entry["hash"], _otp_hash(phone, code)):
+        entry["attempts"] += 1
+        remaining = max(int(entry["expires_at"] - time.time()), 1)
+        cache.set(key, entry, remaining)
+        return fail("Invalid verification code.", status.HTTP_400_BAD_REQUEST)
+
+    cache.delete(key)
+    return ok("Phone number verified.", verified=True)
+
+
+# ===========================================================================
+# 4. RIDER ONBOARDING
+# ===========================================================================
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([RegistrationThrottle])
+def rider_register(request):
+    """
+    Create User -> RiderProfile -> RiderWallet atomically. A failure at any step
+    rolls everything back (no orphan records). Returns an auth token so the
+    client can upload documents immediately (step 2 of onboarding).
+    """
+    serializer = RiderRegistrationSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+
+    data = serializer.validated_data
+    email = data["email"].strip().lower()
+    first_name, last_name = split_name(data["full_name"])
+
+    try:
+        with transaction.atomic():
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                password=data["password"],
+                first_name=first_name,
+                last_name=last_name,
+            )
+            rider = RiderProfile.objects.create(
+                user=user,
+                full_name=data["full_name"],
+                phone=data["phone"],
+            )
+            RiderWallet.objects.create(user=user)
+            token, _ = Token.objects.get_or_create(user=user)
+    except IntegrityError:
+        return fail("An account with this email or phone already exists.", status.HTTP_409_CONFLICT)
+
+    logger.info("Rider registered: rider_id=%s", rider.id)
+    return ok(
+        "Registration submitted. Upload your documents to complete verification.",
+        status.HTTP_201_CREATED,
+        rider_id=rider.id,
+        email=user.email,
+        phone=rider.phone,
+        is_verified=rider.is_verified,
+        requires_approval=True,
+        token=token.key,
+    )
+
+
+class MyRiderProfileView(generics.RetrieveUpdateAPIView):
+    """GET/PATCH the authenticated rider's own profile."""
+    serializer_class = RiderProfileSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "patch", "head", "options"]
+
+       def get_object(self):
+        return get_object_or_404(
+            RiderProfile.objects.select_related("user"), user=self.request.user
         )
 
 
-class CustomerSerializer(serializers.ModelSerializer):
-    email = serializers.EmailField(source="user.email", read_only=True)
+@api_view(["POST"])
+@parser_classes([MultiPartParser, FormParser])
+@permission_classes([IsAuthenticated])
+@rider_required
+def rider_submit_documents(request, rider):
+    serializer = RiderDocumentSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
 
-    class Meta:
-        model = CustomerProfile
-        fields = ("id", "full_name", "email", "phone")
-
-
-
-from django.conf import settings
-from django.db import models
-from rest_framework import serializers
-
-
-class RiderDocumentType(models.TextChoices):
-    DRIVERS_LICENSE = "drivers_license", "Driver's License"
-    NATIONAL_ID = "national_id", "National ID"
-    VEHICLE_REGISTRATION = "vehicle_registration", "Vehicle Registration"
-    INSURANCE = "insurance", "Insurance Certificate"
-    PROFILE_PHOTO = "profile_photo", "Profile Photo"
-
-
-ALLOWED_EXTENSIONS = {"pdf", "jpg", "jpeg", "png"}
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
-
-
-class RiderDocumentUploadSerializer(serializers.Serializer):
-    """Validates a rider document submission (file upload or hosted URL)."""
-
-    document_type = serializers.ChoiceField(choices=RiderDocumentType.choices)
-    file = serializers.FileField(required=False, write_only=True)
-    file_url = serializers.URLField(required=False, max_length=500)
-
-    def validate_file(self, value):
-        ext = value.name.rsplit(".", 1)[-1].lower() if "." in value.name else ""
-        if ext not in ALLOWED_EXTENSIONS:
-            raise serializers.ValidationError(
-                f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}."
-            )
-        if value.size > MAX_FILE_SIZE:
-            raise serializers.ValidationError("File too large. Maximum size is 5 MB.")
-        return value
-
-    def validate_file_url(self, value):
-        if not value.lower().startswith("https://"):
-            raise serializers.ValidationError("Only HTTPS URLs are allowed.")
-        allowed_hosts = getattr(settings, "RIDER_DOCUMENT_ALLOWED_HOSTS", None)
-        if allowed_hosts:
-            from urllib.parse import urlparse
-            if urlparse(value).hostname not in allowed_hosts:
-                raise serializers.ValidationError("File host is not permitted.")
-        return value
-
-    def validate(self, attrs):
-        has_file = "file" in attrs
-        has_url = "file_url" in attrs
-        if has_file == has_url:
-            raise serializers.ValidationError(
-                "Provide exactly one of 'file' or 'file_url'."
-            )
-        return attrs
-
-
-class RiderDocumentSerializer(serializers.Serializer):
-    """Read representation of a stored rider document."""
-
-    id = serializers.IntegerField(read_only=True)
-    document_type = serializers.ChoiceField(choices=RiderDocumentType.choices, read_only=True)
-    file_url = serializers.URLField(read_only=True)
-    status = serializers.CharField(read_only=True)
-    uploaded_at = serializers.DateTimeField(read_only=True)
-
-
-
-
-
-class RiderProfileSerializer(serializers.ModelSerializer):
-    """Rider sees their own profile."""
-    id = serializers.UUIDField(source="public_id", read_only=True)
-    is_verified = serializers.BooleanField(read_only=True)
-    verification_status = serializers.ChoiceField(choices=VerificationStatus.choices, read_only=True)
-    tier = serializers.ChoiceField(choices=RiderTier.choices, read_only=True)
-
-    class Meta:
-        model = RiderProfile
-        fields = [
-            "id",
-            "full_name", "phone", "profile_photo","date_of_birth","gender", "ghana_card_number", "city",
-            "motorbike_model", "motor_plate_number", "motorbike_color","license_number","address",
-            "preferred_language", "license_expiry_date","tier", "rating_count", "accepted_trips_pct",
-            "verification_status", "is_verified", "rejection_reason", "online_since"
-            "is_online", "rating_average", "completed_trips", "created_at",
-        ]
-        read_only_fields = [
-            "id", 
-            "verification_status", "is_verified", "rejection_reason",
-            "tier", "rating_average", "rating_count" "completed_trips", "created_at",
-            "accepted_trips_pct", "online_since"
-        ]
-
-
-class RiderPublicSerializer(serializers.ModelSerializer):
-    """What customers see. No phone, licence or internal status."""
-    id = serializers.UUIDField(source="public_id", read_only=True)
-
-    class Meta:
-        model = RiderProfile
-        fields = ["id", "full_name", "motorbike_model", "rating_average", "completed_trips"]
-        read_only_fields = fields
-
-
-import re
-class VerifyCodeSerializer(serializers.Serializer):
-    """Validate a 4-6 digit verification code for a phone number or email."""
-
-    PHONE_REGEX = re.compile(r"^\+?[1-9]\d{6,14}$")  # E.164-style
-
-    code = serializers.CharField(
-        min_length=4,
-        max_length=6,
-        trim_whitespace=True,
-        error_messages={
-            "required": "Verification code is required.",
-            "blank": "Verification code cannot be blank.",
-            "min_length": "Code must be 4-6 digits.",
-            "max_length": "Code must be 4-6 digits.",
-        },
-    )
-    identifier = serializers.CharField(
-        max_length=100,
-        trim_whitespace=True,
-        error_messages={
-            "required": "A phone number or email is required.",
-            "blank": "A phone number or email cannot be blank.",
-        },
-    )
-
-    def validate_code(self, value):
-        if not value.isdigit():
-            raise serializers.ValidationError("Code must contain digits only.")
-        return value
-
-    def validate_identifier(self, value):
-        if "@" in value:
-            try:
-                validate_email(value)
-            except DjangoValidationError:
-                raise serializers.ValidationError("Enter a valid email address.")
-            return value.lower()
-
-        phone = re.sub(r"[\s\-().]", "", value)
-        if not self.PHONE_REGEX.match(phone):
-            raise serializers.ValidationError(
-                "Enter a valid phone number, including country code."
-            )
-        return phone
-
-class VerifyPaymentSerializer(serializers.Serializer):
-    """Validate input for verifying and confirming a payment transaction."""
-
-    TRANSACTION_ID_PATTERN = r"^[A-Za-z0-9_\-.:]+$"
-
-    transaction_id = serializers.RegexField(
-        regex=TRANSACTION_ID_PATTERN,
-        max_length=100,
-        trim_whitespace=True,
-        error_messages={
-            "required": "Transaction ID is required.",
-            "blank": "Transaction ID cannot be blank.",
-            "max_length": "Transaction ID is too long.",
-            "invalid": "Transaction ID contains invalid characters.",
-        },
-    )
-    code = serializers.CharField(
-        required=False,
-        allow_blank=True,
-        min_length=4,
-        max_length=6,
-        trim_whitespace=True,
-        error_messages={
-            "min_length": "Verification code must be 4-6 digits.",
-            "max_length": "Verification code must be 4-6 digits.",
-        },
-    )
-
-    def validate_code(self, value):
-        if value and not value.isdigit():
-            raise serializers.ValidationError(
-                "Verification code must contain digits only."
-            )
-        return value
-
-class RiderLocationSerializer(serializers.Serializer):
-    latitude = serializers.DecimalField(
-        max_digits=9, decimal_places=6, min_value=-90, max_value=90
-    )
-    longitude = serializers.DecimalField(
-        max_digits=9, decimal_places=6, min_value=-180, max_value=180
-    )
-
-
-from rest_framework import serializers
-
-
-class NearbyRidersQuerySerializer(serializers.Serializer):
-    latitude = serializers.FloatField(min_value=-90, max_value=90)
-    longitude = serializers.FloatField(min_value=-180, max_value=180)
-    service = serializers.CharField()  # service slug or id
-    radius_km = serializers.FloatField(min_value=0.5, max_value=50, default=5)
-    limit = serializers.IntegerField(min_value=1, max_value=50, default=20)
-
-
-class NearbyRiderSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
-    full_name = serializers.CharField()
-    latitude = serializers.FloatField()
-    longitude = serializers.FloatField()
-    distance_km = serializers.FloatField()
-    location_updated_at = serializers.DateTimeField()
-
-
-
-
-
-
-
-
-# —————————————————————————
-# SERIALIZERS
-# —————————————————————————
-class _ComputedFieldsMixin(serializers.Serializer):
-    monthly_target_hours = serializers.ReadOnlyField()
-    trips_progress = serializers.ReadOnlyField()
-    hours_progress = serializers.ReadOnlyField()
-    meets_acceptance = serializers.ReadOnlyField()
-    performance_status_display = serializers.CharField(
-        source="get_performance_status_display", read_only=True
-    )
-
-
-class RiderPerformanceCommitRiderSerializer(_ComputedFieldsMixin, serializers.ModelSerializer):
-    """What a rider sees: their own progress, recognition and support."""
-    acknowledged = serializers.SerializerMethodField()
-
-    class Meta:model = RiderPerformanceCommitfields = (
-        "id", "month", "target_trips", "target_online_hours", "monthly_target_hours",
-        "min_acceptance_rate", "completed_trips", "online_hours", "acceptance_rate",
-        "average_rating", "trips_progress", "hours_progress", "meets_acceptance",
-        "performance_score", "performance_status", "performance_status_display",
-        "is_exempt", "exempt_reason", "appreciation_message", "bonus_amount",
-        "coaching_plan", "follow_up_date", "review_status", "acknowledged",
-        "rider_acknowledged_at",
-    )
-    read_only_fields = [
-        "id",
-        "month",
-        "target_trips",
-        "target_online_hours",
-        "monthly_target_hours",
-        "min_acceptance_rate",
-        "completed_trips",
-        "online_hours",
-        "acceptance_rate",
-        "average_rating",
-        "trips_progress",
-        "hours_progress",
-        "performance_score",
-        "performance_status",
-        "meets_acceptance",
-        "is_exempt",
-        "exempt_reason",
-        "appreciation_message",
-        "bonus_amount",
-        "coaching_plan",
-        "follow_up_date",
-        "review_status",
-        "acknowledged",
-        "rider_acknowledged_at",
-    ]
-
-
-    def get_acknowledged(self, obj):
-        return obj.rider_acknowledged_at is not None
-
-
-class RiderPerformanceCommitAdminSerializer(_ComputedFieldsMixin, serializers.ModelSerializer):
-    rider_name = serializers.CharField(source="rider_profile.full_name", read_only=True)
-    rider_phone = serializers.CharField(source="rider_profile.phone", read_only=True)
-    review_status_display = serializers.CharField(source="get_review_status_display", read_only=True)
-
-    class Meta:
-        model = RiderPerformanceCommitfields = (
-            "id", "rider_profile", "rider_name", "rider_phone", "month",
-            "target_trips", "target_online_hours", "monthly_target_hours", "min_acceptance_rate",
-            "completed_trips", "online_hours", "acceptance_rate", "average_rating",
-            "trips_progress", "hours_progress", "meets_acceptance",
-            "performance_score", "performance_status", "performance_status_display",
-            "is_exempt", "exempt_reason", "appreciation_message", "bonus_amount",
-            "coaching_plan", "follow_up_date", "review_status", "review_status_display",
-            "notes", "reviewed_by", "finalized_at", "rider_acknowledged_at",
-            "created_at", "updated_at",
+    try:
+        document = RiderDocument.resubmit_document(
+            rider=rider,
+            document_type=serializer.validated_data["document_type"],
+            document_file=serializer.validated_data["document_file"],
         )
-        read_only_fields = ("id", "performance_score", "performance_status", "reviewed_by",
-        "finalized_at", "rider_acknowledged_at", "created_at", "updated_at")
+    except ValueError as exc:
+        return fail(str(exc), status.HTTP_400_BAD_REQUEST)
+    except IntegrityError:
+        return fail("This document type has already been submitted.", status.HTTP_409_CONFLICT)
 
-    def validate_month(self, value):
-        return value.replace(day=1)
-
-    def validate(self, attrs):
-        if self.instance and self.instance.is_finalized:
-            raise serializers.ValidationError(
-                "This review is finalized. Reopen it before making changes."
-            )
-        is_exempt = attrs.get("is_exempt", getattr(self.instance, "is_exempt", False))
-        reason = attrs.get("exempt_reason", getattr(self.instance, "exempt_reason", ""))
-        if is_exempt and not reason.strip():
-            raise serializers.ValidationError({
-                "exempt_reason": "Give a reason when exempting a rider"
-            })
-        return attrs
-
-
-
-
-
-# —————————————————————————
-# SERIALIZERS
-# —————————————————————————
-class RiderStatusHistorySerializer(serializers.ModelSerializer):
-    """Full read-only view for administrators."""
-
-    rider_name = serializers.CharField(source="rider_profile.full_name", read_only=True)
-    rider_phone = serializers.CharField(source="rider_profile.phone", read_only=True)
-    old_status_display = serializers.CharField(source="get_old_status_display", read_only=True)
-    new_status_display = serializers.CharField(source="get_new_status_display", read_only=True)
-    reason_category_display = serializers.CharField(source="get_reason_category_display", read_only=True)
-    source_display = serializers.CharField(source="get_source_display", read_only=True)
-    is_reinstatement = serializers.BooleanField(read_only=True)
-
-    class Meta:
-        model = RiderStatusHistoryfields = (
-            "id", "rider_profile", "rider_name", "rider_phone", "old_status", "old_status_display",
-            "new_status", "new_status_display", "reason_category", "reason_category_display",
-            "reason", "internal_notes", "effective_until", "is_reinstatement",
-            "changed_at", "changed_by", "changed_by_name", "source", "source_display",
-            "ip_address", "metadata",
-        )
-        read_only_fields = [
-            "id",
-            "rider_profile",
-            "rider_name",
-            "rider_phone",
-            "old_status",
-            "old_status_display",
-            "new_status",
-            "new_status_display",
-            "reason_category",
-            "reason_category_display",
-            "reason",
-            "internal_notes",
-            "effective_until",
-            "is_reinstatement",
-            "changed_at",
-            "changed_by",
-            "changed_by_name",
-            "source",
-            "source_display",
-            "ip_address",
-            "metadata",
-        ]
-
-
-class RiderStatusHistoryRiderSerializer(serializers.ModelSerializer):
-    """What a rider sees of their own timeline."""
-
-    old_status_display = serializers.CharField(source="get_old_status_display", read_only=True)
-    new_status_display = serializers.CharField(source="get_new_status_display", read_only=True)
-
-    class Meta:
-        model = RiderStatusHistoryfields = ("id", "old_status", "old_status_display", "new_status", "new_status_display",
-        "reason", "effective_until", "changed_at")
-        read_only_fields = [
-            "id",
-            "old_status",
-            "old_status_display",
-            "new_status",
-            "new_status_display",
-            "reason",
-            "effective_until",
-            "changed_at",
-    ]
-
-
-
-class RiderStatusChangeSerializer(serializers.Serializer):
-    """Input for changing a rider's status."""
-    rider_profile = serializers.PrimaryKeyRelatedField(queryset=RiderProfile.objects.all())
-    new_status = serializers.ChoiceField(choices=RiderStatusHistory.Status.choices)
-    reason_category = serializers.ChoiceField(
-        choices=RiderStatusHistory.Category.choices, 
-        default=RiderStatusHistory.Category.OTHER
+    return ok(
+        "Document uploaded successfully.",
+        status=HTTP_201_CREATED,
+        id=document.id,
+        document_type=document.document_type,
+        status=document.status,
     )
-    reason = serializers.CharField(required=False, allow_blank=True, default="")
-    internal_notes = serializers.CharField(required=False, allow_blank=True, default="")
-    effective_until = serializers.DateTimeField(required=False, allow_null=True, default=None)
-    force = serializers.BooleanField(required=False, default=False)
 
-    def validate(self, attrs):
-        user = self.context["request"].user
-        if attrs["force"] and not user.is_superuser:
-            raise serializers.ValidationError({"force": "Only a superuser can override transition rules."})
+
+# ===========================================================================
+# 5. CUSTOMER PROFILE
+# ===========================================================================
+@api_view(["GET", "PATCH"])
+@permission_classes([IsAuthenticated])
+def customer_profile(request):
+    """GET: return profile. PATCH: update full_name and/or phone only."""
+    try:
+        profile = CustomerProfile.objects.get(user=request.user)
+    except CustomerProfile.DoesNotExist:
+        return fail(
+            "Customer profile not found. Please complete registration.",
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    if request.method == "GET":
+        return ok(data=CustomerProfileSerializer(profile).data)
+
+    update_data = {f: request.data[f] for f in CUSTOMER_EDITABLE_FIELDS if f in request.data}
+    if not update_data:
+        return fail(f"No valid fields provided. You can update: {', '.join(CUSTOMER_EDITABLE_FIELDS)}.")
+
+    serializer = CustomerProfileSerializer(profile, data=update_data, partial=True)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+    serializer.save()
+    return ok("Profile updated successfully.", data=serializer.data)
+
+
+# ===========================================================================
+# 6. RIDER LOCATION & NEARBY SEARCH
+# ===========================================================================
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([LocationThrottle])
+@rider_required
+def update_rider_location(request, rider):
+    """Update the authenticated rider's current location."""
+    if not rider.is_active:
+        return fail("Rider account is inactive.", status.HTTP_403_FORBIDDEN)
+
+    serializer = RiderLocationSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+
+    rider.latitude = serializer.validated_data["latitude"]
+    rider.longitude = serializer.validated_data["longitude"]
+    rider.location_updated_at = timezone.now()
+    rider.save(update_fields=["latitude", "longitude", "location_updated_at", "updated_at"])
+
+    return ok(
+        "Location updated successfully.",
+        latitude=rider.latitude,
+        longitude=rider.longitude,
+        updated_at=rider.location_updated_at,
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_nearby_riders(request):
+    """Active, verified riders near the customer who are approved for the service."""
+    query = NearbyRidersQuerySerializer(data=request.query_params)
+    if not query.is_valid():
+        return validation_fail(query)
+    data = query.validated_data
+
+    lat, lng = data["latitude"], data["longitude"]
+    radius_km, limit = data["radius_km"], data["limit"]
+
+    service_ref = str(data["service"])
+    lookup = {"pk": service_ref} if service_ref.isdigit() else {"slug": service_ref}
+    service = get_object_or_404(Service, is_active=True, **lookup)
+
+    qualified_ids = ServiceQualification.objects.filter(
+        service=service, is_approved=True
+    ).values_list("rider_id", flat=True)
+
+    lat_delta = radius_km / KM_PER_DEGREE
+    lng_delta = radius_km / (KM_PER_DEGREE * max(math.cos(math.radians(lat)), 0.01))
+
+    candidates = RiderProfile.objects.filter(
+        pk__in=qualified_ids,
+        is_active=True,
+        is_verified=True,
+        user__rider_wallet__balance__gte=MINIMUM_WALLET_BALANCE,
+        location_updated_at__gte=timezone.now() - LOCATION_STALE_AFTER,
+        latitude__range=(lat - lat_delta, lat + lat_delta),
+        longitude__range=(lng - lng_delta, lng + lng_delta),
+    )[:MAX_NEARBY_CANDIDATES]
+
+    riders = []
+    for rider in candidates:
+        distance = haversine_km(lat, lng, float(rider.latitude), float(rider.longitude))
+        if distance <= radius_km:
+            riders.append(
+                {
+                    "id": rider.pk,
+                    "full_name": rider.full_name,
+                    "latitude": float(rider.latitude),
+                    "longitude": float(rider.longitude),
+                    "distance_km": round(distance, 2),
+                    "location_updated_at": rider.location_updated_at,
+                }
+            )
+    riders.sort(key=lambda r: r["distance_km"])
+    riders = riders[:limit]
+
+    return ok(service=service.name, count=len(riders), riders=riders)
+
+
+# ===========================================================================
+# 7. RIDER WALLET
+# ===========================================================================
+def _serialize_transaction(txn):
+    return {
+        "id": txn.id,
+        "amount": money(txn.amount),
+        "type": txn.transaction_type,
+        "description": txn.description,
+        "timestamp": txn.created_at,
+    }
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@rider_required
+def get_rider_wallet(request, rider):
+    wallet = _get_wallet(request.user)
+    recent = WalletTransaction.objects.filter(wallet=wallet).order_by("-created_at")[:10]
+    return ok(
+        balance=money(wallet.balance),
+        minimum_required=money(MINIMUM_WALLET_BALANCE),
+        can_go_online=_can_go_online(rider, wallet),
+        transactions=[_serialize_transaction(t) for t in recent],
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@rider_required
+def rider_transactions(request, rider):
+    """Paginated transaction history (?page=2)."""
+    wallet = _get_wallet(request.user)
+    queryset = WalletTransaction.objects.filter(wallet=wallet).order_by("-created_at")
+    paginator = PageNumberPagination()
+    page = paginator.paginate_queryset(queryset, request)
+    body = paginator.get_paginated_response([_serialize_transaction(t) for t in page]).data
+    return ok(**body)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@rider_required
+def wallet_deposit(request, rider):
+    """Start a wallet deposit."""
+    serializer = AmountSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+    return _start_wallet_deposit(request.user, rider, serializer.validated_data["amount"])
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@rider_required
+def request_withdrawal(request, rider):
+    serializer = AmountSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+    amount = serializer.validated_data["amount"]
+
+    if not rider.is_verified:
+        return fail("Only verified riders can withdraw.", status.HTTP_403_FORBIDDEN)
+    if amount < MIN_WITHDRAWAL_AMOUNT:
+        return fail(f"Minimum withdrawal is {money(MIN_WITHDRAWAL_AMOUNT)}.")
+
+    with transaction.atomic():
+        wallet = _get_wallet(request.user, lock=True)
+        if wallet.balance < amount:
+            return fail("Insufficient wallet balance.")
+        if wallet.balance - amount < MINIMUM_WALLET_BALANCE:
+            return fail(
+                f"You must keep at least {money(MINIMUM_WALLET_BALANCE)} in your wallet. "
+                f"Maximum withdrawable: {money(max(wallet.balance - MINIMUM_WALLET_BALANCE, 0))}."
+            )
+
+        wallet.balance -= amount
+        wallet.save()
+        withdrawal = WithdrawalRequest.objects.create(
+            rider_profile=rider, amount=amount, status="pending"
+        )
+        WalletTransaction.objects.create(
+            wallet=wallet,
+            amount=amount,
+            transaction_type="withdrawal",
+            description=f"Withdrawal request - GHS {money(amount)}",
+        )
+
+    logger.info("Withdrawal requested: rider_id=%s amount=%s", rider.id, amount)
+    return ok(
+        "Withdrawal request submitted.",
+        status=HTTP_201_CREATED,
+        withdrawal_id=withdrawal.id,
+        new_balance=money(wallet.balance),
+    )
+
+
+# ===========================================================================
+# 8. PAYMENTS (PAYSTACK)
+# ===========================================================================
+class PaymentError(Exception):
+    def __init__(self, message, status_code=status.HTTP_400_BAD_REQUEST):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+    @property
+    def retryable(self):
+        return self.status_code >= 500
+
+
+def _paystack_request(method, path, **kwargs):
+    secret = getattr(settings, "PAYSTACK_SECRET_KEY", "")
+    if not secret:
+        logger.error("PAYSTACK_SECRET_KEY is not configured.")
+        raise PaymentError("Payment service is currently unavailable.", status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    try:
+        response = requests.request(
+            method,
+            f"{PAYSTACK_BASE_URL}{path}",
+            headers={"Authorization": f"Bearer {secret}"},
+            timeout=PAYSTACK_TIMEOUT,
+            **kwargs,
+        )
+    except requests.exceptions.RequestException:
+        logger.exception("Paystack request failed: %s %s", method, path)
+        raise PaymentError(
+            "Could not reach the payment service. Please try again.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        ) from None
+
+    try:
+        body = response.json()
+    except ValueError:
+        logger.error("Paystack returned non-JSON (HTTP %s) for %s", response.status_code, path)
+        raise PaymentError("Invalid response from payment service.", status.HTTP_502_BAD_GATEWAY) from None
+
+    if response.status_code != 200 or not isinstance(body, dict) or not body.get("status"):
+        logger.warning("Paystack rejected %s %s: HTTP %s", method, path, response.status_code)
+        code = status.HTTP_502_BAD_GATEWAY if response.status_code >= 500 else status.HTTP_400_BAD_REQUEST
+        raise PaymentError("Payment verification was not successful.", code)
+
+    return body.get("data") or {}
+
+
+def _paystack_initialize(*, email, amount, reference, metadata):
+    payload = {
+        "email": email,
+        "amount": int((Decimal(amount) * 100).to_integral_value(ROUND_HALF_UP)),
+        "currency": CURRENCY,
+        "reference": reference,
+        "metadata": metadata,
+    }
+    callback_url = getattr(settings, "PAYSTACK_CALLBACK_URL", "")
+    if callback_url:
+        payload["callback_url"] = callback_url
+
+    data = _paystack_request("POST", "/transaction/initialize", json=payload)
+    if not data.get("authorization_url"):
+        raise PaymentError("Payment service returned an incomplete response.", status.HTTP_502_BAD_GATEWAY)
+    return data
+
+
+def _paystack_verify(reference):
+    data = _paystack_request("GET", f"/transaction/verify/{quote(reference, safe='')}")
+
+    if data.get("status") != "success":
+        raise PaymentError("Payment has not been completed successfully.")
+    if data.get("reference") != reference:
+        raise PaymentError("Payment reference mismatch detected.", status.HTTP_409_CONFLICT)
+    if data.get("currency") != CURRENCY:
+        raise PaymentError(f"Unsupported payment currency. Only {CURRENCY} is accepted.")
+
+    amount = data.get("amount")
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+        raise PaymentError("Invalid payment amount from verification service.")
+    return data
+
+
+def _paystack_amount(paystack_data):
+    return Decimal(paystack_data["amount"]) / Decimal("100")
+
+
+def _new_reference(prefix):
+    return f"{prefix}-{uuid.uuid4().hex.upper()}"
+
+
+def _start_wallet_deposit(user, rider, amount):
+    reference = _new_reference("DEP")
+    try:
+        data = _paystack_initialize(
+            email=user.email,
+            amount=amount,
+            reference=reference,
+            metadata={"purpose": PURPOSE_DEPOSIT, "rider_id": rider.pk},
+        )
+    except PaymentError as exc:
+        return fail(exc.message, exc.status_code)
+
+    return ok(
+        "Complete the payment to fund your wallet.",
+        reference=reference,
+        authorization_url=data["authorization_url"],
+        access_code=data.get("access_code"),
+    )
+
+
+def _settle_reference(reference, requesting_user=None):
+    paystack = _paystack_verify(reference)
+    metadata = paystack.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+
+    try:
+        if metadata.get("purpose") == PURPOSE_DEPOSIT:
+            return _settle_wallet_deposit(reference, paystack, metadata, requesting_user)
+        return _settle_booking_payment(reference, paystack, requesting_user)
+    except IntegrityError:
+        raise PaymentError(
+            "Payment recording conflict. Reference may already exist.",
+            status.HTTP_409_CONFLICT,
+        ) from None
+
+
+def _settle_booking_payment(reference, paystack, requesting_user):
+    verified_amount = _paystack_amount(paystack)
+    not_found = PaymentError("No booking found for this payment reference.", status.HTTP_404_NOT_FOUND)
+
+    with transaction.atomic():
         try:
-            validate_status_change(
-                attrs["rider_profile"], attrs["new_status"], attrs["reason"],
-                attrs["effective_until"], attrs["force"],
+            booking = Booking.objects.select_for_update().get(payment_ref=reference)
+        except Booking.DoesNotExist:
+            raise not_found from None
+        if requesting_user is not None and booking.customer_id != requesting_user.id:
+            raise not_found
+
+        booking_amount = Decimal(str(booking.total_fare))
+
+        existing = WalletTransaction.objects.filter(reference=reference).first()
+        if existing is not None and existing.related_booking_id != booking.id:
+            raise PaymentError(
+                "Payment reference is associated with a different record. Please contact support.",
+                status.HTTP_409_CONFLICT,
             )
-        except DjangoValidationError as exc:
-            raise serializers.ValidationError(
-                exc.message_dict if hasattr(exc, "error_dict") else exc.messages
-            )
-        return attrs
-
-    def create(self, validated_data):
-        request = self.context["request"]
-        try:
-            return change_rider_status(
-            rider_profile=validated_data["rider_profile"],
-            new_status=validated_data["new_status"],
-            changed_by=request.user,
-            reason=validated_data.get("reason", ""),
-            reason_category=validated_data.get("reason_category", "other"),
-            internal_notes=validated_data.get("internal_notes", ""),
-            effective_until=validated_data.get("effective_until"),
-            source=RiderStatusHistory.Source.API,
-            ip_address=get_client_ip(request),
-            force=validated_data.get("force", False),
-        )
-        except DjangoValidationError as exc:
-            raise serializers.ValidationError(
-                exc.message_dict if hasattr(exc, "error_dict") else exc.messages
-            )
-
-
-class CustomerProfileSerializer(serializers.ModelSerializer):
-    """Customer views and updates their own profile."""
-    
-    id = serializers.UUIDField(source="public_id", read_only=True)
-    email = serializers.EmailField(source="user.email", read_only=True)
-    full_name = serializers.CharField(read_only=True)
-    phone = serializers.CharField(required=False, allow_blank = True)
-    profile_photo = serializers.ImageField(required=False, allow_null=True)
-
-    class Meta:
-        model = CustomerProfile
-        fields = [
-            "id",
-            "email",
-            "full_name",
-            "phone",
-            "profile_photo",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = [
-            "id",
-            "email",
-            "full_name",
-            "created_at",
-            "updated_at",
-        ]
-
-
-
-"""
-Account serializers.
-
-Assumes an optional one-to-one `Profile` model reachable as `user.profile`
-with any of these fields (all optional; missing ones are handled safely):
-
-    avatar (ImageField), timezone, locale, plan, referral_code,
-    marketing_opt_in, marketing_opt_in_at, onboarding_completed,
-    email_verified, acquisition_source
-"""
-from zoneinfo import ZoneInfo, available_timezones
-
-from django.conf import settings
-from django.contrib.auth import get_user_model
-from django.contrib.auth.password_validation import validate_password
-from django.db import transaction
-from django.utils import timezone
-from rest_framework import serializers
-
-User = get_user_model()
-
-
-def _profile(user):
-    """Return the user's profile or None (never raises)."""
-    return getattr(user, "customer_profile", None)
-
-
-def _clean_name(value: str) -> str:
-    return " ".join(value.split())  # collapse stray whitespace
-
-
-class AccountSerializer(serializers.ModelSerializer):
-    """Read-only account snapshot. Safe to return from /me and login."""
-
-    full_name = serializers.SerializerMethodField()
-    initials = serializers.SerializerMethodField()
-    avatar_url = serializers.SerializerMethodField()
-    account_age_days = serializers.SerializerMethodField()
-    is_new_user = serializers.SerializerMethodField()
-    email_verified = serializers.SerializerMethodField()
-    onboarding_completed = serializers.SerializerMethodField()
-    plan = serializers.SerializerMethodField()
-    referral_code = serializers.SerializerMethodField()
-    marketing_opt_in = serializers.SerializerMethodField()
-    timezone = serializers.SerializerMethodField()
-    locale = serializers.SerializerMethodField()
-
-    class Meta:
-        model = User
-        fields = [
-            "id", "username", "email",
-            "first_name", "last_name", "full_name", "initials", "avatar_url",
-            "is_active", "date_joined", "last_login",
-            # growth / lifecycle
-            "account_age_days", "is_new_user", "email_verified",
-            "onboarding_completed", "plan", "referral_code",
-            "marketing_opt_in", "timezone", "locale",
-        ]
-        read_only_fields = fields
-
-    # --- identity ---
-    def get_full_name(self, obj):
-        return obj.get_full_name() or obj.get_username()
-
-    def get_initials(self, obj):
-        parts = [p for p in (obj.first_name, obj.last_name) if p]
-        source = "".join(p[0] for p in parts[:2]) or obj.get_username()[:2]
-        return source.upper()
-
-    def get_avatar_url(self, obj):
-        profile = _profile(obj)
-        avatar = getattr(profile, "avatar", None)
-        if not avatar:
-            return None
-        request = self.context.get("request")
-        url = avatar.url
-        return request.build_absolute_uri(url) if request else url
-
-    # --- lifecycle metrics (useful for onboarding nudges & cohorts) ---
-    def get_account_age_days(self, obj):
-        return (timezone.now() - obj.date_joined).days
-
-    def get_is_new_user(self, obj):
-        return self.get_account_age_days(obj) < 7
-
-    # --- profile-backed fields ---
-    def _pget(self, obj, name, default=None):
-        return getattr(_profile(obj), name, default)
-
-    def get_email_verified(self, obj):
-        return bool(self._pget(obj, "email_verified", False))
-
-    def get_onboarding_completed(self, obj):
-        return bool(self._pget(obj, "onboarding_completed", False))
-
-    def get_plan(self, obj):
-        return self._pget(obj, "plan", "free")
-
-    def get_referral_code(self, obj):
-        return self._pget(obj, "referral_code")
-
-    def get_marketing_opt_in(self, obj):
-        return bool(self._pget(obj, "marketing_opt_in", False))
-
-    def get_timezone(self, obj):
-        return self._pget(obj, "timezone", "UTC")
-
-    def get_locale(self, obj):
-        return self._pget(obj, "locale", settings.LANGUAGE_CODE)
-
-
-class AccountUpdateSerializer(serializers.ModelSerializer):
-    """Writable subset for PATCH /me. Email/username changes go through
-    dedicated verified flows, never this serializer."""
-
-    timezone = serializers.CharField(source="profile.timezone", required=False)
-    locale = serializers.CharField(source="profile.locale", required=False)
-    marketing_opt_in = serializers.BooleanField(
-        source="profile.marketing_opt_in", required=False
-    )
-    onboarding_completed = serializers.BooleanField(
-        source="profile.onboarding_completed", required=False
-    )
-    avatar = serializers.ImageField(
-        source="profile.avatar", required=False, allow_null=True
-    )
-
-    MAX_AVATAR_BYTES = 5 * 1024 * 1024
-
-    class Meta:
-        model = User
-        fields = [
-            "first_name", "last_name", "timezone", "locale",
-            "marketing_opt_in", "onboarding_completed", "avatar",
-        ]
-
-    def validate_first_name(self, value):
-        return _clean_name(value)
-
-    def validate_last_name(self, value):
-        return _clean_name(value)
-
-    def validate_timezone(self, value):
-        if value not in available_timezones():
-            raise serializers.ValidationError("Unknown timezone.")
-        ZoneInfo(value)
-        return value
-
-    def validate_locale(self, value):
-        allowed = {code for code, _ in getattr(settings, "LANGUAGES", [])}
-        if allowed and value not in allowed:
-            raise serializers.ValidationError("Unsupported locale.")
-        return value
-
-    def validate_avatar(self, value):
-        if value and value.size > self.MAX_AVATAR_BYTES:
-            raise serializers.ValidationError("Avatar must be under 5 MB.")
-        return value
-
-    @transaction.atomic
-    def update(self, instance, validated_data):
-        profile_data = validated_data.pop("profile", {})
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-
-        profile = _profile(instance)
-        if profile and profile_data:
-            # record consent timestamp for compliance (GDPR/CAN-SPAM)
-            if (
-                "marketing_opt_in" in profile_data
-                and profile_data["marketing_opt_in"] != getattr(profile, "marketing_opt_in", None)
-                and hasattr(profile, "marketing_opt_in_at")
-            ):
-                profile.marketing_opt_in_at = timezone.now()
-            for attr, value in profile_data.items():
-                setattr(profile, attr, value)
-            profile.save()
-        return instance
-
-    def to_representation(self, instance):
-        return AccountSerializer(instance, context=self.context).data
-
-
-class RegistrationSerializer(serializers.ModelSerializer):
-    """Sign-up with growth attribution (referral + UTM) and consent."""
-
-    password = serializers.CharField(write_only=True, style={"input_type": "password"})
-    password_confirm = serializers.CharField(write_only=True, style={"input_type": "password"})
-    referral_code = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=32)
-    acquisition_source = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=64)
-    marketing_opt_in = serializers.BooleanField(write_only=True, required=False, default=False)
-    accepted_terms = serializers.BooleanField(write_only=True)
-
-    class Meta:
-        model = User
-        fields = [
-            "username", "email", "first_name", "last_name",
-            "password", "password_confirm", "referral_code",
-            "acquisition_source", "marketing_opt_in", "accepted_terms",
-        ]
-        extra_kwargs = {"email": {"required": True}}
-
-    def validate_email(self, value):
-        value = value.strip().lower()
-        if User.objects.filter(email__iexact=value).exists():
-            # Consider a generic message if account enumeration is a concern.
-            raise serializers.ValidationError("An account with this email already exists.")
-        return value
-
-    def validate_accepted_terms(self, value):
-        if not value:
-            raise serializers.ValidationError("You must accept the terms to continue.")
-        return value
-
-    def validate(self, attrs):
-        if attrs["password"] != attrs.pop("password_confirm"):
-            raise serializers.ValidationError({"password_confirm": "Passwords do not match."})
-        candidate = User(
-            username=attrs.get("username"), email=attrs.get("email"),
-            first_name=attrs.get("first_name", ""), last_name=attrs.get("last_name", ""),
-        )
-        validate_password(attrs["password"], user=candidate)
-        return attrs
-
-    @transaction.atomic
-    def create(self, validated_data):
-        validated_data.pop("accepted_terms")
-        password = validated_data.pop("password")
-        extras = {
-            k: validated_data.pop(k, None)
-            for k in ("referral_code", "acquisition_source", "marketing_opt_in")
+        if existing is not None or booking.payment_status in PAID_STATUSES:
+                   return {
+            "created": False,
+            "message": "Payment already verified and recorded.",
+            "booking_id": str(booking.id),
+            "booking_ref": booking.booking_ref,
+            "total_amount": money(booking_amount),
+            "payment_status": booking.payment_status,
         }
-        user = User(**validated_data)
-        user.set_password(password)
-        user.save()
 
-        profile = _profile(user)
-        if profile:
-            if hasattr(profile, "acquisition_source"):
-                profile.acquisition_source = extras["acquisition_source"] or ""
-            if extras["marketing_opt_in"] and hasattr(profile, "marketing_opt_in"):
-                profile.marketing_opt_in = True
-                if hasattr(profile, "marketing_opt_in_at"):
-                    profile.marketing_opt_in_at = timezone.now()
-            profile.save()
+        if abs(verified_amount - booking_amount) > AMOUNT_TOLERANCE:
+            raise PaymentError("Payment amount does not match booking total.", status.HTTP_409_CONFLICT)
 
-        # Hook points: attribute the referral, send verification email,
-        # fire a "user_signed_up" analytics event (do via signals/on_commit).
-        user._referral_code_used = extras["referral_code"]
-        return user
+        rider = booking.assigned_rider
+        if rider is None:
+            raise PaymentError("This booking has no assigned rider. Cannot record payment.")
 
-    def to_representation(self, instance):
-        return AccountSerializer(instance, context=self.context).data
+        commission_rate = Decimal(str(getattr(settings, "COMMISSION_RATE", COMMISSION_RATE)))
+        commission = (booking_amount * commission_rate).quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
+        rider_amount = (booking_amount - commission).quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
 
+        verified_ok, message = booking.confirm_payment_verified(
+            provider_ref=paystack.get("id", ""),
+            payment_ref=reference,
+        )
+        if not verified_ok:
+            raise PaymentError(message, status.HTTP_409_CONFLICT)
 
-class ChangePasswordSerializer(serializers.Serializer):
-    current_password = serializers.CharField(write_only=True)
-    new_password = serializers.CharField(write_only=True)
+        wallet = _get_wallet(rider.user, lock=True)
+        credited, message = wallet.credit_earnings(
+            rider_amount,
+            booking_ref=booking.booking_ref,
+            payment_verified=True,
+        )
+        if credited is None:
+            raise PaymentError(message, status.HTTP_409_CONFLICT)
 
-    def validate_current_password(self, value):
-        user = self.context["request"].user
-        if not user.check_password(value):
-            raise serializers.ValidationError("Current password is incorrect.")
-        return value
-
-    def validate_new_password(self, value):
-        validate_password(value, user=self.context["request"].user)
-        return value
-
-    def save(self, **kwargs):
-        user = self.context["request"].user
-        user.set_password(self.validated_data["new_password"])
-        user.save(update_fields=["password"])
-        return user
+    logger.info("Booking payment settled: booking_ref=%s reference=%s", booking.booking_ref, reference)
+    return {
+        "created": True,
+        "message": "Payment verified successfully.",
+        "booking_id": str(booking.id),
+        "booking_ref": booking.booking_ref,
+        "total_amount": money(booking_amount),
+        "platform_commission": money(commission),
+        "rider_amount": money(rider_amount),
+        "payment_status": booking.payment_status,
+    }
 
 
+def _settle_wallet_deposit(reference, paystack, metadata, requesting_user):
+    amount = _paystack_amount(paystack)
+    not_found = PaymentError(
+        "Deposit could not be matched to a rider account.", status.HTTP_404_NOT_FOUND
+    )
 
-# ——— Transaction Serializers ———
-from .models import WalletTransaction
+    with transaction.atomic():
+        try:
+            rider = RiderProfile.objects.select_related("user").get(pk=metadata.get("rider_id"))
+        except (RiderProfile.DoesNotExist, ValueError, TypeError):
+            raise not_found from None
+        if requesting_user is not None and rider.user_id != requesting_user.id:
+            raise not_found
 
-class TransactionSerializer(serializers.ModelSerializer):
-    type_display = serializers.CharField(source="get_type_display", read_only=True)
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
+        wallet = _get_wallet(rider.user, lock=True)
+        _, created = WalletTransaction.objects.get_or_create(
+            reference=reference,
+            defaults={
+                "wallet": wallet,
+                "amount": amount,
+                "transaction_type": "deposit",
+                "description": f"Wallet deposit - GHS {money(amount)}",
+            },
+        )
+        if created:
+            wallet.balance += amount
+            wallet.save()
 
-    class Meta:
-        model = WalletTransaction
-        fields = [
-            "id", "reference", "type", "type_display", "direction",
-            "status", "status_display", "amount", "balance_after",
-            "description", "created_at",
-        ]
-        read_only_fields = fields
+    if created:
+        logger.info("Wallet deposit settled: rider_id=%s reference=%s", rider.id, reference)
+    return {
+        "created": created,
+        "message": "Deposit successful." if created else "Deposit already recorded.",
+        "reference": reference,
+        "amount": money(amount),
+        "new_balance": money(wallet.balance),
+        "can_go_online": _can_go_online(rider, wallet),
+    }
 
 
-class TransactionQuerySerializer(serializers.Serializer):
-    ORDERING = ["-created_at", "created_at", "-amount", "amount"]
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def initialize_payment(request):
+    """Start a Paystack checkout for a booking or a wallet deposit."""
+    serializer = InitializePaymentSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+    data = serializer.validated_data
 
-    type = serializers.ChoiceField(choices=WalletTransaction.Type.choices, required=False)
-    status = serializers.ChoiceField(choices=WalletTransaction.Status.choices, required=False)
-    direction = serializers.ChoiceField(choices=WalletTransaction.Direction.choices, required=False)
-    date_from = serializers.DateField(required=False)
-    date_to = serializers.DateField(required=False)
-    min_amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=0, required=False)
-    max_amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=0, required=False)
-    search = serializers.CharField(max_length=64, required=False, allow_blank=True)
-    ordering = serializers.ChoiceField(choices=ORDERING, default="-created_at")
-    export = serializers.ChoiceField(choices=["csv"], required=False)
+    if data["purpose"] == PURPOSE_DEPOSIT:
+        rider = RiderProfile.objects.filter(user=request.user).first()
+        if rider is None:
+            return fail("Only riders can fund a wallet.", status.HTTP_403_FORBIDDEN)
+        return _start_wallet_deposit(request.user, rider, data["amount"])
 
-    def validate(self, attrs):
-        if attrs.get("date_from") and attrs.get("date_to") and attrs["date_from"] > attrs["date_to"]:
-            raise serializers.ValidationError({"date_from": "Must be on or before date_to."})
-        lo, hi = attrs.get("min_amount"), attrs.get("max_amount")
-        if lo is not None and hi is not None and lo > hi:
-            raise serializers.ValidationError({"min_amount": "Must be less than or equal to max_amount."})
-        return attrs
+    try:
+        booking = Booking.objects.get(booking_ref=data["booking_ref"], customer=request.user)
+    except Booking.DoesNotExist:
+        return fail("Booking not found.", status.HTTP_404_NOT_FOUND)
+    if booking.payment_status in PAID_STATUSES:
+        return fail("This booking has already been paid.", status.HTTP_409_CONFLICT)
+
+    reference = _new_reference("BKG")
+    try:
+        checkout = _paystack_initialize(
+            email=request.user.email,
+            amount=Decimal(str(booking.total_fare)),
+            reference=reference,
+            metadata={"purpose": PURPOSE_BOOKING, "booking_ref": booking.booking_ref},
+        )
+    except PaymentError as exc:
+        return fail(exc.message, exc.status_code)
+
+    booking.payment_ref = reference
+    booking.save(update_fields=["payment_ref"])
+
+    return ok(
+        "Complete the payment to confirm your booking.",
+        reference=reference,
+        authorization_url=checkout["authorization_url"],
+        access_code=checkout.get("access_code"),
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def verify_payment(request):
+    """Called by the app after checkout. Safe to call repeatedly."""
+    serializer = VerifyPaymentSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+
+    try:
+        result = _settle_reference(
+            serializer.validated_data["reference"], requesting_user=request.user
+        )
+    except PaymentError as exc:
+        return fail(exc.message, exc.status_code)
+
+    created = result.pop("created")
+    message = result.pop("message")
+    return ok(message, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK, **result)
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([])
+def paystack_webhook(request):
+    secret = getattr(settings, "PAYSTACK_SECRET_KEY", "")
+    raw_body = request.body
+    received = request.headers.get("X-Paystack-Signature", "").encode()
+    expected = hmac.new(secret.encode(), raw_body, hashlib.sha512).hexdigest().encode()
+
+    if not secret or not hmac.compare_digest(received, expected):
+        logger.warning("Paystack webhook rejected: invalid signature.")
+        return Response(status=status.HTTP_401_UNAUTHORIZED)
+
+    try:
+        event = json.loads(raw_body)
+    except ValueError:
+        return Response(status=status.HTTP_400_BAD_REQUEST)
+
+    if event.get("event") == "charge.success":
+        reference = (event.get("data") or {}).get("reference")
+        if isinstance(reference, str) and reference:
+            try:
+                _settle_reference(reference)
+            except PaymentError as exc:
+                if exc.retryable:
+                    logger.error("Webhook settlement failed (will retry) ref=%s: %s", reference, exc.message)
+                    return Response(status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                logger.warning("Webhook payment not settled ref=%s: %s", reference, exc.message)
+
+    return Response(status=status.HTTP_200_OK)
+
+
+
+
+
+# ===========================================================================
+# 9. TRANSACTION HISTORY & WALLET STATEMENTS
+# ===========================================================================
+import csv
+from datetime import datetime, time, timedelta
+from django.db.models import Count, DecimalField, Q, Sum, Value
+from django.db.models.functions import Coalesce, TruncMonth
+from django.http import StreamingHttpResponse
+from rest_framework.pagination import PageNumberPagination
+
+
+ZERO = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, decimal_places=2))
+LOW_BALANCE_THRESHOLD = Decimal("10.00")
+MAX_EXPORT_ROWS = 5000
+
+
+class TransactionPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+    
+    
+    def _apply_filters(qs, f):
+    tz = timezone.get_current_timezone()
+    if "type" in f:
+        qs = qs.filter(transaction_type=f["type"])
+    if "status" in f:
+        qs = qs.filter(status=f["status"])
+    if "direction" in f:
+        qs = qs.filter(direction=f["direction"])
+    if "date_from" in f:
+        qs = qs.filter(created_at__gte=timezone.make_aware(datetime.combine(f["date_from"], time.min), tz))
+    if "date_to" in f:
+        end = datetime.combine(f["date_to"] + timedelta(days=1), time.min)
+        qs = qs.filter(created_at__lt=timezone.make_aware(end, tz))
+    if "min_amount" in f:
+        qs = qs.filter(amount__gte=f["min_amount"])
+    if "max_amount" in f:
+        qs = qs.filter(amount__lte=f["max_amount"])
+    if f.get("search"):
+        term = f["search"].strip()
+        qs = qs.filter(Q(reference__icontains=term) | Q(description__icontains=term))
+    return qs.order_by(f["ordering"], "-id")
+    
+    def _summary(qs):
+    agg = qs.filter(status=WalletTransaction.Status.SUCCESS).aggregate(
+        total_in=Coalesce(Sum("amount", filter=Q(transaction_type="deposit")), ZERO),
+        total_out=Coalesce(Sum("amount", filter=Q(transaction_type="withdrawal")), ZERO),
+        count=Count("id"),
+    )
+    agg["net"] = agg["total_in"] - agg["total_out"]
+    return agg
+    
+    def _monthly_trend(wallet, months=6):
+        since = (timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+             - timedelta(days=31 * (months - 1)))
+    rows = (
+        wallet.transactions.filter(status=WalletTransaction.Status.SUCCESS, created_at__gte=since)
+        .annotate(month=TruncMonth("created_at"))
+        .values("month")
+        .annotate(
+            money_in=Coalesce(Sum("amount", filter=Q(transaction_type="deposit")), ZERO),
+            money_out=Coalesce(Sum("amount", filter=Q(transaction_type="withdrawal")), ZERO),
+        )
+        .order_by("month")
+    )
+    return [
+        {"month": r["month"].strftime("%Y-%m"), "money_in": r["money_in"], "money_out": r["money_out"]}
+        for r in rows
+    ]
+    
+    
+    def _top_up_nudge(wallet):
+        low = wallet.balance < LOW_BALANCE_THRESHOLD
+        return {
+            "low_balance": low,
+            "message": "Your balance is running low. Top up to keep riding without interruption." if low else None,
+        }
+
+
+    def _csv_safe(value):
+        s = "" if value is None else str(value)
+        return "'" + s if s[:1] in ("=", "+", "-", "@") else s
+
+
+    class _Echo:
+        def write(self, value):
+            return value
+
+
+    def _csv_response(qs, currency):
+        qs = qs[:MAX_EXPORT_ROWS]
+        writer = csv.writer(_Echo())
+
+    def rows():
+        yield writer.writerow(
+            ["Date", "Reference", "Type", "Status", f"Amount ({currency})",
+             "Description"]
+        )
+        for t in qs.iterator(chunk_size=1000):
+            yield writer.writerow([
+                timezone.localtime(t.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                _csv_safe(t.reference), t.get_transaction_type_display(),
+                t.get_status_display(), t.amount, _csv_safe(t.description),
+            ])
+
+    resp = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
+    stamp = timezone.now().strftime("%Y%m%d")
+    resp["Content-Disposition"] = f'attachment; filename="wallet-statement-{stamp}.csv"'
+    resp["Cache-Control"] = "no-store"
+    return resp
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([WalletReadThrottle])
+def get_transaction_history(request):
+    params = TransactionQuerySerializer(data=request.query_params)
+    if not params.is_valid():
+        return Response({"error": "Invalid query parameters", "details": params.errors}, status=400)
+    filters = params.validated_data
+
+    wallet = _get_wallet(request.user)
+    currency = getattr(wallet, "currency", "GHS")
+    qs = _apply_filters(wallet.transactions.all(), filters)
+
+    try:
+        if filters.get("export") == "csv":
+            logger.info("wallet statement export user=%s wallet=%s", request.user.pk, wallet.pk)
+            return _csv_response(qs, currency)
+
+        paginator = TransactionPagination()
+        page = paginator.paginate_queryset(qs, request)
+        payload = paginator.get_paginated_response(
+            TransactionSerializer(page, many=True).data
+        ).data
+
+        payload.update({
+            "currency": currency,
+            "balance": wallet.balance,
+            "summary": _summary(qs),
+            "monthly_trend": _monthly_trend(wallet),
+            "insights": _top_up_nudge(wallet),
+        })
+        return Response(payload)
+
+    except Exception:
+        logger.exception("transaction history failed user=%s", request.user.pk)
+        return Response({"error": "Unable to load transactions. Please try again."}, status=500)
+
+
+# ===========================================================================
+# 10. DEPOSIT VERIFY & DEPOSIT INITIATE
+# ===========================================================================
+import re
+
+REFERENCE_RE = re.compile(r"^[A-Za-z0-9_.\-]{6,100}$")
+RATE_LIMIT = 20
+RATE_WINDOW = 60
+GATEWAY_TIMEOUT = 10
+POLL_INTERVAL = 5
+GATEWAY_URL = "https://api.paystack.co/transaction/verify/{ref}"
+
+
+def error(message, status, **extra):
+    return JsonResponse({"success": False, "error": message, **extra}, status=status)
+
+
+def json_login_required(view):
+    @wraps(view)
+    def wrapper(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return error("Authentication required", 401)
+        return view(request, *args, **kwargs)
+    return wrapper
+
+
+def is_rate_limited(user_id):
+    key = f"deposit_verify:{user_id}"
+    cache.add(key, 0, RATE_WINDOW)
+    try:
+        return cache.incr(key) > RATE_LIMIT
+    except ValueError:
+        cache.set(key, 1, RATE_WINDOW)
+        return False
+
+
+def query_gateway(txn):
+    try:
+        resp = requests.get(
+            GATEWAY_URL.format(ref=txn.reference),
+            headers={"Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}"},
+            timeout=GATEWAY_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
+    except (requests.RequestException, ValueError):
+        logger.warning("Gateway verify failed for %s", txn.reference, exc_info=True)
+        return None
+
+    gateway_status = data.get("status")
+    if gateway_status == "success":
+        expected = int(txn.amount * 100)
+        if data.get("amount") != expected:
+            logger.error(
+                "Amount mismatch for %s: expected %s got %s",
+                txn.reference, expected, data.get("amount"),
+            )
+            return "failed"
+        return "success"
+    if gateway_status in ("failed", "abandoned", "reversed"):
+        return "failed"
+    return None
+
+
+def settle_transaction(reference, outcome):
+    with transaction.atomic():
+        txn = WalletTransaction.objects.select_for_update().get(reference=reference)
+
+        if txn.status != WalletTransaction.Status.PENDING:
+            return txn
+
+        if outcome == "success":
+            txn.status = WalletTransaction.Status.SUCCESS
+            wallet_model = txn.wallet.__class__
+            wallet_model.objects.filter(pk=txn.wallet_id).update(
+                balance=F("balance") + txn.amount
+            )
+        else:
+            txn.status = WalletTransaction.Status.FAILED
+
+        txn.save(update_fields=["status"])
+        logger.info("Settled %s as %s", reference, outcome)
+        return txn
+
+
+def serialize(txn):
+    status = txn.status
+    return {
+        "reference": txn.reference,
+        "status": txn.get_status_display(),
+        "status_code": status,
+        "transaction_type": getattr(txn, "type", None) or getattr(txn, "transaction_type", ""),
+        "amount": str(txn.amount),
+        "verified": status == WalletTransaction.Status.SUCCESS,
+        "is_final": status != WalletTransaction.Status.PENDING,
+        "created_at": txn.created_at.isoformat() if hasattr(txn, "created_at") else None,
+    }
+
+
+@require_GET
+@never_cache
+@json_login_required
+def deposit_verify(request, reference):
+    if not REFERENCE_RE.match(reference):
+        return error("Invalid reference format", 400)
+
+    if is_rate_limited(request.user.pk):
+        return error("Too many requests. Slow down.", 429, retry_after=RATE_WINDOW)
+
+    qs = WalletTransaction.objects.select_related("wallet")
+    if not request.user.is_staff:
+        qs = qs.filter(wallet__rider__user=request.user)
+
+    try:
+        txn = qs.get(reference=reference)
+    except WalletTransaction.DoesNotExist:
+        return error("Transaction not found", 404, reference=reference)
+
+    message = "Transaction found"
+
+    if txn.status == WalletTransaction.Status.PENDING:
+        outcome = query_gateway(txn)
+        if outcome:
+            txn = settle_transaction(reference, outcome)
+            message = (
+                "Deposit confirmed and wallet credited"
+                if txn.status == WalletTransaction.Status.SUCCESS
+                else "Deposit failed"
+            )
+        else:
+            message = "Payment still pending"
+
+    payload = {"success": True, "message": message, **serialize(txn)}
+    if not payload["is_final"]:
+        payload["retry_after"] = POLL_INTERVAL
+
+    return JsonResponse(payload)
+
+
+MIN_DEPOSIT = Decimal(getattr(settings, "MIN_DEPOSIT", "100"))
+MAX_DEPOSIT = Decimal(getattr(settings, "MAX_DEPOSIT", "1000000"))
+INIT_LIMIT = 5
+INIT_WINDOW = 60
+IDEMPOTENCY_TTL = 60 * 30
+
+
+def throttled(scope, user_id, limit, window):
+    key = f"{scope}:{user_id}"
+    cache.add(key, 0, window)
+    try:
+        return cache.incr(key) > limit
+    except ValueError:
+        cache.set(key, 1, window)
+        return False
+
+
+def parse_amount(raw):
+    if raw is None or isinstance(raw, bool):
+        raise ValueError("Amount is required")
+    try:
+        amount = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError):
+        raise ValueError("Amount must be a number")
+    if not amount.is_finite():
+        raise ValueError("Amount must be a number")
+    if amount.as_tuple().exponent < -2:
+        raise ValueError("Amount cannot have more than 2 decimal places")
+    if amount < MIN_DEPOSIT:
+        raise ValueError(f"Minimum deposit is {MIN_DEPOSIT}")
+    if amount > MAX_DEPOSIT:
+        raise ValueError(f"Maximum deposit is {MAX_DEPOSIT}")
+    return amount.quantize(Decimal("0.01"))
+
+
+def generate_reference():
+    return f"DEP-{uuid.uuid4().hex[:20].upper()}"
+
+
+def init_gateway_payment(user, txn, callback_url):
+    resp = requests.post(
+        GATEWAY_INIT_URL,
+        headers={"Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}"},
+        json={
+            "email": user.email,
+            "amount": int(txn.amount * 100),
+            "reference": txn.reference,
+            "callback_url": callback_url,
+            "metadata": {"user_id": user.pk, "purpose": "wallet_deposit"},
+        },
+        timeout=GATEWAY_TIMEOUT,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if not body.get("status"):
+        raise ValueError(body.get("message", "Gateway rejected request"))
+    return body["data"]
+
+
+@require_POST
+@never_cache
+@json_login_required
+def deposit_initiate(request):
+    user = request.user
+
+    if not user.email:
+        return error("Add an email to your account before depositing", 400)
+
+    if throttled("deposit_init", user.pk, INIT_LIMIT, INIT_WINDOW):
+        return error("Too many deposit attempts. Try again shortly.", 429, retry_after=INIT_WINDOW)
+
+    try:
+        body = json.loads(request.body or b"{}")
+        if not isinstance(body, dict):
+            raise ValueError
+    except ValueError:
+        return error("Invalid JSON body", 400)
+
+    try:
+        amount = parse_amount(body.get("amount"))
+    except ValueError as exc:
+        return error(str(exc), 400)
+
+    idem_header = request.headers.get("Idempotency-Key", "").strip()
+    idem_key = f"deposit_idem:{user.pk}:{idem_header[:100]}" if idem_header else None
+    if idem_key:
+        cached = cache.get(idem_key)
+        if cached:
+            return JsonResponse({**cached, "idempotent_replay": True})
+
+    try:
+        wallet = RiderWallet.objects.get(rider__user=user)
+    except RiderWallet.DoesNotExist:
+        return error("Wallet not found", 404)
+
+    txn = WalletTransaction.objects.create(
+        wallet=wallet,
+        transaction_type="deposit",
+        amount=amount,
+        status=WalletTransaction.Status.PENDING,
+        reference=generate_reference(),
+    )
+
+    callback_url = getattr(
+        settings, "DEPOSIT_CALLBACK_URL", None
+    ) or request.build_absolute_uri("/deposit/callback/")
+
+    try:
+        data = init_gateway_payment(user, txn, callback_url)
+    except (requests.RequestException, ValueError, KeyError):
+        logger.exception("Gateway init failed for %s", txn.reference)
+        txn.status = WalletTransaction.Status.FAILED
+        txn.save(update_fields=["status"])
+        return error("Could not start payment. Please try again.", 502)
+
+    payload = {
+        "success": True,
+        "message": "Deposit initiated",
+        "reference": txn.reference,
+        "amount": str(txn.amount),
+        "status": txn.get_status_display(),
+        "authorization_url": data["authorization_url"],
+        "access_code": data.get("access_code"),
+    }
+
+    if idem_key:
+        cache.set(idem_key, payload, IDEMPOTENCY_TTL)
+
+    logger.info("Deposit initiated %s user=%s amount=%s", txn.reference, user.pk, amount)
+    return JsonResponse(payload, status=201)
+
+
+@json_login_required
+def deposit_history(request):
+    deposits = WalletTransaction.objects.filter(
+        wallet__rider__user=request.user,
+        transaction_type="deposit"
+    )
+
+    status_filter = request.GET.get("status")
+    if status_filter:
+        deposits = deposits.filter(status=status_filter.lower())
+
+    deposits = deposits.order_by("-created_at")
+
+    page_num = request.GET.get("page", 1)
+    paginator = Paginator(deposits, 20)
+
+    try:
+        page = paginator.page(page_num)
+    except PageNotAnInteger:
+        page = paginator.page(1)
