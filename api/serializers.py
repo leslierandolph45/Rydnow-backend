@@ -1057,7 +1057,7 @@ if "max_amount" in f:
 if f.get("search"):
     term = f["search"].strip()
     qs = qs.filter(Q(reference__icontains=term) | Q(description__icontains=term))
-return qs.order_by(f["ordering"], "-id")
+    return qs.order_by(f["ordering"], "-id")
 
 def _summary(qs):
     agg = qs.filter(status=WalletTransaction.Status.SUCCESS).aggregate(
