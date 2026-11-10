@@ -16,8 +16,7 @@ from .views import MyRiderProfileView
 urlpatterns = [
     # Other URLS
     path("auth/login/", obtain_auth_token, name="api-login"),
-    path("auth/customer/login/", views.customer_login, name="customer-login"),
-    path("auth/rider/login/", views.rider_login, name="rider-login"),
+    path("auth/login/", views.user_login, name="user-login"),
 
     path("auth/register/customer/", customer_register, name="customer-register"),
     path("auth/register/rider/",rider_register, name="rider-register"),
