@@ -522,6 +522,29 @@ def customer_profile(request):
     return ok("Profile updated successfully.", data=serializer.data)
 
 
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def customer_login(request):
+    """Authenticate customer and return auth token."""
+    serializer = LoginSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    user = serializer.validated_data["user"]
+    
+    if not hasattr(user, "customer_profile"):
+        return Response(
+            {"error": "This account is not registered as a customer."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    token, _ = Token.objects.get_or_create(user=user)
+    return Response({
+        "token": token.key,
+        "email": user.email,
+        "full_name": user.customer_profile.full_name,
+    })
+
+
 # ===========================================================================
 # 6. RIDER LOCATION & NEARBY SEARCH
 # ===========================================================================
@@ -1628,4 +1651,39 @@ def deposit_history(request):
             }
             for txn in page.object_list
         ]
+    })
+
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def rider_login(request):
+    """Authenticate rider and return auth token."""
+    serializer = RiderLoginSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    
+    user = authenticate(
+        username=serializer.validated_data["email"],
+        password=serializer.validated_data["password"]
+    )
+    
+    if not user:
+        return Response(
+            {"error": "Invalid email or password."},
+            status=status.HTTP_401_UNAUTHORIZED
+        )
+    
+    if not hasattr(user, "rider_profile"):
+        return Response(
+            {"error": "This account is not registered as a rider."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    token, _ = Token.objects.get_or_create(user=user)
+    return Response({
+        "token": token.key,
+        "email": user.email,
+        "full_name": user.rider_profile.full_name,
+        "verification_status": user.rider_profile.verification_status,
+        "is_verified": user.rider_profile.is_verified,
     })

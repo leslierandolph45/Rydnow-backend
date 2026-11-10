@@ -936,6 +936,10 @@ class RiderProfile(models.Model):
 
     objects = RiderProfileQuerySet.as_manager()
 
+    @property
+    def is_verified(self):
+        return self.verification_status == VerificationStatus.VERIFIED
+
     class Meta:
         ordering = ["-created_at"]
         verbose_name = "Rider profile"

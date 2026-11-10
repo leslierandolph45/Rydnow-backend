@@ -160,6 +160,7 @@ class BookingSerializer(serializers.ModelSerializer):
         ]
 
 
+
 #================ Serializer =============
 class RiderProfileAdminNoteSerializer(serializers.ModelSerializer):
     author_name = serializers.SerializerMethodField()
@@ -597,17 +598,24 @@ class RiderProfileSerializer(serializers.ModelSerializer):
     """Rider sees their own profile."""
     id = serializers.UUIDField(source="public_id", read_only=True)
     is_verified = serializers.BooleanField(read_only=True)
+    verification_status = serializers.ChoiceField(choices=VerificationStatus.choices, read_only=True)
+    tier = serializers.ChoiceField(choices=RiderTier.choices, read_only=True)
 
     class Meta:
         model = RiderProfile
         fields = [
-            "id", "full_name", "phone", "motorbike_model", "license_number",
-            "verification_status", "is_verified", "rejection_reason",
+            "id",
+            "full_name", "phone", "profile_photo","date_of_birth","gender", "ghana_card_number", "city",
+            "motorbike_model", "motor_plate_number", "motorbike_color","license_number","address",
+            "preferred_language", "license_expiry_date","tier", "rating_count", "accepted_trips_pct",
+            "verification_status", "is_verified", "rejection_reason", "online_since"
             "is_online", "rating_average", "completed_trips", "created_at",
         ]
         read_only_fields = [
-            "id", "verification_status", "is_verified", "rejection_reason",
-            "rating_average", "completed_trips", "created_at",
+            "id", 
+            "verification_status", "is_verified", "rejection_reason",
+            "tier", "rating_average", "rating_count" "completed_trips", "created_at",
+            "accepted_trips_pct", "online_since"
         ]
 
 
@@ -958,7 +966,9 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
     
     id = serializers.UUIDField(source="public_id", read_only=True)
     email = serializers.EmailField(source="user.email", read_only=True)
-    full_name = serializers.CharField(source="user.get_full_name", read_only=True)
+    full_name = serializers.CharField(read_only=True)
+    phone = serializers.CharField(required=False, allow_blank = True)
+    profile_photo = serializers.ImageField(required=False, allow_null=True)
 
     class Meta:
         model = CustomerProfile
@@ -1005,7 +1015,7 @@ User = get_user_model()
 
 def _profile(user):
     """Return the user's profile or None (never raises)."""
-    return getattr(user, "profile", None)
+    return getattr(user, "customer_profile", None)
 
 
 def _clean_name(value: str) -> str:

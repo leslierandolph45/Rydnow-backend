@@ -10,13 +10,18 @@ from .views import (
     rider_register, 
     rider_submit_documents,
     customer_profile,
+    customer_login,
+    rider_login,
 )
+
 from .views import MyRiderProfileView
 urlpatterns = [
     # Other URLS
-    path('api/auth/login/', obtain_auth_token, name='api-login'),
+    path("auth/login/", obtain_auth_token, name="api-login"),
+    path("auth/customer/login/", views.customer_login, name="customer-login"),
+    path("auth/rider/login/", views.rider_login, name="rider-login"),
 
-    path("auth/register/customer", customer_register, name="customer-register"),
+    path("auth/register/customer/", customer_register, name="customer-register"),
     path("auth/register/rider/",rider_register, name="rider-register"),
     path("rider/verify", rider_submit_documents, name="rider-verify"),
 
