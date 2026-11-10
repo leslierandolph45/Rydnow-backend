@@ -7,7 +7,14 @@ from .models import RiderProfile, Service
 import re
 from django.conf import settings
 from rest_framework import serializers
-from .models import RiderProfile, RiderDocumentType, RiderStatusHistory
+from .models import (
+    RiderProfile,
+    RiderDocumentType,
+    RiderStatusHistory,
+    VerificationStatus,
+    RiderTier,
+    CustomerProfile,
+)
 
 class MobileNumberField(serializers.CharField):
     """
