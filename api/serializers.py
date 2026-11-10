@@ -1039,7 +1039,7 @@ class TransactionPagination(PageNumberPagination):
     
     
 def _apply_filters(qs, f):
-tz = timezone.get_current_timezone()
+    tz = timezone.get_current_timezone()
 if "type" in f:
     qs = qs.filter(transaction_type=f["type"])
 if "status" in f:
@@ -1061,31 +1061,31 @@ if f.get("search"):
 return qs.order_by(f["ordering"], "-id")
 
 def _summary(qs):
-agg = qs.filter(status=WalletTransaction.Status.SUCCESS).aggregate(
-    total_in=Coalesce(Sum("amount", filter=Q(transaction_type="deposit")), ZERO),
-    total_out=Coalesce(Sum("amount", filter=Q(transaction_type="withdrawal")), ZERO),
-    count=Count("id"),
-)
-agg["net"] = agg["total_in"] - agg["total_out"]
-return agg
+    agg = qs.filter(status=WalletTransaction.Status.SUCCESS).aggregate(
+        total_in=Coalesce(Sum("amount", filter=Q(transaction_type="deposit")), ZERO),
+        total_out=Coalesce(Sum("amount", filter=Q(transaction_type="withdrawal")), ZERO),
+        count=Count("id"),
+    )
+    agg["net"] = agg["total_in"] - agg["total_out"]
+    return agg
 
 def _monthly_trend(wallet, months=6):
     since = (timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        - timedelta(days=31 * (months - 1)))
-rows = (
-    wallet.transactions.filter(status=WalletTransaction.Status.SUCCESS, created_at__gte=since)
-    .annotate(month=TruncMonth("created_at"))
-    .values("month")
-    .annotate(
-        money_in=Coalesce(Sum("amount", filter=Q(transaction_type="deposit")), ZERO),
-        money_out=Coalesce(Sum("amount", filter=Q(transaction_type="withdrawal")), ZERO),
+    - timedelta(days=31 * (months - 1)))
+    rows = (
+        wallet.transactions.filter(status=WalletTransaction.Status.SUCCESS, created_at__gte=since)
+        .annotate(month=TruncMonth("created_at"))
+        .values("month")
+        .annotate(
+            money_in=Coalesce(Sum("amount", filter=Q(transaction_type="deposit")), ZERO),
+            money_out=Coalesce(Sum("amount", filter=Q(transaction_type="withdrawal")), ZERO),
+        )
+        .order_by("month")
     )
-    .order_by("month")
-)
-return [
-    {"month": r["month"].strftime("%Y-%m"), "money_in": r["money_in"], "money_out": r["money_out"]}
-    for r in rows
-]
+    return [
+        {"month": r["month"].strftime("%Y-%m"), "money_in": r["money_in"], "money_out": r["money_out"]}
+        for r in rows
+    ]
 
 
 def _top_up_nudge(wallet):
