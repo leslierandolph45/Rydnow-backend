@@ -5,7 +5,7 @@ from django.contrib import admin
 from django.views.decorators.csrf import csrf_exempt
 from api.models import RiderWallet
 from django.urls import path, include
-
+from .views import register_customer, register_rider
 urlpatterns = [
     # Other URLS
     path('api/auth/login/', obtain_auth_token, name='api-login'),
