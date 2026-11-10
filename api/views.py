@@ -277,27 +277,25 @@ def customer_register(request):
     serializer.is_valid(raise_exception=True)
 
     try:
-        user = serializer.save()
-    except IntegrityError:
-        return Response(
-            {"error": "An account with these details already exists."},
-            status=status.HTTP_409_CONFLICT,
-        )
-    except Exception:
-        logger.exception("Customer registration failed")
-        return Response(
-            {"error": "Something went wrong. Please try again."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        serializer.is_valid(raise_exception= True)
+        user= serializer.sabe()
 
-    return Response(
-        {
-            "message": "Account created successfully",
-            "user_id": user.id,
+        return Response ({
+            "message": "Account created succefully",
+            "user_id":  "user.id",
             "email": user.email,
-        },
-        status=status.HTTP_201_CREATED,
-    )
+        }, status= status.HTTP_201_CREATED)
+
+    except IntegrityError:
+        return Response({
+            "error":"An account with these details already exists.",
+        }, status=status.HTTP_409_CONFLICT)
+
+    except Exception as e:
+        logger.exception(f"Customer registration failed:{e}")
+        return Response({
+            "error": "Something went wrong. Please try again.",
+        }, status=status.HTTP_500_INTERNAL_SEVER_ERROR)
 
 
 # ===========================================================================
