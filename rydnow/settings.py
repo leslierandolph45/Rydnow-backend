@@ -49,7 +49,7 @@ def env_list(name: str, default=None) -> list:
 
 # ─────────────────────────── Core ───────────────────────────
 # Secure by default: production never runs with DEBUG on by accident.
-DEBUG = env_bool("DEBUG", False)
+DEBUG = env_bool("DEBUG", True)
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
@@ -88,7 +88,10 @@ INSTALLED_APPS = [
     'corsheaders',
     # Local
     'api',
-    'phonenumber_field'
+    'phonenumber_field',
+    'django_otp',
+    'django_otp.plugins.otp_totp',
+    'djangp_otp.plugins.otp_static',
 ]
 
 MIDDLEWARE = [
@@ -190,7 +193,7 @@ USE_TZ = True
 # ───────────────────── Static & Media ─────────────────────
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles" # Where Django collects them
-STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.ManifestStatisFIlesStorage'
+
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
