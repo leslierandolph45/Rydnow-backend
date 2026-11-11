@@ -15,6 +15,16 @@ ghana_card_validator = RegexValidator(
 )
 
 
+from django.core.validators import RegexValidator
+
+# Create your phone validator here
+phone_validator = RegexValidator(
+    regex=r'^\+233\d{9}$',
+    message="Enter a valid Ghanaian phone number: +233XXXXXXXXX"
+)
+
+
+
 
 def validate_non_negative_amount(value):
     if value < 0:
