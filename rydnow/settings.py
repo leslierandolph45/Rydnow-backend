@@ -89,7 +89,7 @@ INSTALLED_APPS = [
     # Local
     'api',
     'phonenumber_field',
-
+]
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  # MUST be first!
     'django.middleware.security.SecurityMiddleware',
