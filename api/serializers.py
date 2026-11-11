@@ -135,9 +135,9 @@ class RegistrationSerializer(_SignupBase):
         user = self._create_user(validated_data)
         CustomerProfile.objects.create(
             user=user,
-            full_name=validated_data["full_name"],
-            email=validated_data["email"],
-            phone=validated_data["phone"],
+            full_name=validated_data.get("full_name", ""),
+            email=validated_data.get("email", ""),
+            phone=validated_data.get("phone", ""),
         )
         return user
 
