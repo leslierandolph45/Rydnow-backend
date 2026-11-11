@@ -89,10 +89,6 @@ INSTALLED_APPS = [
     # Local
     'api',
     'phonenumber_field',
-    'django_otp',
-    'django_otp.plugins.otp_totp',
-    'djangp_otp.plugins.otp_static',
-]
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  # MUST be first!
