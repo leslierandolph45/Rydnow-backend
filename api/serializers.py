@@ -11,6 +11,7 @@ Model facts these serializers rely on:
     Service             primary key is `key` ("okada", "parcel", "waste-bin")
 """
 from decimal import Decimal
+from .validators import clean_phone
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
