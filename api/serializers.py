@@ -141,8 +141,9 @@ class RegistrationSerializer(_SignupBase):
             user=user,
             full_name=validated_data.get("full_name", ""),
             email=validated_data.get("email", ""),
-            phone=clean_phone(value),
-        )    
+            phone=validated_data.get("phone"),
+        )
+        return user    
 
         if CustomerProfile.objects.filter(phone=phone).exists():
             raise serializers.ValidationError("This phonenumber is already registered.") 
