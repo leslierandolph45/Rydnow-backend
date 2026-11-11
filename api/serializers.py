@@ -15,8 +15,14 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.contrib.auth.password_validation import validate_password
+from django.db import IntegrityError
 from django.utils import timezone
 from rest_framework import serializers
+from .utils import clean_phone
+
+
 
 from .models import (
     TRANSACTION_TYPES,
