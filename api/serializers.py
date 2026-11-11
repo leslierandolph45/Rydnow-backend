@@ -59,7 +59,6 @@ from .models import (
 )
 from .rider_domain import RiderDocument, RiderProfile
 from .serializers import (
-    RegistrationSerializer,
     AccountSerializer,
     AccountUpdateSerializer,
     ChangePasswordSerializer,
