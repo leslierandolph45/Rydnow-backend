@@ -1108,24 +1108,25 @@ class _Echo:
 def _csv_response(qs, currency):
     qs = qs[:MAX_EXPORT_ROWS]
     writer = csv.writer(_Echo())
-
-def rows():
-    yield writer.writerow(
-        ["Date", "Reference", "Type", "Status", f"Amount ({currency})",
-        "Description"]
-    )
-    for t in qs.iterator(chunk_size=1000):
+    
+    def rows():
         yield writer.writerow([
-            timezone.localtime(t.created_at).strftime("%Y-%m-%d %H:%M:%S"),
-            _csv_safe(t.reference), t.get_transaction_type_display(),
-            t.get_status_display(), t.amount, _csv_safe(t.description),
+            "Date", "Reference", "Type", "Status", f"Amount ({currency})",
+            "Description"
         ])
+        for t in qs.iterator(chunk_size=1000):
+            yield writer.writerow([
+                timezone.localtime(t.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                _csv_safe(t.reference), t.get_transaction_type_display(),
+                t.get_status_display(), t.amount,
+                _csv_safe(t.description),
+            ])
 
-resp = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
-stamp = timezone.now().strftime("%Y%m%d")
-resp["Content-Disposition"] = f'attachment; filename="wallet-statement-{stamp}.csv"'
-resp["Cache-Control"] = "no-store"
-return resp
+        resp = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
+        stamp = timezone.now().strftime("%Y%m%d")
+        resp["Content-Disposition"] = f'attachment; filename="wallet-statement-{stamp}.csv"'
+        resp["Cache-Control"] = "no-store"
+        return resp
 
 
 @api_view(["GET"])
