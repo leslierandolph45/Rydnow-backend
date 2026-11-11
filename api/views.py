@@ -1,5 +1,5 @@
 """
-Rydnow API views.
+Rydnow API views — written against the consolidated models.py and serializers.py.
 
 Sections
     1. Constants, response helpers, throttles, decorators
@@ -8,54 +8,35 @@ Sections
     4. Rider onboarding
     5. Customer profile
     6. Rider location & nearby-rider search
-    7. Rider wallet
-    8. Payments (Paystack)
+    7. Rider wallet, withdrawals, transaction history
+    8. Payments (Paystack): wallet deposits and booking payments
 
-Settings (settings.py):
-    PAYSTACK_SECRET_KEY      = os.environ.get("PAYSTACK_SECRET_KEY", "")
-    PAYSTACK_CALLBACK_URL    = ""          # optional
-    PAYMENT_CURRENCY         = "GHS"       # optional
-    COMMISSION_RATE          = ...         # optional, falls back to models.COMMISSION_RATE
-    MINIMUM_WALLET_BALANCE   = "50.00"     # optional
-    MIN_WITHDRAWAL_AMOUNT    = "10.00"     # optional
-    SMS_BACKEND              = "api.sms.send_sms"   # dotted path to fn(phone, message)
+Settings (all optional except PAYSTACK_SECRET_KEY and, in production, SMS_BACKEND):
+    PAYSTACK_SECRET_KEY, PAYSTACK_CALLBACK_URL, PAYMENT_CURRENCY="GHS"
+    MIN_DEPOSIT="10.00", MAX_DEPOSIT="100000.00"
+    SMS_BACKEND="path.to.send_sms"          # callable(phone, message)
+    REQUIRE_PHONE_VERIFICATION=False        # True: registration needs a prior OTP check
+SystemConfig keys (editable in admin):
+    MIN_RIDER_BOOKING_BALANCE ("50.00")  minimum wallet balance to receive jobs
+    MIN_WITHDRAWAL ("10.00"), WITHDRAWAL_FEE ("0.00")
 
-Model assumptions (verify against your models):
-    RiderProfile        user (OneToOne, related_name="rider_profile"), full_name,
-                        phone, is_verified, is_active, latitude, longitude,
-                        location_updated_at
-    RiderWallet         user (OneToOne, related_name="rider_wallet"), balance
-                        .credit_earnings(amount, booking_ref=, payment_verified=)
-    WalletTransaction   wallet (FK), amount, transaction_type, description,
-                        created_at, reference (unique, null=True),
-                        related_booking (FK, null=True)
-    WithdrawalRequest   rider_profile (FK), amount, status
-    Booking             customer (FK User), booking_ref, total_fare, payment_ref,
-                        payment_status, assigned_rider (FK RiderProfile, null),
-                        confirm_payment_verified(provider_ref=, payment_ref=)
-    ServiceQualification rider (FK RiderProfile), service (FK), is_approved
-    RiderDocument       rider (FK), .resubmit_document(rider=, document_type=,
-                        document_file=)
-
-Serializers expected in .serializers:
-    LoginSerializer, CustomerSerializer, CustomerProfileSerializer,
-    RiderRegistrationSerializer, RiderProfileSerializer, RiderDocumentSerializer,
-    RiderLocationSerializer, NearbyRidersQuerySerializer, PhoneSerializer,
-    VerifyCodeSerializer, AmountSerializer, InitializePaymentSerializer,
-    VerifyPaymentSerializer
-
-Rider admin notes, incidents and emergency contacts live in rider_domain.py.
+Money rules:
+    * A wallet is NEVER credited by a client-supplied amount; only after Paystack verifies it.
+    * Booking payments only mark the booking paid (escrow "held"). The rider is credited
+      by Booking.complete_booking(), never here.
 """
-
+import csv
 import hashlib
 import hmac
 import json
 import logging
 import math
+import re
 import secrets
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
+from datetime import time as dtime
 from decimal import ROUND_HALF_UP, Decimal
 from functools import wraps
 from urllib.parse import quote
@@ -65,11 +46,14 @@ from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.models import update_last_login
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
+from django.db.models import Count, DecimalField, Q, Sum, Value
+from django.db.models.functions import Abs, Coalesce, TruncMonth
+from django.http import StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.module_loading import import_string
-from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from rest_framework import generics, status
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import (
@@ -85,26 +69,40 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
-from .models import COMMISSION_RATE, Booking, CustomerProfile, Service, ServiceQualification
-
-from .rider_domain import RiderDocument, RiderProfile
+from .models import (
+    Booking,
+    CustomerProfile,
+    Payment,
+    RiderDocument,
+    RiderPayoutAccount,
+    RiderProfile,
+    RiderWallet,
+    Service,
+    SystemAlert,
+    SystemConfig,
+    VerificationStatus,
+    WalletTransaction,
+    WebhookEvent,
+    WithdrawalRequest,
+    haversine_km,
+)
 from .serializers import (
-    RegistrationSerializer,
-    AccountSerializer,
-    AccountUpdateSerializer,
-    ChangePasswordSerializer,
-    CustomerProfileSerializer,
-    CustomerSerializer,
+    REFERENCE_RE,
+    AmountSerializer,
     InitializePaymentSerializer,
     LoginSerializer,
     NearbyRidersQuerySerializer,
     PhoneSerializer,
+    RegistrationSerializer,
     RiderDocumentSerializer,
     RiderLocationSerializer,
     RiderProfileSerializer,
     RiderRegistrationSerializer,
+    TransactionQuerySerializer,
+    TransactionSerializer,
     VerifyCodeSerializer,
     VerifyPaymentSerializer,
+    WithdrawalRequestSerializer,
 )
 
 User = get_user_model()
@@ -115,15 +113,13 @@ logger = logging.getLogger(__name__)
 # 1. CONSTANTS, HELPERS, THROTTLES, DECORATORS
 # ===========================================================================
 CURRENCY = getattr(settings, "PAYMENT_CURRENCY", "GHS")
-MINIMUM_WALLET_BALANCE = Decimal(str(getattr(settings, "MINIMUM_WALLET_BALANCE", "50.00")))
-MIN_WITHDRAWAL_AMOUNT = Decimal(str(getattr(settings, "MIN_WITHDRAWAL_AMOUNT", "10.00")))
+MIN_DEPOSIT = Decimal(str(getattr(settings, "MIN_DEPOSIT", "10.00")))
+MAX_DEPOSIT = Decimal(str(getattr(settings, "MAX_DEPOSIT", "100000.00")))
 AMOUNT_TOLERANCE = Decimal("0.01")
 TWO_PLACES = Decimal("0.01")
 
 CUSTOMER_EDITABLE_FIELDS = ("full_name", "phone")
 
-LOCATION_STALE_AFTER = timedelta(minutes=5)
-EARTH_RADIUS_KM = 6371.0
 KM_PER_DEGREE = 111.0
 MAX_NEARBY_CANDIDATES = 200
 
@@ -132,22 +128,19 @@ PAYSTACK_TIMEOUT = (5, 15)  # (connect, read) seconds
 PURPOSE_BOOKING = "booking"
 PURPOSE_DEPOSIT = "wallet_deposit"
 PAID_STATUSES = ("held", "released")
+GATEWAY_PENDING_STATES = ("ongoing", "pending", "processing", "queued")
+CHANNEL_TO_METHOD = {"mobile_money": "momo", "card": "visa", "bank": "debit"}
+POLL_INTERVAL = 5  # seconds; hint for clients polling a pending payment
+REFERENCE_PATTERN = re.compile(REFERENCE_RE)
 
 OTP_LENGTH = 6
 OTP_TTL_SECONDS = 600
 OTP_COOLDOWN_SECONDS = 60
 OTP_MAX_ATTEMPTS = 5
 OTP_MAX_SENDS_PER_HOUR = 5
+PHONE_VERIFIED_TTL_SECONDS = 1800
 
-
-
-def fill_null_defaults(data):
-    """Replace None values with sensible defaults in API responses."""
-    if isinstance(data, dict):
-        return {k: fill_null_defaults(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [fill_null_defaults(item) for item in data]
-    return data
+LOW_BALANCE_FALLBACK = Decimal("50.00")
 
 
 def ok(message=None, http_status=status.HTTP_200_OK, **payload):
@@ -176,18 +169,9 @@ def money(value):
     return str(Decimal(str(value)).quantize(TWO_PLACES, rounding=ROUND_HALF_UP))
 
 
-def split_name(full_name):
-    first, _, last = full_name.strip().partition(" ")
-    return first, last.strip()
-
-
-def haversine_km(lat1, lng1, lat2, lng2):
-    lat1, lng1, lat2, lng2 = map(math.radians, (lat1, lng1, lat2, lng2))
-    a = (
-        math.sin((lat2 - lat1) / 2) ** 2
-        + math.cos(lat1) * math.cos(lat2) * math.sin((lng2 - lng1) / 2) ** 2
-    )
-    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
+def min_wallet_balance():
+    """Single source of truth, shared with RiderProfile.has_minimum_deposit."""
+    return SystemConfig.get_decimal("MIN_RIDER_BOOKING_BALANCE", str(LOW_BALANCE_FALLBACK))
 
 
 class LoginThrottle(AnonRateThrottle):
@@ -210,28 +194,37 @@ class LocationThrottle(UserRateThrottle):
     rate = "120/min"
 
 
+class WalletReadThrottle(UserRateThrottle):
+    scope = "wallet_read"
+    rate = "60/min"
+
+
+class PaymentThrottle(UserRateThrottle):
+    scope = "payment"
+    rate = "20/min"
+
+
 def rider_required(view):
     """Inject the authenticated user's RiderProfile as `rider`, or return 404."""
-
     @wraps(view)
     def wrapper(request, *args, **kwargs):
-        rider = RiderProfile.objects.filter(user=request.user).first()
+        rider = RiderProfile.objects.filter(user=request.user, deleted_at__isnull=True).first()
         if rider is None:
             return fail("Rider profile not found.", status.HTTP_404_NOT_FOUND)
         return view(request, *args, rider=rider, **kwargs)
-
     return wrapper
 
 
-def _get_wallet(user, *, lock=False):
-    """Fetch (or create) a rider's wallet. lock=True requires transaction.atomic()."""
-    manager = RiderWallet.objects.select_for_update() if lock else RiderWallet.objects
-    wallet, _ = manager.get_or_create(user=user)
+def _get_wallet(rider, *, lock=False):
+    """Fetch (or create) a rider's wallet. lock=True must run inside transaction.atomic()."""
+    wallet, _ = RiderWallet.objects.get_or_create(rider=rider)
+    if lock:
+        wallet = RiderWallet.objects.select_for_update().get(pk=wallet.pk)
     return wallet
 
 
 def _can_go_online(rider, wallet):
-    return rider.is_verified and rider.is_active and wallet.balance >= MINIMUM_WALLET_BALANCE
+    return rider.can_accept_jobs and wallet.balance >= min_wallet_balance()
 
 
 # ===========================================================================
@@ -250,7 +243,7 @@ def user_login(request):
     if "@" in identifier:
         identifier = identifier.lower()  # accounts are created with lowercase email usernames
 
-    # ModelBackend already rejects inactive users, so no separate is_active check.
+    # ModelBackend already rejects inactive users.
     user = authenticate(
         request=request,
         username=identifier,
@@ -259,9 +252,13 @@ def user_login(request):
     if user is None:
         return fail("Invalid credentials.", status.HTTP_401_UNAUTHORIZED)
 
+    rider = RiderProfile.objects.filter(user=user, deleted_at__isnull=True).first()
+    customer = None if rider else CustomerProfile.objects.filter(user=user).first()
+    if customer is not None and customer.is_blocked:
+        return fail("This account has been blocked. Contact support.", status.HTTP_403_FORBIDDEN)
+
     update_last_login(None, user)
     token, _ = Token.objects.get_or_create(user=user)
-    rider = RiderProfile.objects.filter(user=user).first()
 
     user_payload = {
         "id": user.id,
@@ -270,12 +267,36 @@ def user_login(request):
         "role": "rider" if rider else "customer",
     }
     if rider:
-        # Unverified riders may log in (they must upload documents); the app
-        # gates going online on this value.
+        # Unverified riders may log in (they must upload documents); the app gates
+        # going online on these values.
         user_payload["is_verified"] = rider.is_verified
+        user_payload["verification_status"] = rider.verification_status
 
     return ok(token=token.key, user=user_payload)
 
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([RegistrationThrottle])
+def customer_register(request):
+    """Register a customer: User + CustomerProfile, atomically."""
+    serializer = RegistrationSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+
+    phone = serializer.validated_data["phone"]
+    if not _phone_verification_ok(phone):
+        return fail("Verify your phone number first.", status.HTTP_403_FORBIDDEN)
+
+    try:
+        user = serializer.save()
+    except IntegrityError:
+        return fail("An account with these details already exists.", status.HTTP_409_CONFLICT)
+
+    _consume_phone_verification(phone)
+    logger.info("Customer registered: user_id=%s", user.id)
+    return ok("Account created successfully.", status.HTTP_201_CREATED, user_id=user.id, email=user.email)
 
 
 # ===========================================================================
@@ -286,6 +307,21 @@ def _otp_hash(phone, code):
     return hmac.new(
         settings.SECRET_KEY.encode(), f"{phone}:{code}".encode(), hashlib.sha256
     ).hexdigest()
+
+
+def _verified_key(phone):
+    return f"otp:verified:{phone}"
+
+
+def _phone_verification_ok(phone):
+    """True when verification is not enforced, or this phone passed an OTP check recently."""
+    if not getattr(settings, "REQUIRE_PHONE_VERIFICATION", False):
+        return True
+    return bool(cache.get(_verified_key(phone)))
+
+
+def _consume_phone_verification(phone):
+    cache.delete(_verified_key(phone))
 
 
 def _send_sms(phone, message):
@@ -372,7 +408,8 @@ def verify_code(request):
         return fail("Invalid verification code.", status.HTTP_400_BAD_REQUEST)
 
     cache.delete(key)
-    # TODO: persist the verified state (e.g. phone_verified = True) once that field exists.
+    # Registration endpoints check this flag when REQUIRE_PHONE_VERIFICATION is on.
+    cache.set(_verified_key(phone), True, PHONE_VERIFIED_TTL_SECONDS)
     return ok("Phone number verified.", verified=True)
 
 
@@ -385,45 +422,34 @@ def verify_code(request):
 @throttle_classes([RegistrationThrottle])
 def rider_register(request):
     """
-    Create User -> RiderProfile -> RiderWallet atomically. A failure at any step
-    rolls everything back (no orphan records). Returns an auth token so the
-    client can upload documents immediately (step 2 of onboarding).
+    Create User -> RiderProfile -> RiderWallet atomically (inside the serializer).
+    Returns an auth token so the client can upload documents immediately.
     """
     serializer = RiderRegistrationSerializer(data=request.data)
     if not serializer.is_valid():
         return validation_fail(serializer)
 
-    data = serializer.validated_data
-    email = data["email"].strip().lower()
-    first_name, last_name = split_name(data["full_name"])
+    phone = serializer.validated_data["phone"]
+    if not _phone_verification_ok(phone):
+        return fail("Verify your phone number first.", status.HTTP_403_FORBIDDEN)
 
     try:
         with transaction.atomic():
-            user = User.objects.create_user(
-                username=email,
-                email=email,
-                password=data["password"],
-                first_name=first_name,
-                last_name=last_name,
-            )
-            rider = RiderProfile.objects.create(
-                user=user,
-                full_name=data["full_name"],
-                phone=data["phone"],
-            )
-            RiderWallet.objects.create(user=user)
-            token, _ = Token.objects.get_or_create(user=user)
+            rider = serializer.save()
+            token, _ = Token.objects.get_or_create(user=rider.user)
     except IntegrityError:
         return fail("An account with this email or phone already exists.", status.HTTP_409_CONFLICT)
 
+    _consume_phone_verification(phone)
     logger.info("Rider registered: rider_id=%s", rider.id)
     return ok(
         "Registration submitted. Upload your documents to complete verification.",
         status.HTTP_201_CREATED,
-        rider_id=rider.id,
-        email=user.email,
+        rider_id=str(rider.id),
+        email=rider.user.email,
         phone=rider.phone,
         is_verified=rider.is_verified,
+        verification_status=rider.verification_status,
         requires_approval=True,
         token=token.key,
     )
@@ -438,7 +464,8 @@ class MyRiderProfileView(generics.RetrieveUpdateAPIView):
 
     def get_object(self):
         return get_object_or_404(
-            RiderProfile.objects.select_related("user"), user=self.request.user
+            RiderProfile.objects.select_related("user"),
+            user=self.request.user, deleted_at__isnull=True,
         )
 
 
@@ -447,65 +474,63 @@ class MyRiderProfileView(generics.RetrieveUpdateAPIView):
 @permission_classes([IsAuthenticated])
 @rider_required
 def rider_submit_documents(request, rider):
+    """
+    Upload (or re-upload) one document. When every required document is present the
+    rider is moved to 'under review' automatically.
+    """
     serializer = RiderDocumentSerializer(data=request.data)
     if not serializer.is_valid():
         return validation_fail(serializer)
+    data = serializer.validated_data
+    doc_type = data["document_type"]
+
+    if rider.verification_status in (VerificationStatus.SUSPENDED, VerificationStatus.UNDER_REVIEW):
+        return fail("Documents cannot be changed while your account is under review or suspended.",
+                    status.HTTP_409_CONFLICT)
 
     try:
-        document = RiderDocument.resubmit_document(
-            rider=rider,
-            document_type=serializer.validated_data["document_type"],
-            document_file=serializer.validated_data["document_file"],
-        )
-    except ValueError as exc:  # business-rule violation raised by the model
-        return fail(str(exc), status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            approved = rider.documents.filter(
+                document_type=doc_type, status=RiderDocument.DocumentStatus.APPROVED
+            ).exists()
+            if approved:
+                return fail("This document has already been approved.", status.HTTP_409_CONFLICT)
+
+            # A fresh upload replaces any earlier unapproved copy of the same type.
+            rider.documents.filter(document_type=doc_type).exclude(
+                status=RiderDocument.DocumentStatus.APPROVED
+            ).delete()
+            document = RiderDocument.objects.create(
+                rider_profile=rider, document_type=doc_type, file=data["document_file"],
+                expiry_date=data.get("expiry_date"),
+            )
     except IntegrityError:
         return fail("This document type has already been submitted.", status.HTTP_409_CONFLICT)
+
+    submitted = False
+    if rider.documents_uploaded and rider.verification_status in (
+        VerificationStatus.PENDING, VerificationStatus.REJECTED
+    ):
+        try:
+            rider.submit_for_review()
+            submitted = True
+        except DjangoValidationError as exc:
+            logger.warning("Auto-submit failed rider_id=%s: %s", rider.id, exc.messages)
 
     return ok(
         "Document uploaded successfully.",
         status.HTTP_201_CREATED,
-        id=document.id,
+        id=str(document.id),
         document_type=document.document_type,
-        status=document.status,
+        document_status=document.status,
+        documents_uploaded=rider.documents_uploaded,
+        submitted_for_review=submitted,
     )
 
 
 # ===========================================================================
 # 5. CUSTOMER PROFILE
 # ===========================================================================
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-@throttle_classes([RegistrationThrottle])
-def customer_register(request):
-    """Register a new customer account."""
-    serializer = CustomerRegisterSerializer(data=request.data)
-    try:
-        serializer.is_valid(raise_exception=True)
-        user = serializer.save()
-        return Response({
-            "message": "Account created successfully",
-            "user_id": user.id,
-            "email": user.email,
-        }, status=status.HTTP_201_CREATED)
-    except serializers.ValidationError as e:
-        return Response({
-            "error": e.detail,
-        }, status=status.HTTP_400_BAD_REQUEST)
-    except IntegrityError:
-        return Response({
-            "error": "An account with these details already exists.",
-        }, status=status.HTTP_409_CONFLICT)
-    except Exception as e:
-        logger.exception(f"Customer registration failed:{e}")
-        return Response({
-            "error": "Something went wrong. Please try again.",
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-
-
 @api_view(["GET", "PATCH"])
 @permission_classes([IsAuthenticated])
 def customer_profile(request):
@@ -532,7 +557,6 @@ def customer_profile(request):
     return ok("Profile updated successfully.", data=serializer.data)
 
 
-
 # ===========================================================================
 # 6. RIDER LOCATION & NEARBY SEARCH
 # ===========================================================================
@@ -541,7 +565,7 @@ def customer_profile(request):
 @throttle_classes([LocationThrottle])
 @rider_required
 def update_rider_location(request, rider):
-    """Update the authenticated rider's current location."""
+    """Update the authenticated rider's current location (hot path: one UPDATE)."""
     if not rider.is_active:
         return fail("Rider account is inactive.", status.HTTP_403_FORBIDDEN)
 
@@ -549,15 +573,11 @@ def update_rider_location(request, rider):
     if not serializer.is_valid():
         return validation_fail(serializer)
 
-    rider.latitude = serializer.validated_data["latitude"]
-    rider.longitude = serializer.validated_data["longitude"]
-    rider.location_updated_at = timezone.now()
-    rider.save(update_fields=["latitude", "longitude", "location_updated_at", "updated_at"])
-
+    rider.update_location(serializer.validated_data["latitude"], serializer.validated_data["longitude"])
     return ok(
         "Location updated successfully.",
-        latitude=rider.latitude,
-        longitude=rider.longitude,
+        latitude=rider.current_lat,
+        longitude=rider.current_lng,
         updated_at=rider.location_updated_at,
     )
 
@@ -565,7 +585,7 @@ def update_rider_location(request, rider):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])  # rider locations are private
 def get_nearby_riders(request):
-    """Active, verified riders near the customer who are approved for the service."""
+    """Riders who can take a job right now, near the given point, for the given service."""
     query = NearbyRidersQuerySerializer(data=request.query_params)
     if not query.is_valid():
         return validation_fail(query)
@@ -573,43 +593,37 @@ def get_nearby_riders(request):
 
     lat, lng = data["latitude"], data["longitude"]
     radius_km, limit = data["radius_km"], data["limit"]
+    service = get_object_or_404(Service, pk=data["service"], is_active=True)
 
-    service_ref = str(data["service"])
-    lookup = {"pk": service_ref} if service_ref.isdigit() else {"slug": service_ref}
-    service = get_object_or_404(Service, is_active=True, **lookup)
-
-    qualified_ids = ServiceQualification.objects.filter(
-        service=service, is_approved=True
-    ).values_list("rider_id", flat=True)
-
-    # Cheap bounding-box prefilter in SQL; exact distance only for survivors.
+    # Cheap bounding box in SQL; exact distance only for the survivors.
     lat_delta = radius_km / KM_PER_DEGREE
     lng_delta = radius_km / (KM_PER_DEGREE * max(math.cos(math.radians(lat)), 0.01))
 
-    candidates = RiderProfile.objects.filter(
-        pk__in=qualified_ids,
-        is_active=True,
-        is_verified=True,
-        user__rider_wallet__balance__gte=MINIMUM_WALLET_BALANCE,
-        location_updated_at__gte=timezone.now() - LOCATION_STALE_AFTER,
-        latitude__range=(lat - lat_delta, lat + lat_delta),
-        longitude__range=(lng - lng_delta, lng + lng_delta),
-    )[:MAX_NEARBY_CANDIDATES]
+    # dispatchable() already enforces: verified, active, online, fresh GPS, not restricted,
+    # licence valid, approved for the service, and not already on a job.
+    candidates = (
+        RiderProfile.objects.dispatchable(service=service)
+        .filter(
+            wallet__balance__gte=min_wallet_balance(),
+            current_lat__range=(lat - lat_delta, lat + lat_delta),
+            current_lng__range=(lng - lng_delta, lng + lng_delta),
+        )
+        .exclude(user=request.user)[:MAX_NEARBY_CANDIDATES]
+    )
 
     riders = []
     for rider in candidates:
-        distance = haversine_km(lat, lng, float(rider.latitude), float(rider.longitude))
-        if distance <= radius_km:
-            riders.append(
-                {
-                    "id": rider.pk,
-                    "full_name": rider.full_name,
-                    "latitude": float(rider.latitude),
-                    "longitude": float(rider.longitude),
-                    "distance_km": round(distance, 2),
-                    "location_updated_at": rider.location_updated_at,
-                }
-            )
+        distance = haversine_km(lat, lng, rider.current_lat, rider.current_lng)
+        if distance is not None and distance <= radius_km:
+            riders.append({
+                "id": str(rider.pk),
+                "full_name": rider.full_name,
+                "latitude": rider.current_lat,
+                "longitude": rider.current_lng,
+                "distance_km": distance,
+                "rating_average": rider.rating_average,
+                "location_updated_at": rider.location_updated_at,
+            })
     riders.sort(key=lambda r: r["distance_km"])
     riders = riders[:limit]
 
@@ -617,101 +631,234 @@ def get_nearby_riders(request):
 
 
 # ===========================================================================
-# 7. RIDER WALLET
+# 7. RIDER WALLET, WITHDRAWALS, TRANSACTION HISTORY
 # ===========================================================================
-def _serialize_transaction(txn):
-    return {
-        "id": txn.id,
-        "amount": money(txn.amount),
-        "type": txn.transaction_type,
-        "description": txn.description,
-        "timestamp": txn.created_at,
-    }
+ZERO = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, decimal_places=2))
+MAX_EXPORT_ROWS = 5000
 
 
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-@rider_required
-def get_rider_wallet(request, rider):
-    wallet = _get_wallet(request.user)
-    recent = WalletTransaction.objects.filter(wallet=wallet).order_by("-created_at")[:10]
-    return ok(
-        balance=money(wallet.balance),
-        minimum_required=money(MINIMUM_WALLET_BALANCE),
-        can_go_online=_can_go_online(rider, wallet),
-        transactions=[_serialize_transaction(t) for t in recent],
+class TransactionPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+def _sum(condition):
+    return Coalesce(
+        Sum("amount", filter=condition), ZERO,
+        output_field=DecimalField(max_digits=14, decimal_places=2),
     )
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 @rider_required
-def rider_transactions(request, rider):
-    """Paginated transaction history (?page=2)."""
-    wallet = _get_wallet(request.user)
-    queryset = WalletTransaction.objects.filter(wallet=wallet).order_by("-created_at")
-    paginator = PageNumberPagination()
-    page = paginator.paginate_queryset(queryset, request)
-    body = paginator.get_paginated_response([_serialize_transaction(t) for t in page]).data
-    return ok(**body)
+def get_rider_wallet(request, rider):
+    wallet = _get_wallet(rider)
+    recent = WalletTransaction.objects.filter(rider_wallet=wallet).order_by("-created_at")[:10]
+    return ok(
+        balance=money(wallet.balance),
+        currency=wallet.currency,
+        minimum_required=money(min_wallet_balance()),
+        can_go_online=_can_go_online(rider, wallet),
+        transactions=TransactionSerializer(recent, many=True).data,
+    )
 
 
-@api_view(["POST"])
+def _apply_filters(qs, f):
+    tz = timezone.get_current_timezone()
+    qs = qs.annotate(abs_amount=Abs("amount"))
+    if "type" in f:
+        qs = qs.filter(transaction_type=f["type"])
+    if "status" in f:
+        qs = qs.filter(status=f["status"])
+    if f.get("direction") == "credit":
+        qs = qs.filter(amount__gt=0)
+    elif f.get("direction") == "debit":
+        qs = qs.filter(amount__lt=0)
+    if "date_from" in f:
+        qs = qs.filter(created_at__gte=timezone.make_aware(datetime.combine(f["date_from"], dtime.min), tz))
+    if "date_to" in f:
+        end = datetime.combine(f["date_to"] + timedelta(days=1), dtime.min)
+        qs = qs.filter(created_at__lt=timezone.make_aware(end, tz))
+    if "min_amount" in f:
+        qs = qs.filter(abs_amount__gte=f["min_amount"])
+    if "max_amount" in f:
+        qs = qs.filter(abs_amount__lte=f["max_amount"])
+    if f.get("search"):
+        term = f["search"].strip()
+        qs = qs.filter(Q(reference__icontains=term) | Q(description__icontains=term))
+    # Amount ordering is by size, regardless of credit/debit sign.
+    return qs.order_by(f["ordering"].replace("amount", "abs_amount"), "-id")
+
+
+def _summary(qs):
+    agg = qs.filter(status="completed").aggregate(
+        total_in=_sum(Q(amount__gt=0)),
+        total_out=_sum(Q(amount__lt=0)),
+        count=Count("id"),
+    )
+    total_in, total_out = agg["total_in"], abs(agg["total_out"])
+    return {
+        "total_in": money(total_in),
+        "total_out": money(total_out),
+        "net": money(total_in - total_out),
+        "count": agg["count"],
+    }
+
+
+def _months_ago_start(months):
+    now = timezone.localtime()
+    year, month = now.year, now.month - (months - 1)
+    while month <= 0:
+        month += 12
+        year -= 1
+    return now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _monthly_trend(wallet, months=6):
+    rows = (
+        wallet.transactions.filter(status="completed", created_at__gte=_months_ago_start(months))
+        .annotate(month=TruncMonth("created_at"))
+        .values("month")
+        .annotate(money_in=_sum(Q(amount__gt=0)), money_out=_sum(Q(amount__lt=0)))
+        .order_by("month")
+    )
+    return [
+        {"month": r["month"].strftime("%Y-%m"), "money_in": money(r["money_in"]),
+         "money_out": money(abs(r["money_out"]))}
+        for r in rows
+    ]
+
+
+def _top_up_nudge(wallet):
+    minimum = min_wallet_balance()
+    low = wallet.balance < minimum
+    return {
+        "low_balance": low,
+        "message": (f"Your balance is below the GH₵{money(minimum)} needed to receive jobs. "
+                    "Top up to go online.") if low else None,
+    }
+
+
+def _csv_safe(value):
+    """Neutralise spreadsheet formula injection in free-text columns."""
+    s = "" if value is None else str(value)
+    return "'" + s if s[:1] in ("=", "+", "-", "@") else s
+
+
+class _Echo:
+    def write(self, value):
+        return value
+
+
+def _csv_response(qs, currency):
+    qs = qs[:MAX_EXPORT_ROWS]
+    writer = csv.writer(_Echo())
+
+    def rows():
+        yield writer.writerow([
+            "Date", "Reference", "Type", "Direction", "Status",
+            f"Amount ({currency})", f"Balance After ({currency})", "Description",
+        ])
+        for t in qs.iterator(chunk_size=1000):
+            yield writer.writerow([
+                timezone.localtime(t.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                _csv_safe(t.reference),
+                t.get_transaction_type_display(),
+                "credit" if t.amount >= 0 else "debit",
+                t.get_status_display(),
+                t.amount,
+                t.balance_after,
+                _csv_safe(t.description),
+            ])
+
+    resp = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
+    stamp = timezone.now().strftime("%Y%m%d")
+    resp["Content-Disposition"] = f'attachment; filename="wallet-statement-{stamp}.csv"'
+    resp["Cache-Control"] = "no-store"
+    return resp
+
+
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
+@throttle_classes([WalletReadThrottle])
 @rider_required
-def wallet_deposit(request, rider):
-    """
-    Start a wallet top-up. The wallet is NEVER credited here: funds are added
-    only after Paystack confirms payment (verify_payment or the webhook).
-    """
-    serializer = AmountSerializer(data=request.data)
-    if not serializer.is_valid():
-        return validation_fail(serializer)
-    return _start_wallet_deposit(request.user, rider, serializer.validated_data["amount"])
+def get_transaction_history(request, rider):
+    """Filterable, paginated wallet history with summary, trend and CSV export (?export=csv)."""
+    params = TransactionQuerySerializer(data=request.query_params)
+    if not params.is_valid():
+        return validation_fail(params)
+    filters = params.validated_data
+
+    wallet = _get_wallet(rider)
+    qs = _apply_filters(WalletTransaction.objects.filter(rider_wallet=wallet), filters)
+
+    if filters.get("export") == "csv":
+        logger.info("wallet statement export user=%s wallet=%s", request.user.pk, wallet.pk)
+        return _csv_response(qs, wallet.currency)
+
+    paginator = TransactionPagination()
+    page = paginator.paginate_queryset(qs, request)
+    payload = paginator.get_paginated_response(TransactionSerializer(page, many=True).data).data
+    return ok(
+        currency=wallet.currency,
+        balance=money(wallet.balance),
+        summary=_summary(qs),
+        monthly_trend=_monthly_trend(wallet),
+        insights=_top_up_nudge(wallet),
+        **payload,
+    )
+
+
+rider_transactions = get_transaction_history  # kept so existing URL names keep working
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@throttle_classes([PaymentThrottle])
 @rider_required
 def request_withdrawal(request, rider):
-    serializer = AmountSerializer(data=request.data)
+    serializer = WithdrawalRequestSerializer(data=request.data)
     if not serializer.is_valid():
         return validation_fail(serializer)
     amount = serializer.validated_data["amount"]
 
     if not rider.is_verified:
         return fail("Only verified riders can withdraw.", status.HTTP_403_FORBIDDEN)
-    if amount < MIN_WITHDRAWAL_AMOUNT:
-        return fail(f"Minimum withdrawal is {money(MIN_WITHDRAWAL_AMOUNT)}.")
+
+    accounts = RiderPayoutAccount.objects.filter(rider_profile=rider, is_deleted=False)
+    account_id = serializer.validated_data.get("payout_account_id")
+    account = (accounts.filter(pk=account_id) if account_id else accounts.filter(is_primary=True)).first()
+    if account is None:
+        return fail("Add a payout account before withdrawing.")
+
+    fee = SystemConfig.get_decimal("WITHDRAWAL_FEE", "0.00")
+    minimum = min_wallet_balance()
 
     with transaction.atomic():
-        wallet = _get_wallet(request.user, lock=True)  # row lock prevents double-spend
-        if wallet.balance < amount:
+        wallet = _get_wallet(rider, lock=True)  # row lock prevents double-spend
+        if wallet.balance < amount + fee:
             return fail("Insufficient wallet balance.")
-        if wallet.balance - amount < MINIMUM_WALLET_BALANCE:
+        if wallet.balance - amount - fee < minimum:
             return fail(
-                f"You must keep at least {money(MINIMUM_WALLET_BALANCE)} in your wallet. "
-                f"Maximum withdrawable: {money(max(wallet.balance - MINIMUM_WALLET_BALANCE, 0))}."
+                f"You must keep at least {money(minimum)} in your wallet. "
+                f"Maximum withdrawable: {money(max(wallet.balance - fee - minimum, 0))}."
             )
+        # Reserves the funds and writes the ledger line in one step; refunded if payout fails.
+        withdrawal, message = WithdrawalRequest.create_request(wallet, account, amount)
+        if withdrawal is None:
+            return fail(message)
 
-        # Funds are held immediately; refund the wallet if the payout is rejected.
-        wallet.balance -= amount
-        wallet.save()
-        withdrawal = WithdrawalRequest.objects.create(
-            rider_profile=rider, amount=amount, status="pending"
-        )
-        WalletTransaction.objects.create(
-            wallet=wallet,
-            amount=amount,
-            transaction_type="withdrawal",
-            description=f"Withdrawal request - GHS {money(amount)}",
-        )
-
-    logger.info("Withdrawal requested: rider_id=%s amount=%s", rider.id, amount)
+    wallet.refresh_from_db()
+    logger.info("Withdrawal requested: rider_id=%s reference=%s", rider.id, withdrawal.reference)
     return ok(
         "Withdrawal request submitted.",
         status.HTTP_201_CREATED,
-        withdrawal_id=withdrawal.id,
+        withdrawal_id=str(withdrawal.id),
+        reference=withdrawal.reference,
+        amount=money(withdrawal.amount),
+        fee=money(withdrawal.fee),
         new_balance=money(wallet.balance),
     )
 
@@ -731,6 +878,12 @@ class PaymentError(Exception):
     @property
     def retryable(self):
         return self.status_code >= 500
+
+
+class PaymentPending(PaymentError):
+    """The gateway has not finished processing; the client should poll again."""
+    def __init__(self):
+        super().__init__("Payment is still being processed.", status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
 def _paystack_request(method, path, **kwargs):
@@ -762,8 +915,10 @@ def _paystack_request(method, path, **kwargs):
 
     if response.status_code != 200 or not isinstance(body, dict) or not body.get("status"):
         logger.warning("Paystack rejected %s %s: HTTP %s", method, path, response.status_code)
+        if response.status_code == 404:
+            raise PaymentError("Transaction not found.", status.HTTP_404_NOT_FOUND)
         code = status.HTTP_502_BAD_GATEWAY if response.status_code >= 500 else status.HTTP_400_BAD_REQUEST
-        raise PaymentError("Payment verification was not successful.", code)
+        raise PaymentError("The payment service rejected the request.", code)
 
     return body.get("data") or {}
 
@@ -771,7 +926,7 @@ def _paystack_request(method, path, **kwargs):
 def _paystack_initialize(*, email, amount, reference, metadata):
     payload = {
         "email": email,
-        "amount": int((Decimal(amount) * 100).to_integral_value(ROUND_HALF_UP)),  # pesewas
+        "amount": int((Decimal(str(amount)) * 100).to_integral_value(ROUND_HALF_UP)),  # pesewas
         "currency": CURRENCY,
         "reference": reference,
         "metadata": metadata,
@@ -790,8 +945,11 @@ def _paystack_verify(reference):
     """Server-to-server verification. Never trust client-supplied amounts."""
     data = _paystack_request("GET", f"/transaction/verify/{quote(reference, safe='')}")
 
-    if data.get("status") != "success":
-        raise PaymentError("Payment has not been completed successfully.")
+    gateway_status = data.get("status")
+    if gateway_status in GATEWAY_PENDING_STATES:
+        raise PaymentPending()
+    if gateway_status != "success":
+        raise PaymentError("Payment was not completed.")
     if data.get("reference") != reference:
         raise PaymentError("Payment reference mismatch detected.", status.HTTP_409_CONFLICT)
     if data.get("currency") != CURRENCY:
@@ -808,24 +966,33 @@ def _paystack_amount(paystack_data):
 
 
 def _new_reference(prefix):
-    return f"{prefix}-{uuid.uuid4().hex.upper()}"
+    return f"{prefix}-{uuid.uuid4().hex.upper()}"  # 36 chars: fits Payment.reference (40)
 
 
 def _start_wallet_deposit(user, rider, amount):
+    if not user.email:
+        return fail("Add an email to your account before depositing.")
+    if amount < MIN_DEPOSIT:
+        return fail(f"Minimum deposit is {money(MIN_DEPOSIT)}.")
+    if amount > MAX_DEPOSIT:
+        return fail(f"Maximum deposit is {money(MAX_DEPOSIT)}.")
+
     reference = _new_reference("DEP")
     try:
         data = _paystack_initialize(
             email=user.email,
             amount=amount,
             reference=reference,
-            metadata={"purpose": PURPOSE_DEPOSIT, "rider_id": rider.pk},
+            metadata={"purpose": PURPOSE_DEPOSIT, "rider_id": str(rider.pk)},
         )
     except PaymentError as exc:
         return fail(exc.message, exc.status_code)
 
     return ok(
         "Complete the payment to fund your wallet.",
+        status.HTTP_201_CREATED,
         reference=reference,
+        amount=money(amount),
         authorization_url=data["authorization_url"],
         access_code=data.get("access_code"),
     )
@@ -853,74 +1020,81 @@ def _settle_reference(reference, requesting_user=None):
 
 
 def _settle_booking_payment(reference, paystack, requesting_user):
+    """Mark the booking paid (escrow). The rider is credited later by complete_booking()."""
     verified_amount = _paystack_amount(paystack)
     not_found = PaymentError("No booking found for this payment reference.", status.HTTP_404_NOT_FOUND)
 
     with transaction.atomic():  # any PaymentError raised inside rolls everything back
-        try:
-            booking = Booking.objects.select_for_update().get(payment_ref=reference)
-        except Booking.DoesNotExist:
-            raise not_found from None
-        if requesting_user is not None and booking.customer_id != requesting_user.id:
+        payment = Payment.objects.select_for_update().filter(reference=reference).first()
+        booking_qs = Booking.objects.select_for_update().select_related("customer")
+        if payment is not None:
+            booking = booking_qs.get(pk=payment.booking_id)
+        else:  # references issued before Payment rows existed
+            try:
+                booking = booking_qs.get(payment_ref=reference)
+            except Booking.DoesNotExist:
+                raise not_found from None
+
+        if requesting_user is not None and (
+            booking.customer is None or booking.customer.user_id != requesting_user.id
+        ):
             raise not_found
 
         booking_amount = Decimal(str(booking.total_fare))
+        summary = {
+            "booking_id": str(booking.id),
+            "booking_ref": booking.booking_ref,
+            "total_amount": money(booking_amount),
+        }
 
-        # Idempotency: already settled?
-        existing = WalletTransaction.objects.filter(reference=reference).first()
-        if existing is not None and existing.related_booking_id != booking.id:
-            raise PaymentError(
-                "Payment reference is associated with a different record. Please contact support.",
-                status.HTTP_409_CONFLICT,
+        if booking.payment_status in PAID_STATUSES:
+            if booking.payment_ref != reference:
+                # The customer paid twice (e.g. re-initialised checkout). Needs a manual refund.
+                logger.error("DUPLICATE PAYMENT booking_ref=%s extra_reference=%s",
+                             booking.booking_ref, reference)
+                SystemAlert.create_alert(
+                    "error", "Duplicate booking payment",
+                    f"Booking {booking.booking_ref} was paid twice. Extra reference: {reference}.",
+                    booking_ref=booking.booking_ref,
+                )
+            return {"created": False, "message": "Payment already verified and recorded.",
+                    "payment_status": booking.payment_status, **summary}
+
+        if booking.status == "cancelled":
+            logger.error("Payment received for cancelled booking %s ref=%s", booking.booking_ref, reference)
+            SystemAlert.create_alert(
+                "error", "Payment on cancelled booking",
+                f"Reference {reference} paid for cancelled booking {booking.booking_ref}. Refund required.",
+                booking_ref=booking.booking_ref,
             )
-        if existing is not None or booking.payment_status in PAID_STATUSES:
-            return {
-                "created": False,
-                "message": "Payment already verified and recorded.",
-                "booking_id": str(booking.id),
-                "booking_ref": booking.booking_ref,
-                "total_amount": money(booking_amount),
-                "payment_status": booking.payment_status,
-            }
+            return {"created": False,
+                    "message": "This booking was cancelled. Support will refund your payment.",
+                    "payment_status": booking.payment_status, **summary}
 
         if abs(verified_amount - booking_amount) > AMOUNT_TOLERANCE:
+            logger.error("Amount mismatch booking_ref=%s paid=%s expected=%s",
+                         booking.booking_ref, verified_amount, booking_amount)
             raise PaymentError("Payment amount does not match booking total.", status.HTTP_409_CONFLICT)
 
-        rider = booking.assigned_rider
-        if rider is None:
-            raise PaymentError("This booking has no assigned rider. Cannot record payment.")
+        # A re-initialised checkout replaces booking.payment_ref; honour whichever
+        # reference the customer actually paid.
+        method = CHANNEL_TO_METHOD.get(paystack.get("channel"), "debit")
+        Booking.objects.filter(pk=booking.pk).update(payment_ref=reference, payment_method=method)
 
-        commission_rate = Decimal(str(getattr(settings, "COMMISSION_RATE", COMMISSION_RATE)))
-        commission = (booking_amount * commission_rate).quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
-        rider_amount = (booking_amount - commission).quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
-
-        verified_ok, message = booking.confirm_payment_verified(
-            provider_ref=paystack.get("id", ""),
-            payment_ref=reference,
-        )
-        if not verified_ok:
+        if payment is None:
+            payment = Payment.objects.create(
+                booking=booking, provider=Payment.Provider.PAYSTACK, method=method,
+                reference=reference, amount=booking_amount,
+            )
+        raw = {k: paystack.get(k) for k in ("id", "status", "reference", "amount", "currency", "channel", "paid_at")}
+        confirmed, message = payment.mark_success(provider_ref=str(paystack.get("id", "")), raw=raw)
+        if not confirmed:
             raise PaymentError(message, status.HTTP_409_CONFLICT)
-
-        wallet = _get_wallet(rider.user, lock=True)
-        credited, message = wallet.credit_earnings(
-            rider_amount,
-            booking_ref=booking.booking_ref,
-            payment_verified=True,
-        )
-        if credited is None:
-            raise PaymentError(message, status.HTTP_409_CONFLICT)
+        booking.refresh_from_db(fields=["payment_status", "status"])
 
     logger.info("Booking payment settled: booking_ref=%s reference=%s", booking.booking_ref, reference)
-    return {
-        "created": True,
-        "message": "Payment verified successfully.",
-        "booking_id": str(booking.id),
-        "booking_ref": booking.booking_ref,
-        "total_amount": money(booking_amount),
-        "platform_commission": money(commission),
-        "rider_amount": money(rider_amount),
-        "payment_status": booking.payment_status,
-    }
+    return {"created": True, "message": "Payment verified successfully.",
+            "payment_status": booking.payment_status, "booking_status": booking.status, **summary}
 
 
 def _settle_wallet_deposit(reference, paystack, metadata, requesting_user):
@@ -932,25 +1106,23 @@ def _settle_wallet_deposit(reference, paystack, metadata, requesting_user):
     with transaction.atomic():
         try:
             rider = RiderProfile.objects.select_related("user").get(pk=metadata.get("rider_id"))
-        except (RiderProfile.DoesNotExist, ValueError, TypeError):
+        except (RiderProfile.DoesNotExist, ValueError, TypeError, DjangoValidationError):
             raise not_found from None
         if requesting_user is not None and rider.user_id != requesting_user.id:
             raise not_found
 
-        wallet = _get_wallet(rider.user, lock=True)  # serialises concurrent settlements
-        _, created = WalletTransaction.objects.get_or_create(
-            reference=reference,  # unique: a payment can only ever credit once
-            defaults={
-                "wallet": wallet,
-                "amount": amount,
-                "transaction_type": "deposit",
-                "description": f"Wallet deposit - GHS {money(amount)}",
-            },
-        )
-        if created:
-            wallet.balance += amount
-            wallet.save()
+        wallet = _get_wallet(rider, lock=True)  # serialises concurrent settlements
+        already_recorded = WalletTransaction.objects.filter(reference=reference).exists()
+        if not already_recorded:
+            # Writes balance + ledger line together; the unique reference makes it idempotent.
+            deposited, message = wallet.deposit(
+                amount, reference=reference, description=f"Wallet deposit - GHS {money(amount)}"
+            )
+            if not deposited:
+                raise PaymentError(message, status.HTTP_409_CONFLICT)
+        wallet.refresh_from_db()
 
+    created = not already_recorded
     if created:
         logger.info("Wallet deposit settled: rider_id=%s reference=%s", rider.id, reference)
     return {
@@ -963,63 +1135,12 @@ def _settle_wallet_deposit(reference, paystack, metadata, requesting_user):
     }
 
 
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def initialize_payment(request):
-    """Start a Paystack checkout for a booking or a wallet deposit."""
-    serializer = InitializePaymentSerializer(data=request.data)
-    if not serializer.is_valid():
-        return validation_fail(serializer)
-    data = serializer.validated_data
-
-    if data["purpose"] == PURPOSE_DEPOSIT:
-        rider = RiderProfile.objects.filter(user=request.user).first()
-        if rider is None:
-            return fail("Only riders can fund a wallet.", status.HTTP_403_FORBIDDEN)
-        return _start_wallet_deposit(request.user, rider, data["amount"])
-
-    # Booking payment: the amount always comes from the server, never the client.
+def _settle_response(reference, user):
     try:
-        booking = Booking.objects.get(booking_ref=data["booking_ref"], customer=request.user)
-    except Booking.DoesNotExist:
-        return fail("Booking not found.", status.HTTP_404_NOT_FOUND)
-    if booking.payment_status in PAID_STATUSES:
-        return fail("This booking has already been paid.", status.HTTP_409_CONFLICT)
-
-    reference = _new_reference("BKG")
-    try:
-        checkout = _paystack_initialize(
-            email=request.user.email,
-            amount=Decimal(str(booking.total_fare)),
-            reference=reference,
-            metadata={"purpose": PURPOSE_BOOKING, "booking_ref": booking.booking_ref},
-        )
-    except PaymentError as exc:
-        return fail(exc.message, exc.status_code)
-
-    booking.payment_ref = reference
-    booking.save(update_fields=["payment_ref"])
-
-    return ok(
-        "Complete the payment to confirm your booking.",
-        reference=reference,
-        authorization_url=checkout["authorization_url"],
-        access_code=checkout.get("access_code"),
-    )
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def verify_payment(request):
-    """Called by the app after checkout. Safe to call repeatedly."""
-    serializer = VerifyPaymentSerializer(data=request.data)
-    if not serializer.is_valid():
-        return validation_fail(serializer)
-
-    try:
-        result = _settle_reference(
-            serializer.validated_data["reference"], requesting_user=request.user
-        )
+        result = _settle_reference(reference, requesting_user=user)
+    except PaymentPending:
+        return ok("Payment is still being processed.", status.HTTP_202_ACCEPTED,
+                  payment_status="pending", retry_after=POLL_INTERVAL)
     except PaymentError as exc:
         return fail(exc.message, exc.status_code)
 
@@ -1029,13 +1150,133 @@ def verify_payment(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([PaymentThrottle])
+@rider_required
+def wallet_deposit(request, rider):
+    """
+    Start a wallet top-up. The wallet is NEVER credited here: funds are added only
+    after Paystack confirms payment (verify_payment, deposit_verify or the webhook).
+    """
+    serializer = AmountSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+    return _start_wallet_deposit(request.user, rider, serializer.validated_data["amount"])
+
+
+deposit_initiate = wallet_deposit  # one deposit pipeline; old name kept for URL compatibility
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([PaymentThrottle])
+def initialize_payment(request):
+    """Start a Paystack checkout for a booking or a wallet deposit."""
+    serializer = InitializePaymentSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+    data = serializer.validated_data
+
+    if data["purpose"] == PURPOSE_DEPOSIT:
+        rider = RiderProfile.objects.filter(user=request.user, deleted_at__isnull=True).first()
+        if rider is None:
+            return fail("Only riders can fund a wallet.", status.HTTP_403_FORBIDDEN)
+        return _start_wallet_deposit(request.user, rider, data["amount"])
+
+    # Booking payment: the amount always comes from the server, never the client.
+    try:
+        booking = Booking.objects.get(booking_ref=data["booking_ref"], customer__user=request.user)
+    except Booking.DoesNotExist:
+        return fail("Booking not found.", status.HTTP_404_NOT_FOUND)
+    if booking.payment_status in PAID_STATUSES:
+        return fail("This booking has already been paid.", status.HTTP_409_CONFLICT)
+    if booking.status in ("completed", "cancelled"):
+        return fail("This booking can no longer be paid.", status.HTTP_409_CONFLICT)
+    if booking.payment_method in ("cash", "invoice", "wallet"):
+        return fail("This booking is not payable online.", status.HTTP_409_CONFLICT)
+    if booking.total_fare <= 0:
+        return fail("This booking has nothing to pay.")
+    if not request.user.email:
+        return fail("Add an email to your account before paying.")
+
+    amount = Decimal(str(booking.total_fare))
+    reference = _new_reference("BKG")
+    try:
+        checkout = _paystack_initialize(
+            email=request.user.email,
+            amount=amount,
+            reference=reference,
+            metadata={"purpose": PURPOSE_BOOKING, "booking_ref": booking.booking_ref},
+        )
+    except PaymentError as exc:
+        return fail(exc.message, exc.status_code)
+
+    with transaction.atomic():
+        Payment.objects.create(
+            booking=booking, provider=Payment.Provider.PAYSTACK, reference=reference, amount=amount,
+        )
+        booking.payment_ref = reference
+        booking.save(update_fields=["payment_ref"])
+
+    return ok(
+        "Complete the payment to confirm your booking.",
+        status.HTTP_201_CREATED,
+        reference=reference,
+        amount=money(amount),
+        authorization_url=checkout["authorization_url"],
+        access_code=checkout.get("access_code"),
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([PaymentThrottle])
+def verify_payment(request):
+    """Called by the app after checkout. Safe to call repeatedly."""
+    serializer = VerifyPaymentSerializer(data=request.data)
+    if not serializer.is_valid():
+        return validation_fail(serializer)
+    return _settle_response(serializer.validated_data["reference"], request.user)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([PaymentThrottle])
+def deposit_verify(request, reference):
+    """Polling endpoint: GET /deposits/verify/<reference>/. Returns 202 while pending."""
+    if not REFERENCE_PATTERN.match(reference):
+        return fail("Invalid reference format.")
+    return _settle_response(reference, request.user)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([WalletReadThrottle])
+@rider_required
+def deposit_history(request, rider):
+    """Completed deposits for the current rider, newest first (?status=, ?page=)."""
+    wallet = _get_wallet(rider)
+    qs = WalletTransaction.objects.filter(rider_wallet=wallet, transaction_type="deposit")
+    status_filter = request.query_params.get("status")
+    if status_filter:
+        qs = qs.filter(status=status_filter.lower())
+    qs = qs.order_by("-created_at")
+
+    paginator = TransactionPagination()
+    page = paginator.paginate_queryset(qs, request)
+    payload = paginator.get_paginated_response(TransactionSerializer(page, many=True).data).data
+    return ok("Deposit history retrieved.", **payload)
+
+
+@api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
 @throttle_classes([])
 def paystack_webhook(request):
     """
-    Server-to-server notification from Paystack. Settles payments even when the
-    user closes the app before verify_payment is called.
+    Server-to-server notification from Paystack. Settles payments even when the user
+    closes the app before verify_payment is called. The payload is never trusted for
+    amounts: every settlement re-verifies the reference with Paystack.
     """
     secret = getattr(settings, "PAYSTACK_SECRET_KEY", "")
     raw_body = request.body  # read BEFORE touching request.data
@@ -1050,595 +1291,29 @@ def paystack_webhook(request):
         event = json.loads(raw_body)
     except ValueError:
         return Response(status=status.HTTP_400_BAD_REQUEST)
+    if not isinstance(event, dict):
+        return Response(status=status.HTTP_400_BAD_REQUEST)
 
     if event.get("event") == "charge.success":
-        reference = (event.get("data") or {}).get("reference")
+        event_data = event.get("data") or {}
+        reference = event_data.get("reference")
         if isinstance(reference, str) and reference:
+            event_id = str(event_data.get("id") or reference)[:120]
+            record, created = WebhookEvent.register("paystack", event_id, event, event_type="charge.success")
+            if not created and record.processed:
+                return Response(status=status.HTTP_200_OK)  # duplicate delivery
+
             try:
                 _settle_reference(reference)
+                record.mark_processed()
             except PaymentError as exc:
+                record.mark_processed(error=exc.message)
                 if exc.retryable:
                     logger.error("Webhook settlement failed (will retry) ref=%s: %s", reference, exc.message)
                     return Response(status=status.HTTP_503_SERVICE_UNAVAILABLE)
-                # Non-retryable (unknown reference, no rider assigned, ...): acknowledge so
-                # Paystack stops retrying, and log it for reconciliation.
+                # Non-retryable (unknown reference, amount mismatch, ...): acknowledge so Paystack
+                # stops retrying, and keep the failed WebhookEvent row for reconciliation.
                 logger.warning("Webhook payment not settled ref=%s: %s", reference, exc.message)
 
     return Response(status=status.HTTP_200_OK)
-
-
-
-
-# ——— Transaction History View & Helpers ———
-import csv
-import logging
-from datetime import datetime, time, timedelta
-from decimal import Decimal
-from django.db.models import Count, DecimalField, Q, Sum, Value
-from django.db.models.functions import Coalesce, TruncMonth
-from django.http import StreamingHttpResponse
-from django.utils import timezone
-from rest_framework.decorators import api_view, permission_classes, throttle_classes
-from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework.throttling import UserRateThrottle
-
-from .models import RiderWallet, WalletTransaction
-from .serializers import TransactionSerializer, TransactionQuerySerializer
-from .wallet_services import get_wallet
-
-logger = logging.getLogger(__name__)
-
-ZERO = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, decimal_places=2))
-LOW_BALANCE_THRESHOLD = Decimal("10.00")
-MAX_EXPORT_ROWS = 5000
-
-
-class WalletReadThrottle(UserRateThrottle):
-    scope = "wallet_read"
-
-
-class TransactionPagination(PageNumberPagination):
-    page_size = 20
-    page_size_query_param = "page_size"
-    max_page_size = 100
-
-
-def _apply_filters(qs, f):
-    tz = timezone.get_current_timezone()
-    if "type" in f:
-        qs = qs.filter(type=f["type"])
-    if "status" in f:
-        qs = qs.filter(status=f["status"])
-    if "direction" in f:
-        qs = qs.filter(direction=f["direction"])
-    if "date_from" in f:
-        qs = qs.filter(created_at__gte=timezone.make_aware(datetime.combine(f["date_from"], time.min), tz))
-    if "date_to" in f:
-        end = datetime.combine(f["date_to"] + timedelta(days=1), time.min)
-        qs = qs.filter(created_at__lt=timezone.make_aware(end, tz))
-    if "min_amount" in f:
-        qs = qs.filter(amount__gte=f["min_amount"])
-    if "max_amount" in f:
-        qs = qs.filter(amount__lte=f["max_amount"])
-    if f.get("search"):
-        term = f["search"].strip()
-        qs = qs.filter(Q(reference__icontains=term) | Q(description__icontains=term))
-    return qs.order_by(f["ordering"], "-id")
-
-
-def _summary(qs):
-    agg = qs.filter(status=WalletTransaction.Status.SUCCESS).aggregate(
-        total_in=Coalesce(Sum("amount", filter=Q(direction="credit")), ZERO),
-        total_out=Coalesce(Sum("amount", filter=Q(direction="debit")), ZERO),
-        count=Count("id"),
-    )
-    agg["net"] = agg["total_in"] - agg["total_out"]
-    return agg
-
-
-def _monthly_trend(wallet, months=6):
-    since = (timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-             - timedelta(days=31 * (months - 1)))
-    rows = (
-        wallet.transactions.filter(status=WalletTransaction.Status.SUCCESS, created_at__gte=since)
-        .annotate(month=TruncMonth("created_at"))
-        .values("month")
-        .annotate(
-            money_in=Coalesce(Sum("amount", filter=Q(direction="credit")), ZERO),
-            money_out=Coalesce(Sum("amount", filter=Q(direction="debit")), ZERO),
-        )
-        .order_by("month")
-    )
-    return [
-        {"month": r["month"].strftime("%Y-%m"), "money_in": r["money_in"], "money_out": r["money_out"]}
-        for r in rows
-    ]
-
-
-def _top_up_nudge(wallet):
-    low = wallet.balance < LOW_BALANCE_THRESHOLD
-    return {
-        "low_balance": low,
-        "message": "Your balance is running low. Top up to keep riding without interruption." if low else None,
-    }
-
-
-def _csv_safe(value):
-    s = "" if value is None else str(value)
-    return "'" + s if s[:1] in ("=", "+", "-", "@") else s
-
-
-class _Echo:
-    def write(self, value):
-        return value
-
-
-def _csv_response(qs, currency):
-    qs = qs[:MAX_EXPORT_ROWS]
-    writer = csv.writer(_Echo())
-
-    def rows():
-        yield writer.writerow(
-            ["Date", "Reference", "Type", "Direction", "Status", f"Amount ({currency})",
-             f"Balance After ({currency})", "Description"]
-        )
-        for t in qs.iterator(chunk_size=1000):
-            yield writer.writerow([
-                timezone.localtime(t.created_at).strftime("%Y-%m-%d %H:%M:%S"),
-                _csv_safe(t.reference), t.get_type_display(), t.direction,
-                t.get_status_display(), t.amount, t.balance_after if t.balance_after is not None else "",
-                _csv_safe(t.description),
-            ])
-
-    resp = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
-    stamp = timezone.now().strftime("%Y%m%d")
-    resp["Content-Disposition"] = f'attachment; filename="wallet-statement-{stamp}.csv"'
-    resp["Cache-Control"] = "no-store"
-    return resp
-
-
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-@throttle_classes([WalletReadThrottle])
-def get_transaction_history(request):
-    params = TransactionQuerySerializer(data=request.query_params)
-    if not params.is_valid():
-        return Response({"error": "Invalid query parameters", "details": params.errors}, status=400)
-    filters = params.validated_data
-
-    wallet = get_wallet(request.user)
-    currency = getattr(wallet, "currency", "GHS")
-    qs = _apply_filters(wallet.transactions.all(), filters)
-
-    try:
-        if filters.get("export") == "csv":
-            logger.info("wallet statement export user=%s wallet=%s", request.user.pk, wallet.pk)
-            return _csv_response(qs, currency)
-
-        paginator = TransactionPagination()
-        page = paginator.paginate_queryset(qs, request)
-        payload = paginator.get_paginated_response(
-            TransactionSerializer(page, many=True).data
-        ).data
-
-        payload.update({
-            "currency": currency,
-            "balance": wallet.balance,
-            "summary": _summary(qs),
-            "monthly_trend": _monthly_trend(wallet),
-            "insights": _top_up_nudge(wallet),
-        })
-        return Response(payload)
-
-    except Exception:
-        logger.exception("transaction history failed user=%s", request.user.pk)
-        return Response({"error": "Unable to load transactions. Please try again."}, status=500)
-
-
-
-
-import logging
-import re
-from functools import wraps
-
-import requests
-from django.conf import settings
-from django.core.cache import cache
-from django.db import transaction
-from django.db.models import F
-from django.http import JsonResponse
-from django.views.decorators.cache import never_cache
-from django.views.decorators.http import require_GET
-
-from .models import WalletTransaction
-
-logger = logging.getLogger(__name__)
-
-# — Config ——————————————————————
-REFERENCE_RE = re.compile(r"^[A-Za-z0-9_.\-]{6,100}$")
-RATE_LIMIT = 20          # max verify calls per user
-RATE_WINDOW = 60         # ...per this many seconds
-GATEWAY_TIMEOUT = 10     # seconds
-POLL_INTERVAL = 5        # hint for clients polling a pending txn
-GATEWAY_URL = "https://api.paystack.co/transaction/verify/{ref}"
-
-
-# — Helpers —————————————————————
-def error(message, status, **extra):
-    return JsonResponse({"success": False, "error": message, **extra}, status=status)
-
-
-def json_login_required(view):
-    """Like login_required, but returns JSON 401 instead of redirecting."""
-    @wraps(view)
-    def wrapper(request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return error("Authentication required", 401)
-        return view(request, *args, **kwargs)
-    return wrapper
-
-
-def is_rate_limited(user_id):
-    key = f"deposit_verify:{user_id}"
-    cache.add(key, 0, RATE_WINDOW)
-    try:
-        return cache.incr(key) > RATE_LIMIT
-    except ValueError:
-        cache.set(key, 1, RATE_WINDOW)
-        return False
-
-
-def query_gateway(txn):
-    """Ask Paystack for the real status of a pending transaction."""
-    try:
-        resp = requests.get(
-            GATEWAY_URL.format(ref=txn.reference),
-            headers={"Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}"},
-            timeout=GATEWAY_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json().get("data", {})
-    except (requests.RequestException, ValueError):
-        logger.warning("Gateway verify failed for %s", txn.reference, exc_info=True)
-        return None
-
-    gateway_status = data.get("status")
-    if gateway_status == "success":
-        expected = int(txn.amount * 100)  # convert to kobo
-        if data.get("amount") != expected:
-            logger.error(
-                "Amount mismatch for %s: expected %s got %s",
-                txn.reference, expected, data.get("amount"),
-            )
-            return "failed"
-        return "success"
-    if gateway_status in ("failed", "abandoned", "reversed"):
-        return "failed"
-    return None
-
-
-def settle_transaction(reference, outcome):
-    """Apply a gateway outcome exactly once — prevents double-crediting."""
-    with transaction.atomic():
-        txn = WalletTransaction.objects.select_for_update().get(reference=reference)
-
-        if txn.status != WalletTransaction.Status.PENDING:
-            return txn  # already settled
-
-        if outcome == "success":
-            txn.status = WalletTransaction.Status.SUCCESS
-            # Credit wallet atomically
-            wallet_model = txn.wallet.__class__
-            wallet_model.objects.filter(pk=txn.wallet_id).update(
-                balance=F("balance") + txn.amount
-            )
-        else:
-            txn.status = WalletTransaction.Status.FAILED
-
-        txn.save(update_fields=["status"])
-        logger.info("Settled %s as %s", reference, outcome)
-        return txn
-
-
-def serialize(txn):
-    status = txn.status
-    return {
-        "reference": txn.reference,
-        "status": txn.get_status_display(),
-        "status_code": status,
-        "transaction_type": getattr(txn, "type", None) or getattr(txn, "transaction_type", ""),
-        "amount": str(txn.amount),
-        "verified": status == WalletTransaction.Status.SUCCESS,
-        "is_final": status != WalletTransaction.Status.PENDING,
-        "created_at": txn.created_at.isoformat() if hasattr(txn, "created_at") else None,
-    }
-
-
-# — View —————————————————————
-@require_GET
-@never_cache
-@json_login_required
-def deposit_verify(request, reference):
-    """
-    Verify a deposit by reference.
-    
-    - Auth required
-    - Rate limited
-    - PENDING → checks Paystack, updates DB, credits wallet atomically
-    - Final states return straight from DB
-    """
-    if not REFERENCE_RE.match(reference):
-        return error("Invalid reference format", 400)
-
-    if is_rate_limited(request.user.pk):
-        return error("Too many requests. Slow down.", 429, retry_after=RATE_WINDOW)
-
-    qs = WalletTransaction.objects.select_related("wallet")
-    # Ownership check — user can only see their own transactions
-    if not request.user.is_staff:
-        qs = qs.filter(wallet__rider__user=request.user)  # adjust filter to match YOUR model
-
-    try:
-        txn = qs.get(reference=reference)
-    except WalletTransaction.DoesNotExist:
-        return error("Transaction not found", 404, reference=reference)
-
-    message = "Transaction found"
-
-    if txn.status == WalletTransaction.Status.PENDING:
-        outcome = query_gateway(txn)
-        if outcome:
-            txn = settle_transaction(reference, outcome)
-            message = (
-                "Deposit confirmed and wallet credited"
-                if txn.status == WalletTransaction.Status.SUCCESS
-                else "Deposit failed"
-            )
-        else:
-            message = "Payment still pending"
-
-    payload = {"success": True, "message": message, **serialize(txn)}
-    if not payload["is_final"]:
-        payload["retry_after"] = POLL_INTERVAL
-
-    return JsonResponse(payload)
-
-
-
-
-
-# ==========================================
-# DEPOSIT INITIATE — Start a Wallet Deposit
-# ==========================================
-import json
-import uuid
-from decimal import Decimal, InvalidOperation
-
-import requests
-from django.conf import settings
-from django.core.cache import cache
-from django.http import JsonResponse
-from django.views.decorators.cache import never_cache
-from django.views.decorators.http import require_POST
-
-from .models import RiderWallet, WalletTransaction  # ✅ Adjusted to YOUR model names
-
-MIN_DEPOSIT = Decimal(getattr(settings, "MIN_DEPOSIT", "100"))
-MAX_DEPOSIT = Decimal(getattr(settings, "MAX_DEPOSIT", "1000000"))
-INIT_LIMIT = 5            # initiations per user...
-INIT_WINDOW = 60          # ...per minute
-IDEMPOTENCY_TTL = 60 * 30  # 30 minutes
-GATEWAY_INIT_URL = "https://api.paystack.co/transaction/initialize"
-
-
-def throttled(scope, user_id, limit, window):
-    key = f"{scope}:{user_id}"
-    cache.add(key, 0, window)
-    try:
-        return cache.incr(key) > limit
-    except ValueError:
-        cache.set(key, 1, window)
-        return False
-
-
-def parse_amount(raw):
-    """Return a valid Decimal amount or raise ValueError with a user-facing message."""
-    if raw is None or isinstance(raw, bool):
-        raise ValueError("Amount is required")
-    try:
-        amount = Decimal(str(raw).strip())
-    except (InvalidOperation, ValueError):
-        raise ValueError("Amount must be a number")
-    if not amount.is_finite():
-        raise ValueError("Amount must be a number")
-    if amount.as_tuple().exponent < -2:
-        raise ValueError("Amount cannot have more than 2 decimal places")
-    if amount < MIN_DEPOSIT:
-        raise ValueError(f"Minimum deposit is {MIN_DEPOSIT}")
-    if amount > MAX_DEPOSIT:
-        raise ValueError(f"Maximum deposit is {MAX_DEPOSIT}")
-    return amount.quantize(Decimal("0.01"))
-
-
-def generate_reference():
-    return f"DEP-{uuid.uuid4().hex[:20].upper()}"
-
-
-def init_gateway_payment(user, txn, callback_url):
-    """Create a Paystack checkout session. Returns authorization_url + access_code."""
-    resp = requests.post(
-        GATEWAY_INIT_URL,
-        headers={"Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}"},
-        json={
-            "email": user.email,
-            "amount": int(txn.amount * 100),  # convert to kobo
-            "reference": txn.reference,
-            "callback_url": callback_url,
-            "metadata": {"user_id": user.pk, "purpose": "wallet_deposit"},
-        },
-        timeout=GATEWAY_TIMEOUT,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    if not body.get("status"):
-        raise ValueError(body.get("message", "Gateway rejected request"))
-    return body["data"]
-
-
-@require_POST
-@never_cache
-@json_login_required
-def deposit_initiate(request):
-    """
-    Start a wallet deposit.
-    
-    Request Body: {"amount": "5000.00"}
-    Headers: Idempotency-Key: <optional-prevent-duplicate-taps>
-    
-    Flow:
-    1. Creates PENDING transaction in DB
-    2. Calls Paystack to get authorization_url
-    3. Returns URL for user to complete payment
-    """
-    user = request.user
-
-    if not user.email:
-        return error("Add an email to your account before depositing", 400)
-
-    # Rate limit — prevent spam
-    if throttled("deposit_init", user.pk, INIT_LIMIT, INIT_WINDOW):
-        return error("Too many deposit attempts. Try again shortly.", 429, retry_after=INIT_WINDOW)
-
-    # Parse request body
-    try:
-        body = json.loads(request.body or b"{}")
-        if not isinstance(body, dict):
-            raise ValueError
-    except ValueError:
-        return error("Invalid JSON body", 400)
-
-    # Validate amount
-    try:
-        amount = parse_amount(body.get("amount"))
-    except ValueError as exc:
-        return error(str(exc), 400)
-
-    # Idempotency — same key = same response (prevents double-submit)
-    idem_header = request.headers.get("Idempotency-Key", "").strip()
-    idem_key = f"deposit_idem:{user.pk}:{idem_header[:100]}" if idem_header else None
-    if idem_key:
-        cached = cache.get(idem_key)
-        if cached:
-            return JsonResponse({**cached, "idempotent_replay": True})
-
-    # Get user's wallet — adjust filter to match YOUR model!
-    try:
-        wallet = RiderWallet.objects.get(rider__user=user)
-    except RiderWallet.DoesNotExist:
-        return error("Wallet not found", 404)
-
-    # Create PENDING transaction FIRST — reference always exists
-    txn = WalletTransaction.objects.create(
-        wallet=wallet,
-        type="deposit",
-        amount=amount,
-        status=WalletTransaction.Status.PENDING,
-        reference=generate_reference(),
-    )
-
-    # Build callback URL — Paystack redirects here after payment
-    callback_url = getattr(
-        settings, "DEPOSIT_CALLBACK_URL", None
-    ) or request.build_absolute_uri("/deposit/callback/")
-
-    # Initialize Paystack payment page
-    try:
-        data = init_gateway_payment(user, txn, callback_url)
-    except (requests.RequestException, ValueError, KeyError):
-        logger.exception("Gateway init failed for %s", txn.reference)
-        txn.status = WalletTransaction.Status.FAILED
-        txn.save(update_fields=["status"])
-        return error("Could not start payment. Please try again.", 502)
-
-    # Success — return payment page URL
-    payload = {
-        "success": True,
-        "message": "Deposit initiated",
-        "reference": txn.reference,
-        "amount": str(txn.amount),
-        "status": txn.get_status_display(),
-        "authorization_url": data["authorization_url"],
-        "access_code": data.get("access_code"),
-    }
-
-    # Cache idempotent response
-    if idem_key:
-        cache.set(idem_key, payload, IDEMPOTENCY_TTL)
-
-    logger.info("Deposit initiated %s user=%s amount=%s", txn.reference, user.pk, amount)
-    return JsonResponse(payload, status=201)
-
-
-
-
-
-@json_login_required
-def deposit_history(request):
-    """
-    Paginated deposit history for the current user.
-    Returns: reference, amount, status, created date — newest first.
-    
-    Query Params:
-        page: Page number (default: 1)
-        status: Optional filter — 'pending', 'success', 'failed'
-    """
-    # Base query — only THIS user's deposits
-    deposits = WalletTransaction.objects.filter(
-        wallet__rider__user=request.user,
-        type="deposit"
-    )
-
-    # Optional: Filter by status if provided
-    status_filter = request.GET.get("status")
-    if status_filter:
-        deposits = deposits.filter(status=status_filter.lower())
-
-    # Sort: newest first
-    deposits = deposits.order_by("-created_at")
-
-    # Pagination — 20 per page
-    page_num = request.GET.get("page", 1)
-    paginator = Paginator(deposits, 20)
-
-    try:
-        page = paginator.page(page_num)
-    except PageNotAnInteger:
-        page = paginator.page(1)
-    except EmptyPage:
-        page = paginator.page(paginator.num_pages)
-
-    return JsonResponse({
-        "success": True,
-        "message": "Deposit history retrieved",
-        "total_count": paginator.count,
-        "total_pages": paginator.num_pages,
-        "current_page": page.number,
-        "per_page": 20,
-        "has_next": page.has_next(),
-        "has_previous": page.has_previous(),
-        "results": [
-            {
-                "reference": txn.reference,
-                "amount": str(txn.amount),
-                "status": txn.get_status_display(),
-                "status_code": txn.status,
-                "created_at": txn.created_at.isoformat(),
-                "is_verified": txn.status == WalletTransaction.Status.SUCCESS
-            }
-            for txn in page.object_list
-        ]
-    })
-
 
