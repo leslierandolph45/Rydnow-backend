@@ -145,10 +145,6 @@ class RegistrationSerializer(_SignupBase):
         )
         return user    
 
-        if CustomerProfile.objects.filter(phone=phone).exists():
-            raise serializers.ValidationError("This phonenumber is already registered.") 
-        return user
-
 
 class RiderRegistrationSerializer(_SignupBase):
     """Rider sign-up: creates User -> RiderProfile -> RiderWallet. save() returns the RiderProfile."""
