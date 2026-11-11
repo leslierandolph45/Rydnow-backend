@@ -847,6 +847,27 @@ class LoyaltyTransaction(models.Model):
 # =====================================================================
 # 3. RIDERS
 # =====================================================================
+# No 0/0/1/I/L so codes can be read out over a phone call or shared by SMS
+RIDER_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ234567890"
+RIDER_CODE_PREFIX = "RYD-"
+RIDER_CODE_LENGTH = 8
+RIDER_CODE_MAX_ATTEMPTS = 8
+
+
+def generate_rider_code():
+    body = "".join(secrets.choice(RIDER_CODE_ALPHABET) for _ in range (RIDER_CODE_LENGTH))
+    return f"{RIDER_CODE_PREFIX}{body}"   #12 chard, fits_length=16
+
+def rider_profile_photo_path(instance, filename):
+    ext = filename.rsplit(".",1)[-1].lower()if "." in filename else "jpg"
+    return f"riders/{instance.public_id}/photo/{uuid.uuid4().hex}.{ext}"
+
+class Gender(models.TextChoices):
+    MALE = "male", "Male"
+    FEMALE = "female", "Female"      # NOTE: was "famale" — run a data migration for old rows
+    OTHER = "other", "Other"
+
+
 class VerificationStatus(models.TextChoices):
     PENDING = "pending", "Pending Documents"
     UNDER_REVIEW = "under_review", "Under Review"
@@ -854,11 +875,6 @@ class VerificationStatus(models.TextChoices):
     REJECTED = "rejected", "Rejected"
     SUSPENDED = "suspended", "Suspended"
 
-
-class Gender(models.TextChoices):
-    MALE = "male", "Male"
-    FEMALE = "female", "Female"      # NOTE: was "famale" — run a data migration for old rows
-    OTHER = "other", "Other"
 
 
 class RiderTier(models.TextChoices):
@@ -869,15 +885,26 @@ class RiderTier(models.TextChoices):
 
 
 class RiderProfileQuerySet(models.QuerySet):
+    def not_deleted(self):
+        return self.filter(deleted_at__isnull=True)
+
     def active(self):
-        return self.filter(is_active=True, deleted_at__isnull=True)
+        return self.not_deleted().filter(is_active=True)
 
     def verified(self):
         return self.filter(verification_status=VerificationStatus.VERIFIED)
 
+    def not_suspended(self):
+        now = timezone.now()
+        return self.filter(Q(suspended_at__isnull=True) | Q(suspended_until__lte=now))
+    
+    def not_restricted(self):
+        now = timezone.now()
+        return self.filter(Q(is_restricted=False) | Q (restricted_until__lte=now))
+
     def dispatchable(self, service=None, max_location_age_seconds=LOCATION_STALE_SECONDS, exclude_ids=None):
         """
-        Riders who may receive an offer RIGHT NOW: verified, online, not restricted/suspended,
+        Riders who may receive an offer RIGHT NOW: active, verified, online, not restricted/suspended,
         licence valid, fresh GPS, qualified for the service, and not already on a job.
         """
         now = timezone.now()
@@ -911,28 +938,25 @@ class RiderProfileQuerySet(models.QuerySet):
         out.sort(key=lambda x: x[1])
         return out[:limit]
 
-
-def rider_profile_photo_path(instance, filename):
-    ext = os.path.splitext(filename)[1].lower() or ".jpg"
-    return f"rider_photos/{uuid.uuid4().hex}{ext}"
-
-
 class RiderProfile(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     user = models.OneToOneField(AUTH_USER, on_delete=models.CASCADE, related_name="rider_profile")
 
-    # Unique code: riders share it to refer other riders, and customers/agents can use it for payment lookup.
+    # Geneated automatically in save(). Rider share it to refer other rider to join;
+    # Customers/Agents can use it for payment look up
     rider_code = models.CharField(max_length=16, unique=True, blank=True, editable=False)
-    referred_by = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL,
-                                    related_name="referred_riders")
-    zone = models.ForeignKey(Zone, null=True, blank=True, on_delete=models.SET_NULL, related_name="riders")
-    services = models.ManyToManyField(Service, through="ServiceQualification", blank=True,
-                                      related_name="qualified_riders")
+    referred_by = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.SET_NULL, related_name="referred_riders"
+    )
+    zone = models.ForeignKey("Zone", null=True, blank=True, on_delete=models.SET_NULL, related_name="riders")
+    services = models.ManyToManyField(
+        "Service", through="ServiceQualification", blank=True, related_name="qualified_riders"
+    )
 
     # Identity
     full_name = models.CharField(max_length=150)
-    phone = models.CharField(max_length=30, validators=[phone_validator], db_index=True)
+    phone = models.CharField(max_length=30, unique= True, validators=[phone_validator])    
     profile_photo = models.ImageField(upload_to=rider_profile_photo_path, null=True, blank=True)
     date_of_birth = models.DateField(null=True, blank=True)
     gender = models.CharField(max_length=10, choices=Gender.choices, blank=True)
@@ -949,19 +973,21 @@ class RiderProfile(models.Model):
     license_expiry_date = models.DateField(null=True, blank=True)
 
     # Verification
-    verification_status = models.CharField(max_length=20, choices=VerificationStatus.choices,
-                                           default=VerificationStatus.PENDING, db_index=True)
+    verification_status = models.CharField(
+        max_length=20, choices=VerificationStatus.choices,default=VerificationStatus.PENDING
+    )
     rejection_reason = models.TextField(blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
     verified_at = models.DateTimeField(null=True, blank=True)
-    verified_by = models.ForeignKey(AUTH_USER, on_delete=models.SET_NULL, null=True, blank=True,
-                                    related_name="verified_riders")
+    verified_by = models.ForeignKey(
+        AUTH_USER, on_delete=models.SET_NULL, null=True, blank=True,related_name="verified_riders"
+    )
 
     # Suspension (admin action) / restriction (complaint outcome)
     suspended_at = models.DateTimeField(null=True, blank=True)
     suspended_until = models.DateTimeField(null=True, blank=True)
     suspension_reason = models.TextField(blank=True)
-    is_restricted = models.BooleanField(default=False, db_index=True)
+    is_restricted = models.BooleanField(default=False)
     restricted_until = models.DateTimeField(null=True, blank=True)
     restriction_notes = models.TextField(blank=True)
 
@@ -969,13 +995,19 @@ class RiderProfile(models.Model):
     is_online = models.BooleanField(default=False)
     last_online_at = models.DateTimeField(null=True, blank=True)
     online_since = models.DateTimeField(null=True, blank=True)
-    current_lat = models.FloatField(null=True, blank=True, validators=[MinValueValidator(-90), MaxValueValidator(90)])
-    current_lng = models.FloatField(null=True, blank=True, validators=[MinValueValidator(-180), MaxValueValidator(180)])
+    current_lat = models.FloatField(
+        null=True, blank=True, validators=[MinValueValidator(-90), MaxValueValidator(90)]
+    )
+    current_lng = models.FloatField(
+        null=True, blank=True, validators=[MinValueValidator(-180), MaxValueValidator(180)]
+    )
     location_updated_at = models.DateTimeField(null=True, blank=True)
 
     # Performance counters (updated with F() so they are race-safe)
-    tier = models.CharField(max_length=10, choices=RiderTier.choices, default=RiderTier.STANDARD, db_index=True)
-    rating_average = models.FloatField(default=5.0, validators=[MinValueValidator(0.0), MaxValueValidator(5.0)])
+    tier = models.CharField(max_length=10, choices=RiderTier.choices, default=RiderTier.STANDARD)
+    rating_average = models.FloatField(
+        default=5.0, validators=[MinValueValidator(0.0), MaxValueValidator(5.0)]
+    )
     rating_count = models.PositiveIntegerField(default=0)
     completed_trips = models.PositiveIntegerField(default=0)
     cancelled_trips = models.PositiveIntegerField(default=0)
@@ -1002,7 +1034,6 @@ class RiderProfile(models.Model):
 
     objects = RiderProfileQuerySet.as_manager()
 
-
     @property
     def is_verified(self):
         return self.verification_status == VerificationStatus.VERIFIED
@@ -1011,6 +1042,31 @@ class RiderProfile(models.Model):
         ordering = ["-created_at"]
         verbose_name = "Rider profile"
         verbose_name_plural = "Rider profiles"
+        constraints = [
+            # Unique Ghana Card when filled
+            models.UniqueConstraint(
+                fields=["ghana_card_number"],
+                condition=~models.Q(ghana_card_number=""),
+                name="uniq_rider_ghana_card_set",
+            ),
+            # Unique License when filled
+            models.UniqueConstraint(
+                fields=["license_number"],
+                condition=~models.Q(license_number=""),
+                name="uniq_rider_license_set",
+            ),
+            # Rating between 0 and 5
+            models.CheckConstraint(
+                check=models.Q(rating_average__gte=0) & models.Q(rating_average__lte=5.0),
+                name="rider_rating_0_to_5",
+            ),
+            # Cannot refer yourself
+            models.CheckConstraint(
+                check=~models.Q(referred_by=models.F("id")),
+                name="rider_no_self_refer",
+            ),
+        ]
+
         indexes = [
             models.Index(fields=["verification_status", "is_active"]),
             models.Index(fields=["is_online", "is_active"]),
@@ -1018,36 +1074,78 @@ class RiderProfile(models.Model):
             models.Index(fields=["-rating_average", "-completed_trips"]),
             models.Index(fields=["zone", "is_online"]),
         ]
-        constraints = [
-            models.UniqueConstraint(fields=["license_number"], condition=~Q(license_number=""),
-                                    name="rider_unique_license_number"),
-            models.UniqueConstraint(fields=["ghana_card_number"], condition=~Q(ghana_card_number=""),
-                                    name="rider_unique_ghana_card"),
-        ]
 
     def __str__(self):
         return f"{self.full_name} — {self.get_verification_status_display()}"
 
-    def save(self, *args, **kwargs):
-        fill_null_defaults(self)
-        if not self.rider_code:
-            self.rider_code = unique_code(RiderProfile, "rider_code", "RDR", 6)
-        super().save(*args, **kwargs)
+    def __str__ (self):
+        return f"{self.full_name}  ({self.rider_code or 'no code'})"
 
+    #------------------------------------------------
+    # Normalisation + safe rider_code generation
+    #---------------------------------------------
+    def _normalize(self):
+        self.full_name= (self.full_name or "").strip()
+        self.phone = normalize_gh_phone(self.phone)
+        self.ghana_card_number = (self.ghana_card_number or "").strip().upper()
+        self.license_number = (self.license_number or "").strip().upper()
+        self.motorbike_plate_number= (self.motorbike_plate_number or "").strip().upper()
+
+    def save(self, *args, **kwargs):
+        self.normalize()
+        if self.rider_code:
+            return super().save(*args, **kwargs)
+
+       # New Rider (or legacy row without a code): generate, and retry on the
+       # rare collission instead of surfacing a 500 to signup request.
+        for _ in range(RIDER_CODE_MAX_ATTEMPTS):
+            self.rider_code = generate_rider_code()
+            try:
+                with transaction.atomic():
+                    return super().save(*args, **kwargs)
+            except IntegrityError as exc:
+                if "rider_code" not in str (exc):
+                    raise
+                self.rider_code=None
+        raise IntegrityError("Could not generate a unique rider code.")     
+                
     # ---- read-only helpers -------------------------------------------------
     @property
     def is_verified(self):
         return self.verification_status == VerificationStatus.VERIFIED
+    
+    @property
+    def documents_uploaded(self):
+        # Assumes RiderDocument has FK (RiderProfile, related _name="documents").
+        return self.documents.exists()
+
+        PROFILE_COMPLETION_FIELDS=(
+            "full_name","phone", "profile_photo", "date_of_birth", "gender",
+            "ghana_card_number", "city" "address",
+            "motorbike_model", "motorbike_plate_number", "motorbike_colour",
+            "licence_number", "license_expiry_date",
+        ) 
+
+    @property
+    def profile_completion(self):
+        filled = sum(1 for f in self.PROFILE_COMPLETION_FIELDS if gatattr(self, f))
+        return round(filled * 100 / len(self.PROFILE_COMPLETION_FIELDS))
+
+    #----------------------------------
+    # State helpers (used by dispatch / admin)
+    #-----------------------------------------
 
     @property
     def is_suspended(self):
-        if self.verification_status != VerificationStatus.SUSPENDED:
+        if self.suspended_at:
             return False
         return self.suspended_until is None or self.suspended_until > timezone.now()
 
     @property
-    def is_restricted_now(self):
-        return bool(self.is_restricted) and (self.restricted_until is None or self.restricted_until > timezone.now())
+    def is_currently_restricted(self):
+        if not self.is_restricted:
+            return False
+        return self.restricted_until is None or self.restricted_until > timezone.now() 
 
     @property
     def licence_expired(self):
@@ -1067,6 +1165,16 @@ class RiderProfile(models.Model):
     @property
     def is_approved(self):  # legacy alias used by older code
         return self.is_verified and not self.is_restricted_now
+
+    @property
+    def can_recieve_offers(self):
+        return (
+            self.is_active
+            and self.deleted_at is None
+            and self.is_verified 
+            and not selfis_suspended
+            and not self.is_currently_restricted
+        )
 
     @property
     def location_is_fresh(self):
@@ -1186,12 +1294,6 @@ class RiderProfile(models.Model):
     def needs_attention(self):
         return bool(self.attention_reasons)
 
-    @property
-    def documents_uploaded(self):
-        required = {c for c, _ in RiderDocument.REQUIRED_TYPES}
-        have = set(self.documents.exclude(status=RiderDocument.DocumentStatus.REJECTED)
-                   .values_list("document_type", flat=True))
-        return required.issubset(have)
 
     @property
     def documents_complete(self):
@@ -1200,18 +1302,6 @@ class RiderProfile(models.Model):
                    .values_list("document_type", flat=True))
         return required.issubset(have)
 
-    @property
-    def profile_completion(self):
-        """0-100 score used by the app to nudge riders to finish onboarding."""
-        checks = [
-            bool(self.profile_photo), bool(self.date_of_birth), bool(self.ghana_card_number),
-            bool(self.license_number and self.license_expiry_date),
-            bool(self.motorbike_model and self.motorbike_plate_number), bool(self.city),
-            self.emergency_contacts.filter(is_deleted=False).exists() if self.pk else False,
-            self.payout_accounts.filter(is_deleted=False).exists() if self.pk else False,
-            self.documents_complete,
-        ]
-        return int(sum(checks) / len(checks) * 100)
 
     # ---- live state --------------------------------------------------------
     def go_online(self, lat=None, lng=None):
