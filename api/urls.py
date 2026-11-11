@@ -16,10 +16,9 @@ from .views import MyRiderProfileView
 urlpatterns = [
     # Other URLS
     path("auth/login/", obtain_auth_token, name="api-login"),
-    path("auth/login/", views.user_login, name="user-login"),
 
     path("auth/register/customer/", customer_register, name="customer-register"),
-    path("auth/register/rider/",rider_register, name="rider-register"),
+    path("auth/register/rider/", rider_register, name="rider-register"),
     path("rider/verify", rider_submit_documents, name="rider-verify"),
 
     # === Rider Wallet ===

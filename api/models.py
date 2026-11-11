@@ -1092,7 +1092,7 @@ class RiderProfile(models.Model):
         self.motorbike_plate_number= (self.motorbike_plate_number or "").strip().upper()
 
     def save(self, *args, **kwargs):
-        self.normalize()
+        self._normalize()
         if self.rider_code:
             return super().save(*args, **kwargs)
 
