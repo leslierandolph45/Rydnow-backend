@@ -125,9 +125,12 @@ class RegistrationSerializer(_SignupBase):
     """Customer sign-up: creates the User and its CustomerProfile together."""
 
     def validate_phone(self, value):
+        # Allow empty phone without validation
+        if not value or value.strip() == "":
+            return ""
         phone = clean_phone(value)
         if CustomerProfile.objects.filter(phone=phone).exists():
-            raise serializers.ValidationError("This phone number is already registered.")
+            raise serializers.ValidationError("This phonenumber is already registered.")
         return phone
 
     @transaction.atomic
@@ -141,10 +144,7 @@ class RegistrationSerializer(_SignupBase):
         )    
 
         if CustomerProfile.objects.filter(phone=phone).exists():
-            raise serializers.ValidationError("This phone numer is already registered.")
-        return phone 
-
-        )
+            raise serializers.ValidationError("This phonenumber is already registered.") 
         return user
 
 
