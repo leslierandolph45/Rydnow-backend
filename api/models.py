@@ -452,10 +452,6 @@ class SurgeRule(models.Model):
 # 2. CUSTOMERS
 # =====================================================================
 
-class WalletError(Exception):
-    pass
-
-
 class CustomerProfile(models.Model):
     class Segment(models.TextChoices):
         NEW = "new", "New"
@@ -479,60 +475,115 @@ class CustomerProfile(models.Model):
         AGENT = "agent", "Field Agent"
         OTHER = "other", "Other"
 
-    # ---- REQUIRED: user (auth account holding the password), full_name, email, phone ----
-    user = models.OneToOneField(AUTH_USER, on_delete=models.PROTECT, related_name="customer_profile")
-    full_name = models.CharField(max_length=200, blank=True)
-    email = models.EmailField(blank=True)
-    phone = models.CharField(max_length=30, blank=True, null=True, validators=[validate_phone_number])
+    AUTH_USER = settings.AUTH_USER_MODEL
 
-    # ---- everything below is OPTIONAL ----
+    # Identity
+    user = models.OneToOneField(
+        AUTH_USER,
+        on_delete=models.PROTECT,
+        related_name="customer_profile"
+    )
+    full_name = models.CharField(max_length=200, blank=True, default="")
+    email = models.EmailField(blank=True, default="")
+    phone = models.CharField(
+        max_length=30,
+        blank=True,
+        null=True,
+        # validators=[validate_phone_number]  # uncomment if you have this validator
+    )
     mobile = PhoneNumberField(region="GH", blank=True, null=True)
-    profile_photo = models.ImageField(upload_to="profiles/customer/%Y/%m/", blank=True, null=True)
+    profile_photo = models.ImageField(
+        upload_to="profiles/customer/%Y/%m/",
+        blank=True,
+        null=True
+    )
 
     # CRM
-    preferred_language = models.CharField(max_length=5, choices=Language.choices, default=Language.ENGLISH,
-                                          blank=True, null=True)
-    acquisition_source = models.CharField(max_length=20, choices=Source.choices, default=Source.ORGANIC,
-                                          blank=True, null=True)
-    marketing_opt_in = models.BooleanField(default=False, help_text="Explicit consent for promo SMS/push.",
-                                           blank=True, null=True)
-    segment = models.CharField(max_length=10, choices=Segment.choices, default=Segment.NEW, db_index=True,
-                               blank=True, null=True)
-    total_bookings = models.PositiveIntegerField(default=0, blank=True, null=True)
-    total_spent = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"),
-                                      blank=True, null=True)
+    preferred_language = models.CharField(
+        max_length=5,
+        choices=Language.choices,
+        default=Language.ENGLISH
+    )
+    acquisition_source = models.CharField(
+        max_length=20,
+        choices=Source.choices,
+        default=Source.ORGANIC
+    )
+    marketing_opt_in = models.BooleanField(
+        default=False,
+        help_text="Explicit consent for promo SMS/push."
+    )
+    segment = models.CharField(
+        max_length=10,
+        choices=Segment.choices,
+        default=Segment.NEW,
+        db_index=True
+    )
+    total_bookings = models.PositiveIntegerField(default=0)
+    total_spent = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00")
+    )
     last_booking_at = models.DateTimeField(null=True, blank=True)
-    rating_average = models.FloatField(default=5.0, validators=[MinValueValidator(0), MaxValueValidator(5)],
-                                       blank=True, null=True)
-    rating_count = models.PositiveIntegerField(default=0, blank=True, null=True)
-    outstanding_fees = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"),
-                                           help_text="Unpaid cancellation fees; block new bookings until cleared.",
-                                           blank=True, null=True)
-    internal_notes = models.TextField(blank=True, null=True, help_text="Staff only.")
-    is_blocked = models.BooleanField(default=False, db_index=True, blank=True, null=True)
-    blocked_reason = models.CharField(max_length=255, blank=True, null=True)
+    rating_average = models.FloatField(
+        default=5.0,
+        validators=[MinValueValidator(0), MaxValueValidator(5)]
+    )
+    rating_count = models.PositiveIntegerField(default=0)
+    outstanding_fees = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        help_text="Unpaid cancellation fees; block new bookings until cleared."
+    )
+    internal_notes = models.TextField(
+        blank=True,
+        default="",
+        help_text="Staff only."
+    )
+    is_blocked = models.BooleanField(default=False, db_index=True)
+    blocked_reason = models.CharField(max_length=255, blank=True, default="")
 
     # Growth
-    referral_code = models.CharField(max_length=16, unique=True, blank=True, null=True, editable=False)
-    referred_by = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL,
-                                    related_name="referrals_made")
+    referral_code = models.CharField(
+        max_length=16,
+        unique=True,
+        blank=True,
+        null=True,
+        editable=False
+    )
+    referred_by = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="referrals_made"
+    )
 
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True, blank=True, null=True)
-    updated_at = models.DateTimeField(auto_now=True, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["segment", "-last_booking_at"])]
 
     def __str__(self):
-        name = self.full_name or getattr(self.user, "username", None)
-        return name or f"CustomerProfile-{str(self.pk)[:8]}"
+        return (
+            self.full_name
+            or getattr(self.user, "username", None)
+            or f"CustomerProfile-{self.pk}"
+        )
 
     def save(self, *args, **kwargs):
-        fill_null_defaults(self)
-        if not self.referral_code:
-            self.referral_code = unique_code(CustomerProfile, "referral_code", "RYD", 6)
+        if self.email:
+            self.email = self.email.strip().lower()
+        if not self.referral_code and not kwargs.get("update_fields"):
+            # Make sure `unique_code` is imported — uncomment when ready
+            # self.referral_code = unique_code(CustomerProfile, "referral_code", "RYD", 6)
+            pass
         super().save(*args, **kwargs)
+
 
     @property
     def can_book(self):
