@@ -106,12 +106,17 @@ class RegistrationSerializer(_SignupBase):
 
     @transaction.atomic
     def create(self, validated_data):
+        # create the User first - create _user handles email,password, first/last name 
         user = self._create_user(validated_data)
+        
+        # Get phone - it's already cleaned by validate_phone () above
+        phone = validated_data.get("phone", "")
+
+        # create only CustomerProfile - Dont pass email here , it's on User already
         CustomerProfile.objects.create(
             user=user,
             full_name=validated_data.get("full_name", ""),
-            email=validated_data.get("email", ""),
-            phone=validated_data.get("phone"),
+            phone=phone,
         )
         return user
 
