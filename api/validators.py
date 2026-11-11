@@ -1,12 +1,16 @@
 import re
 from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import RegexValidator
-    
+from rest_framework import serializers
+   
 def validate_phone_number(value):
     # Accepts: 0244XXXXXXX OR +233244XXXXXXX
     ghana_pattern = r'^(0[2-9]{8}|\+233(2-9)[0-9]{9}5$'
     if not re.match(ghana_pattern, str(value).strip()):
         raise ValidationError('Enter a valid Ghanaian number (e.g., 0244203327)')
+
+
 
 
 ghana_card_validator = RegexValidator(
@@ -15,7 +19,10 @@ ghana_card_validator = RegexValidator(
 )
 
 
+
+
 from django.core.validators import RegexValidator
+
 
 # Create your phone validator here
 phone_validator = RegexValidator(
@@ -26,9 +33,15 @@ phone_validator = RegexValidator(
 
 
 
+
+
+
+
 def validate_non_negative_amount(value):
     if value < 0:
         raise ValidationError('Amount cannot be negative.')
+
+
 
 
 def validate_email(value):
@@ -42,45 +55,26 @@ def validate_email(value):
 
 
 
-    # —————————————————————— #
-    # Validation & persistence
-    # —————————————————————— #
-    def clean(self):
-        errors = {}
-        if self.date_of_birth:
-            today = timezone.localdate()
-            age = today.year - self.date_of_birth.year - (
-                (today.month, today.day) < (self.date_of_birth.month, self.date_of_birth.day)
-            )
-            if age < MIN_AGE_YEARS:
-                errors["date_of_birth"] = f"Riders must be at least {MIN_AGE_YEARS} years old."
-        if (self.current_lat is None) != (self.current_lng is None):
-            errors["current_lat"] = "Latitude and longitude must be set together."
-        if errors:
-            raise ValidationError(errors)
-
-    def save(self, *args, **kwargs):
-        # normalise identifiers so uniqueness checks are reliable
-        self.license_number = (self.license_number or "").strip().upper()
-        self.ghana_card_number = (self.ghana_card_number or "").strip().upper()
-        self.motorbike_plate_number = (self.motorbike_plate_number or "").strip().upper()
-        self.full_name = (self.full_name or "").strip()
-
-        if self.verification_status == VerificationStatus.VERIFIED and not self.verified_at:
-            self.verified_at = timezone.now()
-        super().save(*args, **kwargs)
-
-    def soft_delete(self):
-        self.deleted_at = timezone.now()
-        self.is_active = False
-        self.is_online = False
-        self.save(update_fields=["deleted_at", "is_active", "is_online", "updated_at"])
 
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def normalize_gh_phone(value):
+    """Best-effort normalise a Ghana number to +233XXXXXXXXX.
+    Anything it cannot recognise is returned cleaned but unchanged, so
+    phone_validator rejects it with a normal validation message."""
+    phone = re.sub(r"[\s\-().]", "", str(value or ""))
+    if phone.startswith("+233"):
+        return phone
+    if phone.startswith("233"):
+        return "+" + phone
+    if phone.startswith("0") and len(phone) == 10:
+        return "+233" + phone[1:]
+    return phone
+
+
 def clean_phone(value):
     """Normalise to +233XXXXXXXXX and validate. Raises a DRF ValidationError."""
     phone = normalize_gh_phone(value)
@@ -91,6 +85,8 @@ def clean_phone(value):
     return phone
 
 
+
+
 def check_password_strength(password, user=None):
     try:
         validate_password(password, user=user)
@@ -99,9 +95,13 @@ def check_password_strength(password, user=None):
     return password
 
 
+
+
 def split_name(full_name):
     first, _, last = (full_name or "").strip().partition(" ")
     return first, last.strip()
+
+
 
 
 def email_is_taken(email, exclude_user_id=None):
@@ -109,3 +109,4 @@ def email_is_taken(email, exclude_user_id=None):
     if exclude_user_id:
         qs = qs.exclude(pk=exclude_user_id)
     return qs.exists()
+
