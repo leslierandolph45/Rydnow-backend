@@ -59,6 +59,7 @@ from .models import (
 )
 from .rider_domain import RiderDocument, RiderProfile
 from .serializers import (
+    RegistrationSerializer,
     AccountSerializer,
     AccountUpdateSerializer,
     ChangePasswordSerializer,
@@ -1480,3 +1481,21 @@ def deposit_history(request):
         page = paginator.page(page_num)
     except PageNotAnInteger:
         page = paginator.page(1)
+
+
+
+
+User = get_user_model()
+class AccountSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'username',
+            'email',
+            'first_name',
+            'last_name',
+            'is_active',
+            'is_staff',
+        ]
+        read_only_fields = ['id', 'is_active', 'is_staff']
