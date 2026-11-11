@@ -1,61 +1,56 @@
+"""
+RYDNOW validators and shared helpers.
+
+Self-contained: imports nothing from models.py or serializers.py, so it can be
+imported from either without creating a circular import.
+"""
 import re
+
+from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
-from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import RegexValidator
+from django.core.validators import validate_email as django_validate_email
+from django.db.models import Q
 from rest_framework import serializers
-   
+
+
+# ---------------------------------------------------------------------------
+# Validators
+# ---------------------------------------------------------------------------
+# Accepts: 0244XXXXXXX  OR  +233244XXXXXXX
+GHANA_PHONE_PATTERN = r"^(0[2-9]\d{8}|\+233[2-9]\d{8})$"
+
+
 def validate_phone_number(value):
-    # Accepts: 0244XXXXXXX OR +233244XXXXXXX
-    ghana_pattern = r'^(0[2-9]{8}|\+233(2-9)[0-9]{9}5$'
-    if not re.match(ghana_pattern, str(value).strip()):
-        raise ValidationError('Enter a valid Ghanaian number (e.g., 0244203327)')
-
-
+    if not re.match(GHANA_PHONE_PATTERN, str(value).strip()):
+        raise ValidationError("Enter a valid Ghanaian number (e.g., 0244203327)")
 
 
 ghana_card_validator = RegexValidator(
-    regex=r'^[A-Z0-9]{8,12}$',
-    message="Enter a valid Ghana Card number."
+    regex=r"^[A-Z0-9]{8,12}$",
+    message="Enter a valid Ghana Card number.",
 )
 
-
-
-
-from django.core.validators import RegexValidator
-
-
-# Create your phone validator here
+# Canonical stored format: +233 followed by 9 digits
 phone_validator = RegexValidator(
-    regex=r'^\+233\d{9}$',
-    message="Enter a valid Ghanaian phone number: +233XXXXXXXXX"
+    regex=r"^\+233\d{9}$",
+    message="Enter a valid Ghanaian phone number: +233XXXXXXXXX",
 )
-
-
-
-
-
-
 
 
 def validate_non_negative_amount(value):
     if value < 0:
-        raise ValidationError('Amount cannot be negative.')
-
-
+        raise ValidationError("Amount cannot be negative.")
 
 
 def validate_email(value):
     """Validate email format."""
-    from django.core.validators import validate_email as django_validate
     try:
-        django_validate(value)
-    except Exception:
-        raise ValidationError('Enter a valid email address.')
+        django_validate_email(value)
+    except ValidationError:
+        raise ValidationError("Enter a valid email address.")
     return value
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -80,21 +75,17 @@ def clean_phone(value):
     phone = normalize_gh_phone(value)
     try:
         phone_validator(phone)
-    except DjangoValidationError as exc:
+    except ValidationError as exc:
         raise serializers.ValidationError(exc.messages)
     return phone
-
-
 
 
 def check_password_strength(password, user=None):
     try:
         validate_password(password, user=user)
-    except DjangoValidationError as exc:
+    except ValidationError as exc:
         raise serializers.ValidationError(list(exc.messages))
     return password
-
-
 
 
 def split_name(full_name):
@@ -102,9 +93,8 @@ def split_name(full_name):
     return first, last.strip()
 
 
-
-
 def email_is_taken(email, exclude_user_id=None):
+    User = get_user_model()  # resolved at call time, safe during app loading
     qs = User.objects.filter(Q(username__iexact=email) | Q(email__iexact=email))
     if exclude_user_id:
         qs = qs.exclude(pk=exclude_user_id)

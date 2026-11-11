@@ -1,6 +1,7 @@
 """
 Rydnow serializers — written against the consolidated models.py.
 
+
 Model facts these serializers rely on:
     RiderProfile        user (OneToOne), full_name, phone, current_lat/current_lng,
                         verification_status, `is_verified` is a PROPERTY
@@ -11,13 +12,9 @@ Model facts these serializers rely on:
     Service             primary key is `key` ("okada", "parcel", "waste-bin")
 """
 from decimal import Decimal
-from .validators import clean_phone
 
 from django.contrib.auth import get_user_model
-from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -29,49 +26,22 @@ from .models import (
     RiderWallet,
     Service,
     WalletTransaction,
-    normalize_gh_phone,
-    phone_validator,
+)
+from .validators import (
+    check_password_strength,
+    clean_phone,
+    email_is_taken,
+    split_name,
 )
 
+
 User = get_user_model()
+
 
 REFERENCE_RE = r"^[A-Za-z0-9_.\-]{6,100}$"
 MAX_DOCUMENT_SIZE_MB = 10
 ALLOWED_DOCUMENT_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "pdf")
 WALLET_TX_STATUSES = ("pending", "completed", "failed", "reversed")
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def clean_phone(value):
-    """Normalise to +233XXXXXXXXX and validate. Raises a DRF ValidationError."""
-    phone = normalize_gh_phone(value)
-    try:
-        phone_validator(phone)
-    except DjangoValidationError as exc:
-        raise serializers.ValidationError(exc.messages)
-    return phone
-
-
-def check_password_strength(password, user=None):
-    try:
-        validate_password(password, user=user)
-    except DjangoValidationError as exc:
-        raise serializers.ValidationError(list(exc.messages))
-    return password
-
-
-def split_name(full_name):
-    first, _, last = (full_name or "").strip().partition(" ")
-    return first, last.strip()
-
-
-def email_is_taken(email, exclude_user_id=None):
-    qs = User.objects.filter(Q(username__iexact=email) | Q(email__iexact=email))
-    if exclude_user_id:
-        qs = qs.exclude(pk=exclude_user_id)
-    return qs.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +113,7 @@ class RegistrationSerializer(_SignupBase):
             email=validated_data.get("email", ""),
             phone=validated_data.get("phone"),
         )
-        return user    
+        return user
 
 
 class RiderRegistrationSerializer(_SignupBase):
