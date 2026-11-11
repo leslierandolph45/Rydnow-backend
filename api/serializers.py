@@ -346,6 +346,29 @@ def send_verification_code(request):
 
     return ok("Verification code sent.", expires_in=OTP_TTL_SECONDS)
 
+from rest_framework import serializers
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+
+class RegistrationSerializer(serializers.ModelSerializer):
+    password_confirm = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = User
+        fields = ["username", "email", "password", "password_confirm"]
+        extra_kwargs = {"password": {"write_only": True}}
+
+    def validate(self, data):
+        if data["password"] != data["password_confirm"]:
+            raise serializers.ValidationError({"password": "Passwords do not match."})
+        return data
+
+    def create(self, validated_data):
+        validated_data.pop("password_confirm")
+        return User.objects.create_user(**validated_data)
+
 
 @api_view(["POST"])
 @authentication_classes([])
