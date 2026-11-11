@@ -65,3 +65,37 @@ def validate_email(value):
         self.is_active = False
         self.is_online = False
         self.save(update_fields=["deleted_at", "is_active", "is_online", "updated_at"])
+
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def clean_phone(value):
+    """Normalise to +233XXXXXXXXX and validate. Raises a DRF ValidationError."""
+    phone = normalize_gh_phone(value)
+    try:
+        phone_validator(phone)
+    except DjangoValidationError as exc:
+        raise serializers.ValidationError(exc.messages)
+    return phone
+
+
+def check_password_strength(password, user=None):
+    try:
+        validate_password(password, user=user)
+    except DjangoValidationError as exc:
+        raise serializers.ValidationError(list(exc.messages))
+    return password
+
+
+def split_name(full_name):
+    first, _, last = (full_name or "").strip().partition(" ")
+    return first, last.strip()
+
+
+def email_is_taken(email, exclude_user_id=None):
+    qs = User.objects.filter(Q(username__iexact=email) | Q(email__iexact=email))
+    if exclude_user_id:
+        qs = qs.exclude(pk=exclude_user_id)
+    return qs.exists()
