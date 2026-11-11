@@ -92,33 +92,82 @@ class _SignupBase(serializers.Serializer):
         )
 
 
-class RegistrationSerializer(_SignupBase):
+from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, transaction
+from rest_framework import serializers
+
+from .models import CustomerProfile
+from .utils import clean_phone  # adjust import path if needed
+
+User = get_user_model()
+
+
+class RegistrationSerializer(serializers.Serializer):
     """Customer sign-up: creates the User and its CustomerProfile together."""
 
+    email = serializers.EmailField(max_length=254)
+    password = serializers.CharField(write_only=True, min_length=8, trim_whitespace=False)
+    full_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+    phone = serializers.CharField(max_length=20, required=False, allow_blank=True, default="")
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError("This email is already registered.")
+        return email
+
     def validate_phone(self, value):
-        # Allow empty phone without validation
-        if not value or value.strip() == "":
+        if not value or not value.strip():
             return ""
-        phone = clean_phone(value)
+        try:
+            phone = clean_phone(value)
+        except Exception:
+            raise serializers.ValidationError("Enter a valid phone number.")
+        if not phone:
+            raise serializers.ValidationError("Enter a valid phone number.")
         if CustomerProfile.objects.filter(phone=phone).exists():
-            raise serializers.ValidationError("This phonenumber is already registered.")
+            raise serializers.ValidationError("This phone number is already registered.")
         return phone
+
+    def validate(self, attrs):
+        try:
+            validate_password(attrs["password"])
+        except DjangoValidationError as e:
+            raise serializers.ValidationError({"password": list(e.messages)})
+        return attrs
+
+    def _create_user(self, data):
+        full_name = (data.get("full_name") or "").strip()
+        first, _, last = full_name.partition(" ")
+        fields = {"email": data["email"], "first_name": first, "last_name": last}
+        # Only set username if your User model has one
+        if "username" in [f.name for f in User._meta.get_fields()]:
+            fields["username"] = data["email"]
+        return User.objects.create_user(password=data["password"], **fields)
 
     @transaction.atomic
     def create(self, validated_data):
-        # create the User first - create _user handles email,password, first/last name 
-        user = self._create_user(validated_data)
-        
-        # Get phone - it's already cleaned by validate_phone () above
-        phone = validated_data.get("phone", "")
-
-        # create only CustomerProfile - Dont pass email here , it's on User already
-        CustomerProfile.objects.create(
-            user=user,
-            full_name=validated_data.get("full_name", ""),
-            phone=phone,
-        )
+        try:
+            # ✅ SAVE values FIRST — before _create_user modifies validated_data
+            full_name = validated_data.get("full_name", "")
+            phone = validated_data.get("phone", "")
+            
+            user = self._create_user(validated_data)
+            
+            CustomerProfile.objects.create(
+                user=user,
+                full_name=full_name,
+                phone=phone,
+            )
+        except IntegrityError:
+            # Race condition: duplicate slipped past validation
+            raise serializers.ValidationError(
+                {"detail": "An account with this email or phone already exists."}
+            )
         return user
+
 
 
 class RiderRegistrationSerializer(_SignupBase):
