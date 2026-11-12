@@ -37,7 +37,7 @@ from django.db.models import Avg, Count, F, Q, Sum
 from django.utils import timezone
 from phonenumber_field.modelfields import PhoneNumberField
 from .wallet_deposit import WalletDeposit
-
+from django.urls import reverse
 
 logger = logging.getLogger(__name__)
 AUTH_USER = settings.AUTH_USER_MODEL
@@ -1579,6 +1579,9 @@ class RiderDocument(models.Model):
         self.reviewed_by, self.reviewed_at, self.notes = by, timezone.now(), notes
         self.save(update_fields=["status", "reviewed_by", "reviewed_at", "notes"])
 
+def get_absolute_url(self):
+        """Tell Django where to find the edit page for this document"""
+        return reverse("admin:api_riderdocument_change", args=[self.pk])
 
 class RiderPayoutAccount(models.Model):
     class Network(models.TextChoices):
