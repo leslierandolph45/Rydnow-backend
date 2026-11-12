@@ -329,27 +329,13 @@ def get_file_info(field_file):
 
 logger = logging.getLogger(__name__)
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-PENDING, APPROVED, REJECTED, EXPIRED = "pending", "approved", "rejected", "expired"
-REVIEWED_STATUSES = {APPROVED, REJECTED}
-
-# Fill in your real document_type values (e.g. Ghana Card, passport photo,
-# riding licence). A rider can only be approved when each of these has an
-# approved, unexpired document. Leave empty to skip this check.
-REQUIRED_DOCUMENT_TYPES: tuple = ()
-
-STATUS_COLORS = {
-    PENDING: "#d97706",
-    APPROVED: "#16a34a",
-    REJECTED: "#dc2626",
-    EXPIRED: "#6b7280",
-}
+DocStatus = RiderDocument.DocumentStatus
+REVIEWED = {DocStatus.APPROVED, DocStatus.REJECTED}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 PDF_EXTENSIONS = {".pdf"}
 EXPIRING_SOON_DAYS = 30
 
 
-# ── Filters / forms ───────────────────────────────────────────────────────────
 class ExpiryFilter(admin.SimpleListFilter):
     title = "expiry"
     parameter_name = "expiry"
@@ -380,24 +366,25 @@ class ExpiryFilter(admin.SimpleListFilter):
 
 
 class RiderDocumentAdminForm(forms.ModelForm):
+    """A rejected document must carry a reason the rider can act on."""
+
     class Meta:
         model = RiderDocument
         fields = "__all__"
 
     def clean(self):
         cleaned = super().clean()
-        if cleaned.get("status") == REJECTED and not (cleaned.get("notes") or "").strip():
-            self.add_error("notes", "Give the rider a reason when rejecting a document.")
+        if cleaned.get("status") == DocStatus.REJECTED and not (cleaned.get("notes") or "").strip():
+            self.add_error("notes", "Give a reason when rejecting a document.")
         return cleaned
 
 
-# ── Document admin mixin (previews + bulk actions) ────────────────────────────
 class RiderDocumentPreviewMixin:
-    """Previews, review stamping on save, and the three bulk actions."""
+    """Previews, reviewer stamping on save, and the three bulk actions."""
 
     form = RiderDocumentAdminForm
 
-    # Previews ----------------------------------------------------------------
+    # ── previews ──────────────────────────────────────────────────
     @admin.display(description="Preview")
     def preview(self, obj):
         return self._render_file(obj, size=48)
@@ -416,7 +403,7 @@ class RiderDocumentPreviewMixin:
                 return "No file"
             url = obj.file.url
             ext = os.path.splitext(obj.file.name)[1].lower()
-        except Exception:  # storage backend errors (S3/GCS signing, etc.)
+        except Exception:  # storage errors (signing, missing bucket, ...)
             logger.exception("Could not resolve file for RiderDocument %s", obj.pk)
             return "File unavailable"
 
@@ -426,104 +413,81 @@ class RiderDocumentPreviewMixin:
                 '<img src="{0}" alt="Document" loading="lazy" '
                 'style="max-height:{1}px;max-width:{1}px;border-radius:6px;'
                 'object-fit:cover;" /></a>',
-                url,
-                size,
+                url, size,
             )
         label = "Open PDF" if ext in PDF_EXTENSIONS else "Open file"
         return format_html('<a href="{}" target="_blank" rel="noopener">{}</a>', url, label)
 
-    # Saving a single document from its change page ---------------------------
+    # ── single-document save: stamp who/when ──────────────────────
     def save_model(self, request, obj, form, change):
-        if change and "status" in form.changed_data and obj.status in REVIEWED_STATUSES:
+        if change and "status" in form.changed_data and obj.status in REVIEWED:
             obj.reviewed_by = request.user
             obj.reviewed_at = timezone.now()
         super().save_model(request, obj, form, change)
 
-    # Bulk actions ------------------------------------------------------------
+    # ── bulk actions ──────────────────────────────────────────────
     @admin.action(description="✅ Approve selected documents", permissions=["change"])
     def approve_documents(self, request, queryset):
-        changed, skipped = self._bulk_set_status(request, queryset, APPROVED)
-        self.message_user(
-            request,
-            ngettext("%d document approved.", "%d documents approved.", changed) % changed,
-            messages.SUCCESS,
-        )
-        if skipped:
-            self.message_user(
-                request,
-                ngettext(
-                    "%d document skipped because its expiry date has passed.",
-                    "%d documents skipped because their expiry date has passed.",
-                    skipped,
-                ) % skipped,
-                messages.WARNING,
-            )
+        r = self._bulk_set_status(request, queryset, DocStatus.APPROVED)
+        self._report(request, r, "approved", messages.SUCCESS)
 
-    @admin.action(description="❌ Reject selected documents", permissions=["change"])
+    @admin.action(description="❌ Reject selected documents (needs a reason in Notes)", permissions=["change"])
     def reject_documents(self, request, queryset):
-        changed, _ = self._bulk_set_status(request, queryset, REJECTED)
-        self.message_user(
-            request,
-            ngettext("%d document rejected.", "%d documents rejected.", changed) % changed,
-            messages.WARNING,
-        )
-        if changed:
-            self.message_user(
-                request,
-                "Open a document to add a reason so the rider knows what to fix.",
-                messages.INFO,
-            )
+        r = self._bulk_set_status(request, queryset, DocStatus.REJECTED)
+        self._report(request, r, "rejected", messages.WARNING)
 
     @admin.action(description="⏰ Mark selected documents as expired", permissions=["change"])
     def mark_expired(self, request, queryset):
-        changed, _ = self._bulk_set_status(request, queryset, EXPIRED)
+        r = self._bulk_set_status(request, queryset, DocStatus.EXPIRED)
+        self._report(request, r, "marked as expired", messages.INFO)
+
+    def _report(self, request, r, verb, level):
+        n = r["changed"]
         self.message_user(
-            request,
-            ngettext(
-                "%d document marked as expired.",
-                "%d documents marked as expired.",
-                changed,
-            ) % changed,
-            messages.INFO,
+            request, ngettext("%d document " + verb + ".", "%d documents " + verb + ".", n) % n, level
         )
+        if r["expired"]:
+            self.message_user(
+                request,
+                f"{r['expired']} skipped: expiry date has passed (cannot approve an expired document).",
+                messages.WARNING,
+            )
+        if r["no_note"]:
+            self.message_user(
+                request,
+                f"{r['no_note']} skipped: add a reason in Notes first (open the document), then reject.",
+                messages.ERROR,
+            )
 
     def _bulk_set_status(self, request, queryset, status):
         """
-        Atomic, row-locked and audited. Returns (changed, skipped).
-
-        The admin queryset carries list_select_related joins; PostgreSQL rejects
-        SELECT ... FOR UPDATE across a nullable outer join, so we lock a fresh,
-        join-free queryset by primary key instead.
+        Atomic, row-locked, audited. Locks a fresh join-free queryset by pk:
+        the admin queryset carries select_related joins, and PostgreSQL rejects
+        SELECT ... FOR UPDATE over a nullable outer join.
         """
         ids = list(queryset.values_list("pk", flat=True))
-        today = timezone.localdate()
-        changed = skipped = 0
+        result = {"changed": 0, "expired": 0, "no_note": 0}
 
         with transaction.atomic():
-            locked = (
-                self.model.objects.select_for_update()
-                .filter(pk__in=ids)
-                .exclude(status=status)
-            )
-            for document in locked:
-                if (
-                    status == APPROVED
-                    and document.expiry_date
-                    and document.expiry_date < today
-                ):
-                    skipped += 1
+            locked = self.model.objects.select_for_update().filter(pk__in=ids).exclude(status=status)
+            for doc in locked:
+                if status == DocStatus.APPROVED and doc.is_expired:
+                    result["expired"] += 1
+                    continue
+                if status == DocStatus.REJECTED and not (doc.notes or "").strip():
+                    result["no_note"] += 1
                     continue
 
-                document.status = status
+                doc.status = status
                 fields = ["status"]
-                if status in REVIEWED_STATUSES:
-                    document.reviewed_by = request.user
-                    document.reviewed_at = timezone.now()
+                if status in REVIEWED:
+                    doc.reviewed_by = request.user
+                    doc.reviewed_at = timezone.now()
                     fields += ["reviewed_by", "reviewed_at"]
-                document.save(update_fields=fields)
-                self.log_change(request, document, f"Bulk action: status set to '{status}'.")
-                changed += 1
-        return changed, skipped
+                doc.save(update_fields=fields)
+                self.log_change(request, doc, f"Bulk action: status set to '{status}'.")
+                result["changed"] += 1
+        return result
 
 
 # ── Rider-level approval (add to your existing RiderProfile admin) ────────────
