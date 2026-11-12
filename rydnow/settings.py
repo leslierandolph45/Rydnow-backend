@@ -31,6 +31,14 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': 'kiacglev',
+    'API_KEY': '879488669349531',
+    'API_SECRET': 'SH4ixqpDloF5CufoOVod9xiuOiY',
+}
+
+
+
 # ────────────────────────── Env helpers ──────────────────────────
 def env_bool(name: str, default: bool = False) -> bool:
     return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
