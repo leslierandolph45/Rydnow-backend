@@ -32,9 +32,9 @@ from django.db import transaction
 from unfold.admin import ModelAdmin as UnfoldModelAdmin
 from unfold.forms import AdminPasswordChangeForm, UserChangeForm, UserCreationForm
 from django.utils.html import format_html
-from django.utils import timedelta
+from datetime import timedelta
 from django.utils import timezone
-from djnago.utils.translation import ngettext
+from django.utils.translation import ngettext
 from . import models as api_models
 
 from .models import (
