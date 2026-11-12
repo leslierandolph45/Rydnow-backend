@@ -6,20 +6,23 @@ All environment-specific values come from environment variables.
 Required in production:
     DJANGO_SECRET_KEY, DATABASE_URL
 
+Recommended in production:
+    AWS_STORAGE_BUCKET_NAME (+ AWS_* for S3 / Cloudflare R2) so uploads survive deploys,
+    PAYSTACK_SECRET_KEY, SENTRY_DSN, REDIS_URL
+
 Optional:
     DEBUG, ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS,
-    REDIS_URL, SENTRY_DSN, LOG_LEVEL, EMAIL_*,
-    AWS_STORAGE_BUCKET_NAME (+ AWS_* for S3 / Cloudflare R2 file storage)
+    LOG_LEVEL, EMAIL_*, SECURE_HSTS_SECONDS, ADMIN_SESSION_HOURS
 
 Local development: set DEBUG=True in your shell or .env file.
 """
-
 import os
 import warnings
-from pathlib import Path
-from dotenv import load_dotenv
 from decimal import Decimal
+from pathlib import Path
+
 import dj_database_url
+from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 from django.templatetags.static import static
 from django.urls import reverse_lazy
@@ -50,7 +53,8 @@ def env_list(name: str, default=None) -> list:
 
 
 # ─────────────────────────── Core ───────────────────────────
-DEBUG = env_bool("DEBUG", True)
+# Secure by default: DEBUG is OFF unless you explicitly turn it on (e.g. in a local .env).
+DEBUG = env_bool("DEBUG", False)
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
@@ -76,25 +80,30 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # ─────────────────────── Applications ───────────────────────
 INSTALLED_APPS = [
+    # Admin theme: MUST come before django.contrib.admin.
+    "unfold",
+    "unfold.contrib.filters",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
-    "django.contrib.staticfiles",
+    # WhiteNoise's runserver helper must come before staticfiles.
     "whitenoise.runserver_nostatic",
+    "django.contrib.staticfiles",
+    # Third-party
     "rest_framework",
     "rest_framework.authtoken",
     "corsheaders",
-    "api",
     "phonenumber_field",
-    "unfold",
-    "unfold.contrib.filters",
+    # Local
+    "api",
 ]
 
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
+        # Project-level templates/ so templates/admin/index.html overrides Unfold's dashboard.
         "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
@@ -120,9 +129,16 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-PAYSTACK_SECRET_KEY = "sk_..."
-PAYSTACK_CALLBACK_URL = "https://rydnow.app/rider/wallet/callback"
-WALLET_MIN_BALANCE = "50.00"
+
+# ─────────────────────── Payments ───────────────────────
+# Never hard-code keys. If a real Paystack key was ever committed to git, rotate it now.
+PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
+PAYSTACK_CALLBACK_URL = os.environ.get(
+    "PAYSTACK_CALLBACK_URL", "https://rydnow.app/rider/wallet/callback"
+)
+WALLET_MIN_BALANCE = os.environ.get("WALLET_MIN_BALANCE", "50.00")
+if not DEBUG and not PAYSTACK_SECRET_KEY:
+    warnings.warn("PAYSTACK_SECRET_KEY is not set: card/MoMo payments will fail.", RuntimeWarning)
 
 
 # ─────────────────────── Database ───────────────────────
@@ -166,48 +182,62 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "https://rydnow.app",
-    "https://www.rydnow.app",
-]
+# Admins are logged out after this many hours (default 12).
+SESSION_COOKIE_AGE = env_int("ADMIN_SESSION_HOURS", 12) * 3600
 
+
+# ────────────────────── CORS / CSRF ──────────────────────
+CORS_ALLOWED_ORIGINS = env_list(
+    "CORS_ALLOWED_ORIGINS",
+    default=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://rydnow.app",
+        "https://www.rydnow.app",
+    ],
+)
 CORS_ALLOW_CREDENTIALS = True
+
+CSRF_TRUSTED_ORIGINS = env_list(
+    "CSRF_TRUSTED_ORIGINS",
+    default=["https://rydnow-backend.onrender.com"],
+)
 
 
 # ─────────────────── Internationalization ───────────────────
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "UTC"
+TIME_ZONE = "Africa/Accra"  # same offset as UTC, but "today" is the Ghana day in the dashboard
 USE_I18N = True
 USE_TZ = True
+PHONENUMBER_DEFAULT_REGION = "GH"
 
 
 # ───────────────────── Static & Media ─────────────────────
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_DIRS = [BASE_DIR / "static"]
+STATICFILES_DIRS = [BASE_DIR / "static"] if (BASE_DIR / "static").is_dir() else []
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-    "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
-    },
+    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
 }
+# A missing static reference should degrade (unstyled asset), not 500 the whole admin page.
+WHITENOISE_MANIFEST_STRICT = False
 
 if os.environ.get("AWS_STORAGE_BUCKET_NAME"):
+    # Needs: pip install "django-storages[s3]" boto3
     STORAGES["default"] = {"BACKEND": "storages.backends.s3.S3Storage"}
-    AWS_STORAGE_BUCKET_NAME = os.environ.get("AWS_STORAGE_BUCKET_NAME")
+    AWS_STORAGE_BUCKET_NAME = os.environ["AWS_STORAGE_BUCKET_NAME"]
     AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
     AWS_S3_ENDPOINT_URL = os.environ.get("AWS_S3_ENDPOINT_URL") or None
     AWS_S3_REGION_NAME = os.environ.get("AWS_S3_REGION_NAME") or None
     AWS_S3_SIGNATURE_VERSION = "s3v4"
     AWS_DEFAULT_ACL = None
-    AWS_QUERYSTRING_AUTH = True
+    AWS_QUERYSTRING_AUTH = True  # private files (Ghana Cards, licences) use short-lived signed URLs
     AWS_QUERYSTRING_EXPIRE = env_int("AWS_QUERYSTRING_EXPIRE", 300)
     AWS_S3_FILE_OVERWRITE = False
 elif not DEBUG:
@@ -221,25 +251,12 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 
 
-# ────────────────────── CORS / CSRF ──────────────────────
-CSRF_TRUSTED_ORIGINS = env_list(
-    "CSRF_TRUSTED_ORIGINS",
-    default=["https://rydnow-backend.onrender.com"],
-)
-
-
 # ──────────────────── Django REST Framework ────────────────────
 REST_FRAMEWORK = {
-    "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.IsAuthenticated",
-    ],
-    "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.TokenAuthentication",
-    ]
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+    "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.TokenAuthentication"]
     + (["rest_framework.authentication.SessionAuthentication"] if DEBUG else []),
-    "DEFAULT_RENDERER_CLASSES": [
-        "rest_framework.renderers.JSONRenderer",
-    ]
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"]
     + (["rest_framework.renderers.BrowsableAPIRenderer"] if DEBUG else []),
     "DEFAULT_PARSER_CLASSES": [
         "rest_framework.parsers.JSONParser",
@@ -271,7 +288,8 @@ if not DEBUG:
     SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", True)
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = env_int("SECURE_HSTS_SECONDS", 31536000)
+    # Start at 1 hour; raise to 31536000 (1 year) once you're sure HTTPS works everywhere.
+    SECURE_HSTS_SECONDS = env_int("SECURE_HSTS_SECONDS", 3600)
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", True)
     SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
 
@@ -279,7 +297,8 @@ SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SAMESITE = "Lax"
 SECURE_CONTENT_TYPE_NOSNIFF = True
-SECURE_REFERRER_POLICY = "same-origin"
+# "same-origin" would stop the live map's OpenStreetMap tiles loading (OSM requires a Referer).
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 X_FRAME_OPTIONS = "DENY"
 
 
@@ -303,10 +322,7 @@ LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
-        "standard": {
-            "format": "{asctime} {levelname} {name} {message}",
-            "style": "{",
-        },
+        "standard": {"format": "{asctime} {levelname} {name} {message}", "style": "{"},
     },
     "handlers": {
         "console": {"class": "logging.StreamHandler", "formatter": "standard"},
@@ -315,6 +331,7 @@ LOGGING = {
     "loggers": {
         "django": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
         "django.request": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+        "django.security": {"handlers": ["console"], "level": "WARNING", "propagate": False},
         "api": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
     },
 }
@@ -324,6 +341,7 @@ LOGGING = {
 _sentry_dsn = os.environ.get("SENTRY_DSN")
 if _sentry_dsn:
     import sentry_sdk
+
     sentry_sdk.init(
         dsn=_sentry_dsn,
         environment=os.environ.get("SENTRY_ENVIRONMENT", "development" if DEBUG else "production"),
@@ -350,8 +368,10 @@ DISPATCH = {
     "w_fairness": 0.05,
 }
 
-_ICON = lambda name: name
 
+# ─────────────────────────────────────────────────────────────
+# ADMIN THEME (django-unfold)
+# ─────────────────────────────────────────────────────────────
 UNFOLD = {
     "SITE_TITLE": "RYDNOW Operations",
     "SITE_HEADER": "RYDNOW",
@@ -409,3 +429,4 @@ UNFOLD = {
         ],
     },
 }
+
