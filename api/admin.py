@@ -4,7 +4,7 @@ Django admin configuration for RYDNOW (django-unfold theme).
 Design principles
 ─────────────────
 * Every registered model has an "Add" page and can be operated manually.
-* Financial and audit records (wallets, ledgers, payments, histories) can be
+* Financial and audit records (wallets, ledgers, payments, histories) are
   created or edited by superusers only, and are never deletable from the admin.
 * Bulk status actions are atomic, row-locked, state-guarded and audited
   (a LogEntry is written per object so every change is traceable).
@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import timedelta
+
 from django.contrib import admin, messages
 from django.contrib.admin.models import CHANGE, LogEntry
 from django.contrib.auth import get_user_model
@@ -29,23 +31,22 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.models import Group
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
+from django.utils import timezone
+from django.utils.html import format_html
+from django.utils.translation import ngettext
+
 from unfold.admin import ModelAdmin as UnfoldModelAdmin
 from unfold.forms import AdminPasswordChangeForm, UserChangeForm, UserCreationForm
-from django.utils.html import format_html
-from datetime import timedelta
-from django.utils import timezone
-from django.utils.translation import ngettext
+
 from . import models as api_models
 from .admin_documents import RiderDocumentPreviewMixin
-from django import forms
-
 from .models import (
     # Customer
     CustomerProfile,
     SavedAddress,
     CustomerWallet,
     CustomerRiderPreference,
-    # Rider (RiderProfile itself lives in admin_riders.py)
+    # Rider
     RiderStatusHistory,
     ServiceQualification,
     RiderDocument,
@@ -56,7 +57,7 @@ from .models import (
     RiderProfileAdminNote,
     RiderIncident,
     RiderComplaint,
-    # Bookings (Booking itself lives in admin_riders.py)
+    # Bookings
     BookingStatusHistory,
     ParcelDetail,
     BookingOffer,
@@ -78,6 +79,7 @@ from .models import (
     PromoCode,
     PromoRedemption,
 )
+from django import forms
 
 
 logger = logging.getLogger(__name__)
@@ -87,71 +89,49 @@ admin.site.site_title = "RYDNOW Admin"
 admin.site.index_title = "Dashboard"
 
 
-# ══════════════════════════════════════════════════════════
+# ───────────────────────────────────────────────────────────
 # 🧩 SHARED MIXINS & BASE CLASSES
-# ══════════════════════════════════════════════════════════
+# ───────────────────────────────────────────────────────────
 class ReadOnlyAdminMixin:
-    """View-only admin: no add, edit or delete for anyone. Apply to lock a model down."""
-
+    """View-only admin: no add, edit or delete for anyone."""
     def has_add_permission(self, request):
         return False
-
     def has_change_permission(self, request, obj=None):
         return False
-
     def has_delete_permission(self, request, obj=None):
         return False
 
 
 class NoDeleteAdminMixin:
     """Prevents deletion of records that must be retained for auditing."""
-
     def has_delete_permission(self, request, obj=None):
         return False
 
 
 class SuperuserWriteAdminMixin:
-    """
-    Financial / audit records: superusers may add and edit them manually,
-    nobody may delete them. Other staff keep view access via Django permissions.
-    """
-
+    """Financial/audit records: superusers may add/edit, nobody may delete."""
     def has_add_permission(self, request):
         return request.user.is_superuser and super().has_add_permission(request)
-
     def has_change_permission(self, request, obj=None):
         return request.user.is_superuser and super().has_change_permission(request, obj)
-
     def has_delete_permission(self, request, obj=None):
         return False
 
 
 class AutoRawIdMixin:
-    """
-    Use ID-lookup widgets for every concrete ForeignKey / OneToOne field,
-    unless raw_id_fields is set explicitly on the admin class.
-    """
-
+    """Auto ForeignKey → raw_id_fields for fast admin pages."""
     def __init__(self, model, admin_site):
         if not self.raw_id_fields:
             self.raw_id_fields = tuple(
-                field.name
-                for field in model._meta.get_fields()
-                if field.is_relation and field.concrete and (field.many_to_one or field.one_to_one)
+                field.name for field in model._meta.get_fields()
+                if field.is_relation and field.concrete
+                and (field.many_to_one or field.one_to_one)
             )
         super().__init__(model, admin_site)
 
 
 class BulkStatusActionMixin:
-    """
-    Safe bulk status transitions: one transaction, rows locked, objects already in a
-    final state are skipped, and one admin LogEntry is written per changed object.
-
-    NOTE: this changes the status column only. It does NOT run the model's lifecycle
-    (wallet credits, refunds, notifications). Use it for housekeeping, not for settling money.
-    Subclasses set final_statuses.
-    """
-
+    """Safe bulk status transitions: atomic, locked, audited."""
     final_statuses: tuple[str, ...] = ()
 
     def _apply_status(self, request, queryset, new_status: str) -> None:
@@ -169,76 +149,48 @@ class BulkStatusActionMixin:
 
             if eligible_ids:
                 content_type = ContentType.objects.get_for_model(self.model)
-                LogEntry.objects.bulk_create(
+                LogEntry.objects.bulk_create([
                     LogEntry(
                         user_id=request.user.pk,
                         content_type_id=content_type.pk,
                         object_id=str(obj.pk),
                         object_repr=str(obj)[:200],
                         action_flag=CHANGE,
-                        change_message=f"Bulk action: status set to '{new_status}'.",
+                        change_message=f"Bulk action: status set to '{new_status}'."
                     )
                     for obj in manager.filter(pk__in=eligible_ids)
-                )
+                ])
 
         skipped = len(selected_ids) - changed
         logger.info(
             "%s bulk status -> %s by user=%s changed=%s skipped=%s",
-            self.model.__name__, new_status, request.user.pk, changed, skipped,
+            self.model.__name__, new_status, request.user.pk, changed, skipped
         )
         if changed:
             self.message_user(request, f"{changed} record(s) marked as {new_status}.", messages.SUCCESS)
         if skipped:
             self.message_user(
-                request, f"{skipped} record(s) skipped because they were already in a final state.",
-                messages.WARNING,
+                request,
+                f"{skipped} record(s) skipped — already in final state.",
+                messages.WARNING
             )
 
 
 class BaseAdmin(AutoRawIdMixin, UnfoldModelAdmin):
-    """Safe defaults for every model: Unfold look, fast FK widgets, sensible list."""
-
+    """Safe defaults for every model: Unfold theme, fast FK widgets."""
     list_display = ("__str__", "pk")
     ordering = ("-pk",)
     list_per_page = 50
 
 
 class LedgerAdmin(SuperuserWriteAdminMixin, BaseAdmin):
-    """Financial / audit records: superuser add + edit, never deletable."""
-
+    """Financial/audit records: superuser add+edit, never deletable."""
     list_per_page = 100
 
 
-class ExpiryFilter(admin.SimpleListFilter):
-    title = "expiry"
-    parameter_name = "expiry"
-
-    def lookups(self, request, model_admin):
-        return [
-            ("expired", "Expired"),
-            ("soon", "Expiring within 30 days"),
-            ("none", "No expiry date"),
-        ]
-
-    def queryset(self, request, queryset):
-        today = timezone.localdate()
-        value = self.value()
-        if value == "expired":
-            return queryset.filter(expiry_date__lt=today)
-        if value == "soon":
-            return queryset.filter(
-                expiry_date__gte=today,
-                expiry_date__lte=today + timedelta(days=30),
-            )
-        if value == "none":
-            return queryset.filter(expiry_date__isnull=True)
-        return queryset
-
-
-
-# ══════════════════════════════════════════════════════════
-# 🔐 AUTH (re-registered so Users / Groups use the Unfold theme)
-# ══════════════════════════════════════════════════════════
+# ───────────────────────────────────────────────────────────
+# 🔐 AUTH — Re-register for Unfold theme
+# ───────────────────────────────────────────────────────────
 User = get_user_model()
 
 for _model in (User, Group):
@@ -258,9 +210,9 @@ class GroupAdmin(BaseGroupAdmin, UnfoldModelAdmin):
     pass
 
 
-# ══════════════════════════════════════════════════════════
+# ───────────────────────────────────────────────────────────
 # 👥 CUSTOMERS
-# ══════════════════════════════════════════════════════════
+# ───────────────────────────────────────────────────────────
 @admin.register(CustomerProfile)
 class CustomerProfileAdmin(BaseAdmin):
     list_display = ("__str__", "pk", "created_at")
@@ -285,68 +237,18 @@ class CustomerRiderPreferenceAdmin(BaseAdmin):
     ordering = ("-created_at",)
 
 
-# ══════════════════════════════════════════════════════════
-# 👤 RIDER-RELATED RECORDS  (RiderProfile → admin_riders.py)
-# ══════════════════════════════════════════════════════════
-
-STATUS_COLORS = {
-    "pending": "#d97706",
-    "approved": "#16a34a",
-    "rejected": "#dc2626",
-    "expired": "#6b7280",
-}
-
-@admin.register(RiderStatusHistory)
-class RiderStatusHistoryAdmin(LedgerAdmin):
-    """Audit trail: superuser add + edit, never deletable."""
-
-
-@admin.register(ServiceQualification)
-class ServiceQualificationAdmin(BaseAdmin):
-    pass
-
-
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-PDF_EXTENSIONS = {".pdf"}
-
-
-def get_file_info(field_file):
-    """
-    Return (url, extension) for a FileField value, or (None, None) if the
-    file is missing or its URL can't be resolved.
-
-    The extension is read from the stored file name, not the URL, so signed
-    URLs with query strings (S3, GCS) are detected correctly.
-    """
-    if not field_file:
-        return None, None
-    try:
-        url = field_file.url
-    except ValueError:
-        return None, None
-    return url, os.path.splitext(field_file.name)[1].lower()
-
-
-logger = logging.getLogger(__name__)
-
-DocStatus = RiderDocument.DocumentStatus
-REVIEWED = {DocStatus.APPROVED, DocStatus.REJECTED}
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-PDF_EXTENSIONS = {".pdf"}
-EXPIRING_SOON_DAYS = 30
-
 
 class ExpiryFilter(admin.SimpleListFilter):
     title = "expiry"
     parameter_name = "expiry"
 
     def lookups(self, request, model_admin):
-        return (
+        return [
             ("expired", "Expired"),
-            ("soon", f"Expires within {EXPIRING_SOON_DAYS} days"),
+            ("soon", f"Expiring within {EXPIRING_SOON_DAYS} days"),
             ("valid", "Valid"),
             ("none", "No expiry date"),
-        )
+        ]
 
     def queryset(self, request, queryset):
         today = timezone.localdate()
@@ -365,220 +267,65 @@ class ExpiryFilter(admin.SimpleListFilter):
         return queryset
 
 
-class RiderDocumentAdminForm(forms.ModelForm):
-    """A rejected document must carry a reason the rider can act on."""
 
-    class Meta:
-        model = RiderDocument
-        fields = "__all__"
-
-    def clean(self):
-        cleaned = super().clean()
-        if cleaned.get("status") == DocStatus.REJECTED and not (cleaned.get("notes") or "").strip():
-            self.add_error("notes", "Give a reason when rejecting a document.")
-        return cleaned
+# ───────────────────────────────────────────────────────────
+# 👤 RIDER DOCUMENTS — uses mixin from admin_documents.py
+# ───────────────────────────────────────────────────────────
+DocStatus = RiderDocument.DocumentStatus
+REVIEWED = {DocStatus.APPROVED, DocStatus.REJECTED}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+PDF_EXTENSIONS = {".pdf"}
+EXPIRING_SOON_DAYS = 30
+REQUIRED_DOCUMENT_TYPES: tuple = ()
 
 
-class RiderDocumentPreviewMixin:
-    """Previews, reviewer stamping on save, and the three bulk actions."""
-
-    form = RiderDocumentAdminForm
-
-    # ── previews ──────────────────────────────────────────────────
-    @admin.display(description="Preview")
-    def preview(self, obj):
-        return self._render_file(obj, size=48)
-
-    @admin.display(description="Preview")
-    def preview_large(self, obj):
-        if not obj.pk:
-            return "Save the document to see a preview."
-        return self._render_file(obj, size=320)
-
-    @staticmethod
-    def _render_file(obj, size):
-        """Never raises: a broken or missing file must not take down the page."""
-        try:
-            if not obj.file:
-                return "No file"
-            url = obj.file.url
-            ext = os.path.splitext(obj.file.name)[1].lower()
-        except Exception:  # storage errors (signing, missing bucket, ...)
-            logger.exception("Could not resolve file for RiderDocument %s", obj.pk)
-            return "File unavailable"
-
-        if ext in IMAGE_EXTENSIONS:
-            return format_html(
-                '<a href="{0}" target="_blank" rel="noopener">'
-                '<img src="{0}" alt="Document" loading="lazy" '
-                'style="max-height:{1}px;max-width:{1}px;border-radius:6px;'
-                'object-fit:cover;" /></a>',
-                url, size,
-            )
-        label = "Open PDF" if ext in PDF_EXTENSIONS else "Open file"
-        return format_html('<a href="{}" target="_blank" rel="noopener">{}</a>', url, label)
-
-    # ── single-document save: stamp who/when ──────────────────────
-    def save_model(self, request, obj, form, change):
-        if change and "status" in form.changed_data and obj.status in REVIEWED:
-            obj.reviewed_by = request.user
-            obj.reviewed_at = timezone.now()
-        super().save_model(request, obj, form, change)
-
-    # ── bulk actions ──────────────────────────────────────────────
-    @admin.action(description="✅ Approve selected documents", permissions=["change"])
-    def approve_documents(self, request, queryset):
-        r = self._bulk_set_status(request, queryset, DocStatus.APPROVED)
-        self._report(request, r, "approved", messages.SUCCESS)
-
-    @admin.action(description="❌ Reject selected documents (needs a reason in Notes)", permissions=["change"])
-    def reject_documents(self, request, queryset):
-        r = self._bulk_set_status(request, queryset, DocStatus.REJECTED)
-        self._report(request, r, "rejected", messages.WARNING)
-
-    @admin.action(description="⏰ Mark selected documents as expired", permissions=["change"])
-    def mark_expired(self, request, queryset):
-        r = self._bulk_set_status(request, queryset, DocStatus.EXPIRED)
-        self._report(request, r, "marked as expired", messages.INFO)
-
-    def _report(self, request, r, verb, level):
-        n = r["changed"]
-        self.message_user(
-            request, ngettext("%d document " + verb + ".", "%d documents " + verb + ".", n) % n, level
-        )
-        if r["expired"]:
-            self.message_user(
-                request,
-                f"{r['expired']} skipped: expiry date has passed (cannot approve an expired document).",
-                messages.WARNING,
-            )
-        if r["no_note"]:
-            self.message_user(
-                request,
-                f"{r['no_note']} skipped: add a reason in Notes first (open the document), then reject.",
-                messages.ERROR,
-            )
-
-    def _bulk_set_status(self, request, queryset, status):
-        """
-        Atomic, row-locked, audited. Locks a fresh join-free queryset by pk:
-        the admin queryset carries select_related joins, and PostgreSQL rejects
-        SELECT ... FOR UPDATE over a nullable outer join.
-        """
-        ids = list(queryset.values_list("pk", flat=True))
-        result = {"changed": 0, "expired": 0, "no_note": 0}
-
-        with transaction.atomic():
-            locked = self.model.objects.select_for_update().filter(pk__in=ids).exclude(status=status)
-            for doc in locked:
-                if status == DocStatus.APPROVED and doc.is_expired:
-                    result["expired"] += 1
-                    continue
-                if status == DocStatus.REJECTED and not (doc.notes or "").strip():
-                    result["no_note"] += 1
-                    continue
-
-                doc.status = status
-                fields = ["status"]
-                if status in REVIEWED:
-                    doc.reviewed_by = request.user
-                    doc.reviewed_at = timezone.now()
-                    fields += ["reviewed_by", "reviewed_at"]
-                doc.save(update_fields=fields)
-                self.log_change(request, doc, f"Bulk action: status set to '{status}'.")
-                result["changed"] += 1
-        return result
+@admin.register(RiderDocument)
+class RiderDocumentAdmin(RiderDocumentPreviewMixin, BaseAdmin):
+    list_display = ("preview", "document_type", "status", "expiry_date", "uploaded_at")
+    list_filter = ("status", "document_type", ExpiryFilter)
+    search_fields = ("rider_profile__user__email", "rider_profile__user__username")
+    readonly_fields = ("preview_large", "reviewed_by", "reviewed_at", "uploaded_at")
+    list_select_related = ("rider_profile", "rider_profile__user")
+    actions = ("approve_documents", "reject_documents", "mark_expired")
+    ordering = ("-uploaded_at",)
+    date_hierarchy = "uploaded_at"
 
 
-# ── Rider-level approval (add to your existing RiderProfile admin) ────────────
-class RiderDocumentInline(admin.TabularInline):
-    """Read-only overview of a rider's documents on the rider page."""
-
-    model = RiderDocument
-    fk_name = "rider_profile"
-    extra = 0
-    can_delete = False
-    fields = ("document_type", "status", "expiry_date", "uploaded_at", "open_document")
-    readonly_fields = fields
-    show_change_link = True
-
-    def has_add_permission(self, request, obj=None):
-        return False
-
-    @admin.display(description="File")
-    def open_document(self, obj):
-        return RiderDocumentPreviewMixin._render_file(obj, size=48)
+# ───────────────────────────────────────────────────────────
+# 👤 RIDER-RELATED RECORDS
+# ───────────────────────────────────────────────────────────
+STATUS_COLORS = {
+    "pending": "#d97706",
+    "approved": "#16a34a",
+    "rejected": "#dc2626",
+    "expired": "#6b7280",
+}
 
 
-class RiderReviewMixin:
-    """
-    Add to your RiderProfile admin:
-
-        class RiderProfileAdmin(RiderReviewMixin, BaseAdmin):
-            actions = ("approve_riders", "reject_riders")
-            inlines = (RiderDocumentInline,)
-    """
-
-    @admin.action(description="✅ Approve selected riders", permissions=["change"])
-    def approve_riders(self, request, queryset):
-        today = timezone.localdate()
-        ids = list(queryset.values_list("pk", flat=True))
-        approved = 0
-        blocked = []
-
-        with transaction.atomic():
-            for rider in RiderProfile.objects.select_for_update().filter(pk__in=ids):
-                if REQUIRED_DOCUMENT_TYPES:
-                    have = set(
-                        RiderDocument.objects.filter(rider_profile=rider, status=APPROVED)
-                        .exclude(expiry_date__lt=today)
-                        .values_list("document_type", flat=True)
-                    )
-                    missing = set(REQUIRED_DOCUMENT_TYPES) - have
-                    if missing:
-                        blocked.append(f"{rider.full_name} (missing: {', '.join(sorted(map(str, missing)))})")
-                        continue
-                if rider.is_verified:
-                    continue
-                rider.is_verified = True
-                rider.save(update_fields=["is_verified"])
-                self.log_change(request, rider, "Rider approved (verified).")
-                approved += 1
-
-        self.message_user(
-            request,
-            ngettext("%d rider approved.", "%d riders approved.", approved) % approved,
-            messages.SUCCESS,
-        )
-        if blocked:
-            self.message_user(
-                request,
-                "Not approved, documents incomplete: " + "; ".join(blocked),
-                messages.ERROR,
-            )
-
-    @admin.action(description="❌ Reject selected riders", permissions=["change"])
-    def reject_riders(self, request, queryset):
-        ids = list(queryset.values_list("pk", flat=True))
-        rejected = 0
-        with transaction.atomic():
-            for rider in RiderProfile.objects.select_for_update().filter(pk__in=ids, is_verified=True):
-                rider.is_verified = False
-                rider.save(update_fields=["is_verified"])
-                self.log_change(request, rider, "Rider verification removed (rejected).")
-                rejected += 1
-        self.message_user(
-            request,
-            ngettext("%d rider rejected.", "%d riders rejected.", rejected) % rejected,
-            messages.WARNING,
-        )
+@admin.register(RiderStatusHistory)
+class RiderStatusHistoryAdmin(LedgerAdmin):
+    """Audit trail — never deletable."""
+    list_display = ("rider_profile", "status", "changed_at")
+    list_filter = ("status",)
+    readonly_fields = ("changed_at",)
+    ordering = ("-changed_at",)
 
 
+@admin.register(ServiceQualification)
+class ServiceQualificationAdmin(BaseAdmin):
+    list_display = ("rider_profile", "service", "is_active", "created_at")
+    list_filter = ("service", "is_active", "created_at")
+    search_fields = ("rider_profile__user__email",)
+    readonly_fields = ("created_at",)
+    ordering = ("-created_at",)
 
 
 @admin.register(RiderPayoutAccount)
 class RiderPayoutAccountAdmin(NoDeleteAdminMixin, BaseAdmin):
-    """Payout details are sensitive; deletion is disabled."""
+    """Payout details — deletion disabled."""
+    list_display = ("rider_profile", "bank_name", "account_number_masked", "is_verified")
+    list_filter = ("is_verified",)
+    search_fields = ("rider_profile__user__email",)
 
 
 @admin.register(RiderEmergencyContact)
@@ -593,12 +340,19 @@ class RiderEmergencyContactAdmin(BaseAdmin):
 
 @admin.register(RiderOnlineSession)
 class RiderOnlineSessionAdmin(LedgerAdmin):
-    pass
+    list_display = ("rider_profile", "started_at", "ended_at", "is_active")
+    list_filter = ("is_active", "started_at")
+    readonly_fields = ("started_at", "ended_at")
+    ordering = ("-started_at",)
 
 
 @admin.register(RiderLocationPing)
 class RiderLocationPingAdmin(LedgerAdmin):
     """High-volume telemetry."""
+    list_display = ("rider_profile", "timestamp", "latitude", "longitude")
+    list_filter = ("timestamp",)
+    readonly_fields = ("timestamp",)
+    ordering = ("-timestamp",)
 
 
 @admin.register(RiderProfileAdminNote)
@@ -635,12 +389,16 @@ class RiderComplaintAdmin(NoDeleteAdminMixin, BaseAdmin):
     date_hierarchy = "created_at"
 
 
-# ══════════════════════════════════════════════════════════
-# 📋 BOOKING-RELATED RECORDS  (Booking → admin_riders.py)
-# ══════════════════════════════════════════════════════════
+# ───────────────────────────────────────────────────────────
+# 📋 BOOKING-RELATED RECORDS
+# ───────────────────────────────────────────────────────────
 @admin.register(BookingStatusHistory)
 class BookingStatusHistoryAdmin(LedgerAdmin):
-    """Audit trail: superuser add + edit, never deletable."""
+    """Audit trail — never deletable."""
+    list_display = ("booking", "status", "changed_at")
+    list_filter = ("status",)
+    readonly_fields = ("changed_at",)
+    ordering = ("-changed_at",)
 
 
 @admin.register(ParcelDetail)
@@ -650,8 +408,7 @@ class ParcelDetailAdmin(BaseAdmin):
 
 @admin.register(BookingOffer)
 class BookingOfferAdmin(BaseAdmin):
-    """Rider offers on bookings. Related records are chosen by ID lookup, not dropdown."""
-
+    """Rider offers — use ID lookup widgets, not dropdowns."""
     list_display = ("__str__", "pk", "booking", "rider", "status")
     list_filter = ("status",)
     search_fields = ("rider__user__username", "rider__user__email")
@@ -661,31 +418,49 @@ class BookingOfferAdmin(BaseAdmin):
 
 @admin.register(Review)
 class ReviewAdmin(NoDeleteAdminMixin, BaseAdmin):
-    pass
+    list_display = ("booking", "score", "created_at")
+    list_filter = ("score", "created_at")
+    readonly_fields = ("created_at",)
+    ordering = ("-created_at",)
 
 
-# ══════════════════════════════════════════════════════════
+# ───────────────────────────────────────────────────────────
 # 💰 FINANCE & WALLET
-# ══════════════════════════════════════════════════════════
+# ───────────────────────────────────────────────────────────
 @admin.register(RiderWallet)
 class RiderWalletAdmin(LedgerAdmin):
-    """Manual balance edits are superuser-only and logged by Django admin."""
-
+    """Manual balance edits — superuser-only, logged."""
+    list_display = ("rider", "balance", "updated_at")
+    readonly_fields = ("balance", "updated_at")
     list_select_related = ("rider",)
 
 
 @admin.register(CustomerWallet)
 class CustomerWalletAdmin(LedgerAdmin):
-    """Manual balance edits are superuser-only and logged by Django admin."""
+    """Manual balance edits — superuser-only, logged."""
+    list_display = ("customer", "balance", "updated_at")
+    readonly_fields = ("balance", "updated_at")
+    list_select_related = ("customer",)
 
 
 @admin.register(WalletTransaction)
 class WalletTransactionAdmin(LedgerAdmin):
-    """Ledger entries: superuser add + edit, never deletable."""
-
-    list_display = ("__str__", "pk", "created_at")
-    list_filter = ("created_at",)
+    """Immutable ledger entries."""
+    list_display = ("__str__", "pk", "transaction_type", "amount", "created_at")
+    list_filter = ("transaction_type", "created_at")
+    search_fields = ("reference",)
     readonly_fields = ("created_at",)
+    ordering = ("-created_at",)
+    date_hierarchy = "created_at"
+
+
+@admin.register(WalletDeposit)
+class WalletDepositAdmin(LedgerAdmin):
+    """Payment-gateway records."""
+    list_display = ("__str__", "pk", "status", "created_at")
+    list_filter = ("status", "created_at")
+    search_fields = ("reference",)
+    readonly_fields = ("created_at", "updated_at")
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
 
@@ -712,22 +487,9 @@ class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, BaseAdmi
         self._apply_status(request, queryset, "failed")
 
 
-@admin.register(WalletDeposit)
-class WalletDepositAdmin(LedgerAdmin):
-    """Payment-gateway records: superuser add + edit, never deletable."""
-
-    list_display = ("__str__", "pk", "status", "created_at")
-    list_filter = ("status", "created_at")
-    search_fields = ("reference",)
-    readonly_fields = ("created_at", "updated_at")
-    ordering = ("-created_at",)
-    date_hierarchy = "created_at"
-
-
 @admin.register(Payment)
 class PaymentAdmin(LedgerAdmin):
     """Payment records."""
-
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
     ordering = ("-created_at",)
@@ -737,7 +499,6 @@ class PaymentAdmin(LedgerAdmin):
 @admin.register(Refund)
 class RefundAdmin(LedgerAdmin):
     """Refund records."""
-
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
     ordering = ("-created_at",)
@@ -747,12 +508,14 @@ class RefundAdmin(LedgerAdmin):
 @admin.register(LoyaltyAccount)
 class LoyaltyAccountAdmin(LedgerAdmin):
     """Loyalty balances change only through the ledger."""
+    list_display = ("user", "balance", "updated_at")
+    readonly_fields = ("balance", "updated_at")
+    list_select_related = ("user",)
 
 
 @admin.register(LoyaltyTransaction)
 class LoyaltyTransactionAdmin(LedgerAdmin):
     """Immutable loyalty ledger."""
-
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
     ordering = ("-created_at",)
@@ -771,39 +534,48 @@ class _CreatedAdmin(BaseAdmin):
 
 @admin.register(Referral)
 class ReferralAdmin(_CreatedAdmin):
-    pass
+    list_display = ("referrer", "referred", "code", "is_redeemed", "created_at")
+    list_filter = ("is_redeemed", "created_at")
+    search_fields = ("referrer__email", "referred__email")
 
 
 @admin.register(ReferralCode)
 class ReferralCodeAdmin(_CreatedAdmin):
-    pass
+    list_display = ("code", "usage_count", "is_active", "created_at")
+    list_filter = ("is_active", "created_at")
+    search_fields = ("code",)
 
 
 @admin.register(BusinessAccount)
 class BusinessAccountAdmin(_CreatedAdmin):
-    pass
+    list_display = ("name", "contact_email", "is_active", "created_at")
+    list_filter = ("is_active", "created_at")
+    search_fields = ("name", "contact_email")
 
 
 @admin.register(WasteSubscription)
 class WasteSubscriptionAdmin(_CreatedAdmin):
-    pass
+    list_display = ("customer", "plan", "status", "next_billing_date")
+    list_filter = ("status", "plan", "created_at")
+    search_fields = ("customer__email",)
 
 
 @admin.register(PromoCode)
 class PromoCodeAdmin(_CreatedAdmin):
-    pass
+    list_display = ("code", "discount_type", "discount_value", "is_active", "usage_limit", "times_used")
+    list_filter = ("is_active", "discount_type", "created_at")
+    search_fields = ("code",)
 
 
 @admin.register(PromoRedemption)
 class PromoRedemptionAdmin(_CreatedAdmin):
-    pass
+    list_display = ("code", "customer", "booking", "created_at")
+    list_filter = ("created_at",)
+    search_fields = ("code__code", "customer__email")
 
 
 # ══════════════════════════════════════════════════════════
 # ⚙️ PLATFORM CONFIG
-# Your models.py uses these (Service, Zone, PricingRule, SystemConfig, Notification) but
-# they had no admin, so you couldn't add services, zones or pricing from the console.
-# Registered only if they exist, and only once.
 # ══════════════════════════════════════════════════════════
 for _name in ("Service", "Zone", "PricingRule", "SystemConfig", "Notification"):
     _model = getattr(api_models, _name, None)
@@ -812,12 +584,6 @@ for _name in ("Service", "Zone", "PricingRule", "SystemConfig", "Notification"):
 
 
 # ══════════════════════════════════════════════════════════
-# RiderProfile + Booking admins.
-# Keep this import LAST: admin_riders imports BaseAdmin from this module, so importing it
-# earlier causes a circular-import crash. Do not import it anywhere else in this file.
+# RiderProfile + Booking admins — KEEP THIS IMPORT LAST
 # ══════════════════════════════════════════════════════════
 from . import admin_riders  # noqa: E402,F401
-
-
-
-
