@@ -32,7 +32,9 @@ from django.db import transaction
 from unfold.admin import ModelAdmin as UnfoldModelAdmin
 from unfold.forms import AdminPasswordChangeForm, UserChangeForm, UserCreationForm
 from django.utils.html import format_html
-
+from django.utils import timedelta
+from django.utils import timezone
+from djnago.utils.translation import ngettext
 from . import models as api_models
 
 from .models import (
@@ -316,7 +318,7 @@ def get_file_info(field_file):
 
 
 @admin.register(RiderDocument)
-class RiderDocumentAdmin(admin.ModelAdmin):
+class RiderDocumentAdmin(BaseAdmin):
     list_display = (
         "rider_name",
         "document_type",
@@ -327,12 +329,9 @@ class RiderDocumentAdmin(admin.ModelAdmin):
         "reviewed_by",
     )
     list_filter = ("status", "document_type", ExpiryFilter, "uploaded_at")
-    search_fields = (
-        "rider_profile__full_name",
-        "notes",
-    )
+    search_fields = ("rider_profile__full_name", "notes")
     list_select_related = ("rider_profile", "reviewed_by")
-    raw_id_fields = ("rider_profile", "reviewed_by")
+    raw_id_fields = ("rider_profile",)
     date_hierarchy = "uploaded_at"
     ordering = ("-uploaded_at",)
     list_per_page = 25
@@ -353,20 +352,17 @@ class RiderDocumentAdmin(admin.ModelAdmin):
         }),
     )
 
-    # —————————————————————— #
-    # List columns
-    # —————————————————————— #
+    # ── List columns ──────────────────────────────────────────────
     @admin.display(description="Rider", ordering="rider_profile__full_name")
     def rider_name(self, obj):
         return obj.rider_profile.full_name
 
     @admin.display(description="Status", ordering="status")
     def status_badge(self, obj):
-        color = STATUS_COLORS.get(obj.status, "#6b7280")
         return format_html(
             '<span style="background:{};color:#fff;padding:2px 10px;'
             'border-radius:12px;font-size:11px;font-weight:600;">{}</span>',
-            color,
+            STATUS_COLORS.get(obj.status, "#6b7280"),
             obj.get_status_display(),
         )
 
@@ -393,36 +389,37 @@ class RiderDocumentAdmin(admin.ModelAdmin):
 
     @staticmethod
     def _render_file(obj, size):
-        if not obj.file:
-            return "—"
-        url = obj.file.url
-        if url.lower().endswith(IMAGE_EXTENSIONS):
+        """Never raises: a broken or missing file must not take down the page."""
+        try:
+            url, ext = get_file_info(obj.file)
+        except Exception:  # storage backend errors (S3/GCS signing, etc.)
+            logger.exception("Could not resolve file for RiderDocument %s", obj.pk)
+            return "File unavailable"
+
+        if not url:
+            return "No file"
+        if ext in IMAGE_EXTENSIONS:
             return format_html(
                 '<a href="{0}" target="_blank" rel="noopener">'
-                '<img src="{0}" style="max-height:{1}px;max-width:{1}px;'
-                'border-radius:6px;object-fit:cover;" /></a>',
+                '<img src="{0}" alt="Document" loading="lazy" '
+                'style="max-height:{1}px;max-width:{1}px;border-radius:6px;'
+                'object-fit:cover;" /></a>',
                 url,
                 size,
             )
-        return format_html('<a href="{}" target="_blank" rel="noopener">Open file</a>', url)
+        label = "Open PDF" if ext in PDF_EXTENSIONS else "Open file"
+        return format_html('<a href="{}" target="_blank" rel="noopener">{}</a>', url, label)
 
-    # —————————————————————— #
-    # Saving
-    # —————————————————————— #
+    # ── Saving ────────────────────────────────────────────────────
     def save_model(self, request, obj, form, change):
-        reviewed_statuses = {
-            RiderDocument.DocumentStatus.APPROVED,
-            RiderDocument.DocumentStatus.REJECTED,
-        }
-        if change and "status" in form.changed_data and obj.status in reviewed_statuses:
+        reviewed = {"approved", "rejected"}
+        if change and "status" in form.changed_data and obj.status in reviewed:
             obj.reviewed_by = request.user
             obj.reviewed_at = timezone.now()
         super().save_model(request, obj, form, change)
 
-    # —————————————————————— #
-    # Bulk actions
-    # —————————————————————— #
-    @admin.action(description="Approve selected documents")
+    # ── Bulk actions ──────────────────────────────────────────────
+    @admin.action(description="Approve selected documents", permissions=["change"])
     def approve_documents(self, request, queryset):
         count = self._bulk_review(request, queryset, approve=True)
         self.message_user(
@@ -431,7 +428,7 @@ class RiderDocumentAdmin(admin.ModelAdmin):
             messages.SUCCESS,
         )
 
-    @admin.action(description="Reject selected documents")
+    @admin.action(description="Reject selected documents", permissions=["change"])
     def reject_documents(self, request, queryset):
         count = self._bulk_review(request, queryset, approve=False)
         self.message_user(
@@ -440,22 +437,32 @@ class RiderDocumentAdmin(admin.ModelAdmin):
             messages.WARNING,
         )
 
-    @admin.action(description="Mark selected documents as expired")
+    @admin.action(description="Mark selected documents as expired", permissions=["change"])
     def mark_expired(self, request, queryset):
-        count = queryset.update(status=RiderDocument.DocumentStatus.EXPIRED)
+        count = 0
+        with transaction.atomic():
+            for document in queryset.select_for_update().exclude(status="expired"):
+                document.status = "expired"
+                document.save(update_fields=["status"])
+                self.log_change(request, document, "Bulk action: marked as expired.")
+                count += 1
         self.message_user(
             request,
             ngettext("%d document marked as expired.", "%d documents marked as expired.", count) % count,
             messages.INFO,
         )
 
-    @staticmethod
-    def _bulk_review(request, queryset, approve):
+    def _bulk_review(self, request, queryset, approve):
+        """Atomic, row-locked, audited. Uses the model's review() so reviewer/time are stamped."""
+        target = "approved" if approve else "rejected"
         count = 0
-        for document in queryset.select_related("rider_profile"):
-            document.review(by=request.user, approve=approve)
-            count += 1
+        with transaction.atomic():
+            for document in queryset.select_for_update().exclude(status=target):
+                document.review(by=request.user, approve=approve)
+                self.log_change(request, document, f"Bulk action: status set to '{target}'.")
+                count += 1
         return count
+
 
 
 
