@@ -1,0 +1,11 @@
+{% extends "admin/base.html" %}
+{% block breadcrumbs %}{% endblock %}
+{% block title %}Live map | {{ site_title|default:"Admin" }}{% endblock %}
+{% block content %}
+<div class="rn">
+  <div class="rn-head"><div><h1>Live map</h1>
+  <p>Every online rider and every booking in progress. Refreshes every 8 seconds.</p></div></div>
+</div>
+{% include "admin/_live_map_widget.html" with height="calc(100vh - 290px)" %}
+{% endblock %}
+

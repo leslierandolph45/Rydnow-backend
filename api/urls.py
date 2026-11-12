@@ -11,6 +11,7 @@ from .views import (
     rider_submit_documents,
     customer_profile,
 )
+from api import admin_dashboard
 
 from .views import MyRiderProfileView
 urlpatterns = [
@@ -35,6 +36,11 @@ urlpatterns = [
     # === Location & Discovery ===
     path("rider/update-location/", views.update_rider_location, name="update-rider-location"),
     path("riders/nearby/", views.get_nearby_riders, name="get-nearby-riders"),
+
+    # LIVE MAP
+    path("admin/live-map/", admin.site.admin_view(admin_dashboard.live_map_page), name="rn_live_map"),
+    path("admin/live-map/data/", admin.site.admin_view(admin_dashboard.live_map_data), name="rn_live_map_data"),
+    path("admin/", admin.site.urls),
 
     # === Paystack Payments ===
     path("payments/paystack/webhook/", views.paystack_webhook, name="paystack-webhook"),

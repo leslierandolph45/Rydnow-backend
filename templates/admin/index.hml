@@ -1,0 +1,75 @@
+{% extends "admin/base.html" %}
+{% load i18n %}
+{% block breadcrumbs %}{% endblock %}
+{% block title %}Dashboard | {{ site_title|default:"Admin" }}{% endblock %}
+{% block content %}
+<div class="rn">
+  <div class="rn-head">
+    <div><h1>Dashboard overview</h1><p>{{ rn.today|date:"l, j F Y" }} · RYDNOW operations</p></div>
+    <a class="rn-btn" href="{{ rn.live_map_url }}">Open live map</a>
+  </div>
+
+  <div class="rn-grid rn-kpis">
+    <div class="rn-card rn-kpi blue"><small>Total riders</small><b>{{ rn.kpis.total }}</b></div>
+    <div class="rn-card rn-kpi green"><small>Verified</small><b>{{ rn.kpis.verified }}</b></div>
+    <div class="rn-card rn-kpi gold"><small>Awaiting verification</small><b>{{ rn.kpis.awaiting }}</b></div>
+    <div class="rn-card rn-kpi green"><small>Online now</small><b>{{ rn.kpis.online }}</b></div>
+    <div class="rn-card rn-kpi blue"><small>Bookings in progress</small><b>{{ rn.kpis.active_bookings }}</b></div>
+    <div class="rn-card rn-kpi gold"><small>Revenue today</small><b>GH₵ {{ rn.kpis.revenue }}</b></div>
+  </div>
+
+  <div class="rn-grid rn-two">
+    <div class="rn-card"><h3>Verification status</h3>
+      <div class="rn-donut">
+        <div class="ring" style="background:{{ rn.donut }}"><span>{{ rn.verified_pct }}%</span></div>
+        <ul class="rn-leg">{% for l in rn.legend %}
+          <li><i style="background:{{ l.color }}"></i>{{ l.label }}<b>{{ l.n }}</b></li>{% endfor %}</ul>
+      </div>
+      <div class="rn-todo">
+        <a href="{% url 'admin:api_riderdocument_changelist' %}?status__exact=pending"><b>{{ rn.todo.docs }}</b>documents to review</a>
+        <a href="{% url 'admin:api_riderprofile_changelist' %}?verification_status__exact=under_review"><b>{{ rn.todo.under_review }}</b>riders under review</a>
+        <a href="{% url 'admin:api_riderprofile_changelist' %}"><b>{{ rn.todo.licences }}</b>licences expiring ≤ 30 days</a>
+      </div>
+    </div>
+    <div class="rn-card"><h3>Booking activity · last 14 days</h3>
+      <svg class="rn-svg" viewBox="0 0 640 150" preserveAspectRatio="none" role="img" aria-label="Bookings per day">
+        <defs><linearGradient id="rg" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#1E3FCE" stop-opacity=".30"/><stop offset="1" stop-color="#1E3FCE" stop-opacity="0"/>
+        </linearGradient></defs>
+        <path d="{{ rn.chart.total_area }}" fill="url(#rg)"/>
+        <path d="{{ rn.chart.total_line }}" fill="none" stroke="#1E3FCE" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
+        <path d="{{ rn.chart.done_line }}" fill="none" stroke="#F5B82E" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
+      </svg>
+      <div class="rn-axis"><span>{{ rn.chart.first|date:"j M" }}</span><span>
+        <b style="color:#1E3FCE">● Created</b> &nbsp; <b style="color:#F5B82E">● Completed</b> &nbsp; peak {{ rn.chart.peak }}/day</span>
+        <span>{{ rn.chart.last|date:"j M" }}</span></div>
+    </div>
+  </div>
+
+  <div class="rn-card" style="padding:0;overflow:hidden;margin-bottom:16px">
+    <div style="padding:16px 20px 0"><h3>Live rider map</h3></div>
+    {% include "admin/_live_map_widget.html" with compact=True height="420px" %}
+  </div>
+
+  <div class="rn-grid" style="grid-template-columns:repeat(auto-fit,minmax(380px,1fr))">
+    <div class="rn-card"><h3>Recent riders</h3>
+      <table class="rn-tbl"><thead><tr><th>Rider</th><th>Status</th><th>Live</th></tr></thead><tbody>
+      {% for r in rn.recent_riders %}<tr>
+        <td class="rn-who">{% if r.photo %}<img class="rn-av" src="{{ r.photo }}" alt="">{% else %}<span class="rn-av">{{ r.name|slice:":1"|upper }}</span>{% endif %}
+          <div><a href="{{ r.url }}">{{ r.name }}</a><small>{{ r.code }}</small></div></td>
+        <td><span class="rn-pill {{ r.status_key }}">{{ r.status }}</span></td>
+        <td><span class="rn-dot {% if r.online %}on{% endif %}"></span>{% if r.online %}Online{% else %}Offline{% endif %}</td>
+      </tr>{% empty %}<tr><td colspan="3">No riders yet.</td></tr>{% endfor %}</tbody></table>
+    </div>
+    <div class="rn-card"><h3>Recent bookings</h3>
+      <table class="rn-tbl"><thead><tr><th>Booking</th><th>Rider</th><th>Status</th><th>Fare</th></tr></thead><tbody>
+      {% for b in rn.recent_bookings %}<tr>
+        <td><a href="{{ b.url }}">{{ b.ref }}</a><small style="display:block;opacity:.6">{{ b.service }} · {{ b.customer }}</small></td>
+        <td>{{ b.rider }}</td><td><span class="rn-pill {{ b.status_key }}">{{ b.status }}</span></td>
+        <td>GH₵ {{ b.fare }}</td>
+      </tr>{% empty %}<tr><td colspan="4">No bookings yet.</td></tr>{% endfor %}</tbody></table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
