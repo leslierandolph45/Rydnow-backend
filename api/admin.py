@@ -37,6 +37,7 @@ from django.utils import timezone
 from django.utils.translation import ngettext
 from . import models as api_models
 from .admin_documents import RiderDocumentPreviewMixin
+from django import forms
 
 from .models import (
     # Customer
@@ -326,66 +327,77 @@ def get_file_info(field_file):
     return url, os.path.splitext(field_file.name)[1].lower()
 
 
-@admin.register(RiderDocument)
-class RiderDocumentAdmin(RiderDocumentPreviewMixin, BaseAdmin):
-    list_display = (
-        "rider_name",
-        "document_type",
-        "status_badge",
-        "expiry_display",
-        "preview",
-        "uploaded_at",
-        "reviewed_by",
-    )
-    list_filter = ("status", "document_type", ExpiryFilter, "uploaded_at")
-    search_fields = ("rider_profile__full_name", "notes")
-    list_select_related = ("rider_profile", "reviewed_by")
-    raw_id_fields = ("rider_profile",)
-    date_hierarchy = "uploaded_at"
-    ordering = ("-uploaded_at",)
-    list_per_page = 25
-    save_on_top = True
-    actions = ("approve_documents", "reject_documents", "mark_expired")
+logger = logging.getLogger(__name__)
 
-    readonly_fields = ("id", "preview_large", "uploaded_at", "reviewed_at", "reviewed_by")
-    fieldsets = (
-        ("Document", {
-            "fields": ("id", "rider_profile", "document_type", "file", "preview_large", "expiry_date"),
-        }),
-        ("Review", {
-            "fields": ("status", "notes", "reviewed_by", "reviewed_at"),
-        }),
-        ("Timestamps", {
-            "fields": ("uploaded_at",),
-            "classes": ("collapse",),
-        }),
-    )
+# ── Configuration ─────────────────────────────────────────────────────────────
+PENDING, APPROVED, REJECTED, EXPIRED = "pending", "approved", "rejected", "expired"
+REVIEWED_STATUSES = {APPROVED, REJECTED}
 
-    # ── List columns ──────────────────────────────────────────────
-    @admin.display(description="Rider", ordering="rider_profile__full_name")
-    def rider_name(self, obj):
-        return obj.rider_profile.full_name
+# Fill in your real document_type values (e.g. Ghana Card, passport photo,
+# riding licence). A rider can only be approved when each of these has an
+# approved, unexpired document. Leave empty to skip this check.
+REQUIRED_DOCUMENT_TYPES: tuple = ()
 
-    @admin.display(description="Status", ordering="status")
-    def status_badge(self, obj):
-        return format_html(
-            '<span style="background:{};color:#fff;padding:2px 10px;'
-            'border-radius:12px;font-size:11px;font-weight:600;">{}</span>',
-            STATUS_COLORS.get(obj.status, "#6b7280"),
-            obj.get_status_display(),
+STATUS_COLORS = {
+    PENDING: "#d97706",
+    APPROVED: "#16a34a",
+    REJECTED: "#dc2626",
+    EXPIRED: "#6b7280",
+}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+PDF_EXTENSIONS = {".pdf"}
+EXPIRING_SOON_DAYS = 30
+
+
+# ── Filters / forms ───────────────────────────────────────────────────────────
+class ExpiryFilter(admin.SimpleListFilter):
+    title = "expiry"
+    parameter_name = "expiry"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("expired", "Expired"),
+            ("soon", f"Expires within {EXPIRING_SOON_DAYS} days"),
+            ("valid", "Valid"),
+            ("none", "No expiry date"),
         )
 
-    @admin.display(description="Expiry", ordering="expiry_date")
-    def expiry_display(self, obj):
-        if not obj.expiry_date:
-            return "—"
-        if obj.is_expired:
-            return format_html(
-                '<span style="color:#dc2626;font-weight:600;">{} (expired)</span>',
-                obj.expiry_date,
+    def queryset(self, request, queryset):
+        today = timezone.localdate()
+        value = self.value()
+        if value == "expired":
+            return queryset.filter(expiry_date__lt=today)
+        if value == "soon":
+            return queryset.filter(
+                expiry_date__gte=today,
+                expiry_date__lte=today + timedelta(days=EXPIRING_SOON_DAYS),
             )
-        return obj.expiry_date
+        if value == "valid":
+            return queryset.filter(expiry_date__gte=today)
+        if value == "none":
+            return queryset.filter(expiry_date__isnull=True)
+        return queryset
 
+
+class RiderDocumentAdminForm(forms.ModelForm):
+    class Meta:
+        model = RiderDocument
+        fields = "__all__"
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get("status") == REJECTED and not (cleaned.get("notes") or "").strip():
+            self.add_error("notes", "Give the rider a reason when rejecting a document.")
+        return cleaned
+
+
+# ── Document admin mixin (previews + bulk actions) ────────────────────────────
+class RiderDocumentPreviewMixin:
+    """Previews, review stamping on save, and the three bulk actions."""
+
+    form = RiderDocumentAdminForm
+
+    # Previews ----------------------------------------------------------------
     @admin.display(description="Preview")
     def preview(self, obj):
         return self._render_file(obj, size=48)
@@ -400,13 +412,14 @@ class RiderDocumentAdmin(RiderDocumentPreviewMixin, BaseAdmin):
     def _render_file(obj, size):
         """Never raises: a broken or missing file must not take down the page."""
         try:
-            url, ext = get_file_info(obj.file)
+            if not obj.file:
+                return "No file"
+            url = obj.file.url
+            ext = os.path.splitext(obj.file.name)[1].lower()
         except Exception:  # storage backend errors (S3/GCS signing, etc.)
             logger.exception("Could not resolve file for RiderDocument %s", obj.pk)
             return "File unavailable"
 
-        if not url:
-            return "No file"
         if ext in IMAGE_EXTENSIONS:
             return format_html(
                 '<a href="{0}" target="_blank" rel="noopener">'
@@ -419,58 +432,182 @@ class RiderDocumentAdmin(RiderDocumentPreviewMixin, BaseAdmin):
         label = "Open PDF" if ext in PDF_EXTENSIONS else "Open file"
         return format_html('<a href="{}" target="_blank" rel="noopener">{}</a>', url, label)
 
-    # ── Saving ────────────────────────────────────────────────────
+    # Saving a single document from its change page ---------------------------
     def save_model(self, request, obj, form, change):
-        reviewed = {"approved", "rejected"}
-        if change and "status" in form.changed_data and obj.status in reviewed:
+        if change and "status" in form.changed_data and obj.status in REVIEWED_STATUSES:
             obj.reviewed_by = request.user
             obj.reviewed_at = timezone.now()
         super().save_model(request, obj, form, change)
 
-    # ── Bulk actions ──────────────────────────────────────────────
-    @admin.action(description="Approve selected documents", permissions=["change"])
+    # Bulk actions ------------------------------------------------------------
+    @admin.action(description="✅ Approve selected documents", permissions=["change"])
     def approve_documents(self, request, queryset):
-        count = self._bulk_review(request, queryset, approve=True)
+        changed, skipped = self._bulk_set_status(request, queryset, APPROVED)
         self.message_user(
             request,
-            ngettext("%d document approved.", "%d documents approved.", count) % count,
+            ngettext("%d document approved.", "%d documents approved.", changed) % changed,
             messages.SUCCESS,
         )
+        if skipped:
+            self.message_user(
+                request,
+                ngettext(
+                    "%d document skipped because its expiry date has passed.",
+                    "%d documents skipped because their expiry date has passed.",
+                    skipped,
+                ) % skipped,
+                messages.WARNING,
+            )
 
-    @admin.action(description="Reject selected documents", permissions=["change"])
+    @admin.action(description="❌ Reject selected documents", permissions=["change"])
     def reject_documents(self, request, queryset):
-        count = self._bulk_review(request, queryset, approve=False)
+        changed, _ = self._bulk_set_status(request, queryset, REJECTED)
         self.message_user(
             request,
-            ngettext("%d document rejected.", "%d documents rejected.", count) % count,
+            ngettext("%d document rejected.", "%d documents rejected.", changed) % changed,
             messages.WARNING,
         )
+        if changed:
+            self.message_user(
+                request,
+                "Open a document to add a reason so the rider knows what to fix.",
+                messages.INFO,
+            )
 
-    @admin.action(description="Mark selected documents as expired", permissions=["change"])
+    @admin.action(description="⏰ Mark selected documents as expired", permissions=["change"])
     def mark_expired(self, request, queryset):
-        count = 0
-        with transaction.atomic():
-            for document in queryset.select_for_update().exclude(status="expired"):
-                document.status = "expired"
-                document.save(update_fields=["status"])
-                self.log_change(request, document, "Bulk action: marked as expired.")
-                count += 1
+        changed, _ = self._bulk_set_status(request, queryset, EXPIRED)
         self.message_user(
             request,
-            ngettext("%d document marked as expired.", "%d documents marked as expired.", count) % count,
+            ngettext(
+                "%d document marked as expired.",
+                "%d documents marked as expired.",
+                changed,
+            ) % changed,
             messages.INFO,
         )
 
-    def _bulk_review(self, request, queryset, approve):
-        """Atomic, row-locked, audited. Uses the model's review() so reviewer/time are stamped."""
-        target = "approved" if approve else "rejected"
-        count = 0
+    def _bulk_set_status(self, request, queryset, status):
+        """
+        Atomic, row-locked and audited. Returns (changed, skipped).
+
+        The admin queryset carries list_select_related joins; PostgreSQL rejects
+        SELECT ... FOR UPDATE across a nullable outer join, so we lock a fresh,
+        join-free queryset by primary key instead.
+        """
+        ids = list(queryset.values_list("pk", flat=True))
+        today = timezone.localdate()
+        changed = skipped = 0
+
         with transaction.atomic():
-            for document in queryset.select_for_update().exclude(status=target):
-                document.review(by=request.user, approve=approve)
-                self.log_change(request, document, f"Bulk action: status set to '{target}'.")
-                count += 1
-        return count
+            locked = (
+                self.model.objects.select_for_update()
+                .filter(pk__in=ids)
+                .exclude(status=status)
+            )
+            for document in locked:
+                if (
+                    status == APPROVED
+                    and document.expiry_date
+                    and document.expiry_date < today
+                ):
+                    skipped += 1
+                    continue
+
+                document.status = status
+                fields = ["status"]
+                if status in REVIEWED_STATUSES:
+                    document.reviewed_by = request.user
+                    document.reviewed_at = timezone.now()
+                    fields += ["reviewed_by", "reviewed_at"]
+                document.save(update_fields=fields)
+                self.log_change(request, document, f"Bulk action: status set to '{status}'.")
+                changed += 1
+        return changed, skipped
+
+
+# ── Rider-level approval (add to your existing RiderProfile admin) ────────────
+class RiderDocumentInline(admin.TabularInline):
+    """Read-only overview of a rider's documents on the rider page."""
+
+    model = RiderDocument
+    fk_name = "rider_profile"
+    extra = 0
+    can_delete = False
+    fields = ("document_type", "status", "expiry_date", "uploaded_at", "open_document")
+    readonly_fields = fields
+    show_change_link = True
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    @admin.display(description="File")
+    def open_document(self, obj):
+        return RiderDocumentPreviewMixin._render_file(obj, size=48)
+
+
+class RiderReviewMixin:
+    """
+    Add to your RiderProfile admin:
+
+        class RiderProfileAdmin(RiderReviewMixin, BaseAdmin):
+            actions = ("approve_riders", "reject_riders")
+            inlines = (RiderDocumentInline,)
+    """
+
+    @admin.action(description="✅ Approve selected riders", permissions=["change"])
+    def approve_riders(self, request, queryset):
+        today = timezone.localdate()
+        ids = list(queryset.values_list("pk", flat=True))
+        approved = 0
+        blocked = []
+
+        with transaction.atomic():
+            for rider in RiderProfile.objects.select_for_update().filter(pk__in=ids):
+                if REQUIRED_DOCUMENT_TYPES:
+                    have = set(
+                        RiderDocument.objects.filter(rider_profile=rider, status=APPROVED)
+                        .exclude(expiry_date__lt=today)
+                        .values_list("document_type", flat=True)
+                    )
+                    missing = set(REQUIRED_DOCUMENT_TYPES) - have
+                    if missing:
+                        blocked.append(f"{rider.full_name} (missing: {', '.join(sorted(map(str, missing)))})")
+                        continue
+                if rider.is_verified:
+                    continue
+                rider.is_verified = True
+                rider.save(update_fields=["is_verified"])
+                self.log_change(request, rider, "Rider approved (verified).")
+                approved += 1
+
+        self.message_user(
+            request,
+            ngettext("%d rider approved.", "%d riders approved.", approved) % approved,
+            messages.SUCCESS,
+        )
+        if blocked:
+            self.message_user(
+                request,
+                "Not approved, documents incomplete: " + "; ".join(blocked),
+                messages.ERROR,
+            )
+
+    @admin.action(description="❌ Reject selected riders", permissions=["change"])
+    def reject_riders(self, request, queryset):
+        ids = list(queryset.values_list("pk", flat=True))
+        rejected = 0
+        with transaction.atomic():
+            for rider in RiderProfile.objects.select_for_update().filter(pk__in=ids, is_verified=True):
+                rider.is_verified = False
+                rider.save(update_fields=["is_verified"])
+                self.log_change(request, rider, "Rider verification removed (rejected).")
+                rejected += 1
+        self.message_user(
+            request,
+            ngettext("%d rider rejected.", "%d riders rejected.", rejected) % rejected,
+            messages.WARNING,
+        )
 
 
 
