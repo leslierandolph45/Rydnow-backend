@@ -17,7 +17,14 @@ from django.template.response import TemplateResponse
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import Booking, RiderDocument, RiderProfile, VerificationStatus
+from .models import (
+    Booking,
+    BookingOffer,
+    RiderDocument,
+    RiderOnlineSession,
+    RiderProfile,
+    VerificationStatus,
+)
 
 try:  # defined somewhere in your models.py
     from .models import LOCATION_STALE_SECONDS
@@ -142,11 +149,11 @@ def live_map_data(request):
 
 
 # ─────────────────────────── dashboard ───────────────────────────
-def _line_paths(values, width=640, height=150, pad=8):
-    """Turn a list of numbers into SVG line + area paths."""
+def _paths(values, top, width=640, height=150, pad=8):
+    """SVG line + closed-area path for a series, scaled to a shared maximum."""
     if not values:
         return "", ""
-    top = max(max(values), 1)
+    top = max(top, 1)
     step = (width - 2 * pad) / max(len(values) - 1, 1)
     pts = [(pad + i * step, height - pad - (v / top) * (height - 2 * pad)) for i, v in enumerate(values)]
     line = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
@@ -154,18 +161,48 @@ def _line_paths(values, width=640, height=150, pad=8):
     return line, area
 
 
-def dashboard_callback(request, context):
-    now = timezone.now()
-    today = timezone.localdate()
+def _pct(part, whole):
+    return round(part * 100 / whole) if whole else 0
 
+
+def _daily(qs, field, start, distinct=None):
+    """{date: count} for the last 14 days."""
+    agg = Count(distinct, distinct=True) if distinct else Count("pk")
+    rows = (
+        qs.filter(**{f"{field}__date__gte": start})
+        .annotate(day=TruncDate(field)).order_by().values("day").annotate(n=agg)
+    )
+    return {r["day"]: r["n"] for r in rows}
+
+
+def dashboard_callback(request, context):
+    today = timezone.localdate()
     riders = RiderProfile.objects.not_deleted()
+
+    # ── rider counts & percentages ──
     by_status = dict(riders.order_by().values_list("verification_status").annotate(n=Count("pk")))
     total = sum(by_status.values())
     verified = by_status.get(VerificationStatus.VERIFIED, 0)
     awaiting = by_status.get(VerificationStatus.PENDING, 0) + by_status.get(VerificationStatus.UNDER_REVIEW, 0)
     online = riders.filter(is_online=True).count()
+    week_new = riders.filter(created_at__date__gt=today - timedelta(days=7)).count()
+    prev_week = riders.filter(
+        created_at__date__lte=today - timedelta(days=7), created_at__date__gt=today - timedelta(days=14)
+    ).count()
+    growth = (round((week_new - prev_week) * 100 / prev_week) if prev_week else (100 if week_new else 0))
 
-    # Donut: verification breakdown
+    kpis = [
+        {"label": "Total riders", "value": f"{total:,}", "icon": "groups", "tone": "slate",
+         "note": f"+{week_new} this week", "pill": f"{growth:+d}% vs last week", "pill_tone": "up" if growth >= 0 else "down"},
+        {"label": "Verified", "value": f"{verified:,}", "icon": "verified", "tone": "green",
+         "note": "of all riders", "pill": f"{_pct(verified, total)}%", "pill_tone": "green"},
+        {"label": "Pending", "value": f"{awaiting:,}", "icon": "schedule", "tone": "orange",
+         "note": "awaiting verification", "pill": f"{_pct(awaiting, total)}%", "pill_tone": "orange"},
+        {"label": "Online now", "value": f"{online:,}", "icon": "bolt", "tone": "teal",
+         "note": "of verified riders", "pill": f"{_pct(online, verified)}%", "pill_tone": "teal"},
+    ]
+
+    # ── donut ──
     palette = [
         (VerificationStatus.VERIFIED, "Verified", "#1FA463"),
         (VerificationStatus.UNDER_REVIEW, "Under review", "#1E3FCE"),
@@ -181,39 +218,57 @@ def dashboard_callback(request, context):
         if n:
             stops.append(f"{color} {acc:.2f}% {acc + pct:.2f}%")
             acc += pct
-    donut = f"conic-gradient({', '.join(stops)})" if stops else "conic-gradient(#3a3f55 0 100%)"
+    donut = f"conic-gradient({', '.join(stops)})" if stops else "conic-gradient(#c9cedd 0 100%)"
 
-    # 14-day booking activity
+    # ── rider activity (14 days): active riders vs new sign-ups ──
     start = today - timedelta(days=13)
-    rows = (
-        Booking.objects.filter(created_at__date__gte=start)
-        .annotate(day=TruncDate("created_at"))
-        .order_by()
-        .values("day")
-        .annotate(total=Count("pk"), done=Count("pk", filter=Q(status="completed")))
-    )
-    per_day = {r["day"]: r for r in rows}
     days = [start + timedelta(days=i) for i in range(14)]
-    totals = [per_day.get(d, {}).get("total", 0) for d in days]
-    dones = [per_day.get(d, {}).get("done", 0) for d in days]
-    t_line, t_area = _line_paths(totals)
-    d_line, _ = _line_paths(dones)
+    active_by_day = _daily(RiderOnlineSession.objects.all(), "started_at", start, distinct="rider")
+    new_by_day = _daily(riders, "created_at", start)
+    active = [active_by_day.get(d, 0) for d in days]
+    signups = [new_by_day.get(d, 0) for d in days]
+    top = max(active + signups + [1])
+    a_line, a_area = _paths(active, top)
+    n_line, _ = _paths(signups, top)
 
-    today_qs = Booking.objects.filter(created_at__date=today)
+    # ── booking activity (14 days) ──
+    created = _daily(Booking.objects.all(), "created_at", start)
+    done = _daily(Booking.objects.filter(status="completed"), "created_at", start)
+    b_created = [created.get(d, 0) for d in days]
+    b_done = [done.get(d, 0) for d in days]
+    btop = max(b_created + [1])
+    b_line, b_area = _paths(b_created, btop)
+    bd_line, _ = _paths(b_done, btop)
+
+    # ── today's performance in percentages ──
+    t = Booking.objects.filter(created_at__date=today).order_by().aggregate(
+        n=Count("pk"), done=Count("pk", filter=Q(status="completed")),
+        cancelled=Count("pk", filter=Q(status="cancelled")),
+        assigned=Count("pk", filter=Q(assigned_rider__isnull=False)),
+    )
+    o = BookingOffer.objects.filter(sent_at__date=today).order_by().aggregate(
+        n=Count("pk"), ok=Count("pk", filter=Q(status="accepted")),
+    )
+    perf = [
+        {"label": "Booking completion", "pct": _pct(t["done"], t["n"]), "detail": f'{t["done"]} of {t["n"]} bookings', "color": "#1FA463"},
+        {"label": "Rider matched", "pct": _pct(t["assigned"], t["n"]), "detail": f'{t["assigned"]} of {t["n"]} bookings', "color": "#1E3FCE"},
+        {"label": "Offer acceptance", "pct": _pct(o["ok"], o["n"]), "detail": f'{o["ok"]} of {o["n"]} offers', "color": "#F5B82E"},
+        {"label": "Cancellations", "pct": _pct(t["cancelled"], t["n"]), "detail": f'{t["cancelled"]} of {t["n"]} bookings', "color": "#D64545"},
+        {"label": "Riders online", "pct": _pct(online, verified), "detail": f"{online} of {verified} verified", "color": "#14B8C4"},
+    ]
+
     revenue = (
         Booking.objects.filter(completed_at__date=today, status="completed")
         .aggregate(s=Sum("total_fare"))["s"] or Decimal("0.00")
     )
 
     recent_riders = []
-    for r in riders.select_related("user").order_by("-created_at")[:8]:
+    for r in riders.select_related("zone").order_by("-created_at")[:10]:
         recent_riders.append({
-            "name": r.full_name,
-            "code": r.rider_code,
+            "name": r.full_name, "code": r.rider_code,
             "photo": r.profile_photo.url if r.profile_photo else "",
-            "status": r.get_verification_status_display(),
-            "status_key": r.verification_status,
-            "online": r.is_online,
+            "status": r.get_verification_status_display(), "status_key": r.verification_status,
+            "online": r.is_online, "location": r.city or "—",
             "seen": r.location_updated_at or r.last_online_at,
             "url": reverse("admin:api_riderprofile_change", args=[r.pk]),
         })
@@ -221,45 +276,39 @@ def dashboard_callback(request, context):
     recent_bookings = []
     for b in Booking.objects.select_related("customer__user", "assigned_rider").order_by("-created_at")[:8]:
         recent_bookings.append({
-            "ref": b.booking_ref,
-            "service": b.get_service_type_display(),
+            "ref": b.booking_ref, "service": b.get_service_type_display(),
             "customer": _customer_name(b.customer),
             "rider": b.assigned_rider.full_name if b.assigned_rider_id else "—",
-            "status": b.get_status_display(),
-            "status_key": b.status,
-            "fare": b.total_fare,
+            "status": b.get_status_display(), "status_key": b.status, "fare": b.total_fare,
             "url": reverse("admin:api_booking_change", args=[b.pk]),
         })
 
-    context.update({
-        "rn": {
-            "today": today,
-            "kpis": {
-                "total": total, "verified": verified, "awaiting": awaiting, "online": online,
-                "active_bookings": Booking.objects.filter(status__in=LIVE_BOOKING_STATUSES).count(),
-                "today_bookings": today_qs.count(),
-                "revenue": revenue,
-            },
-            "verified_pct": round(verified / total * 100) if total else 0,
-            "donut": donut,
-            "legend": legend,
-            "chart": {
-                "total_line": t_line, "total_area": t_area, "done_line": d_line,
-                "first": days[0], "last": days[-1], "peak": max(totals) if totals else 0,
-            },
-            "todo": {
-                "docs": RiderDocument.objects.filter(status="pending").count(),
-                "licences": riders.filter(
-                    license_expiry_date__isnull=False,
-                    license_expiry_date__lte=today + timedelta(days=30),
-                ).count(),
-                "under_review": by_status.get(VerificationStatus.UNDER_REVIEW, 0),
-            },
-            "recent_riders": recent_riders,
-            "recent_bookings": recent_bookings,
-            "live_data_url": reverse("rn_live_map_data"),
-            "live_map_url": reverse("rn_live_map"),
-        }
-    })
+    context.update({"rn": {
+        "today": today,
+        "kpis": kpis,
+        "extra": {
+            "active_bookings": Booking.objects.filter(status__in=LIVE_BOOKING_STATUSES).count(),
+            "revenue": revenue,
+            "docs": RiderDocument.objects.filter(status="pending").count(),
+        },
+        "verified_pct": _pct(verified, total), "donut": donut, "legend": legend,
+        "activity": {"line": a_line, "area": a_area, "new_line": n_line,
+                     "peak": top, "first": days[0], "last": days[-1]},
+        "bookings_chart": {"line": b_line, "area": b_area, "done_line": bd_line,
+                           "peak": btop, "total14": sum(b_created), "done14": sum(b_done),
+                           "rate": _pct(sum(b_done), sum(b_created))},
+        "perf": perf,
+        "todo": {
+            "docs": RiderDocument.objects.filter(status="pending").count(),
+            "licences": riders.filter(
+                license_expiry_date__isnull=False,
+                license_expiry_date__lte=today + timedelta(days=30),
+            ).count(),
+            "under_review": by_status.get(VerificationStatus.UNDER_REVIEW, 0),
+        },
+        "recent_riders": recent_riders, "recent_bookings": recent_bookings,
+        "live_data_url": reverse("rn_live_map_data"), "live_map_url": reverse("rn_live_map"),
+        "riders_url": reverse("admin:api_riderprofile_changelist"),
+    }})
     return context
 

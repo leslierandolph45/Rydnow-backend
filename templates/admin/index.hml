@@ -6,70 +6,125 @@
 <div class="rn">
   <div class="rn-head">
     <div><h1>Dashboard overview</h1><p>{{ rn.today|date:"l, j F Y" }} · RYDNOW operations</p></div>
-    <a class="rn-btn" href="{{ rn.live_map_url }}">Open live map</a>
+    <a class="rn-btn" href="{{ rn.live_map_url }}"><span class="material-symbols-outlined">map</span>Open live map</a>
   </div>
 
+  <!-- KPI cards -->
   <div class="rn-grid rn-kpis">
-    <div class="rn-card rn-kpi blue"><small>Total riders</small><b>{{ rn.kpis.total }}</b></div>
-    <div class="rn-card rn-kpi green"><small>Verified</small><b>{{ rn.kpis.verified }}</b></div>
-    <div class="rn-card rn-kpi gold"><small>Awaiting verification</small><b>{{ rn.kpis.awaiting }}</b></div>
-    <div class="rn-card rn-kpi green"><small>Online now</small><b>{{ rn.kpis.online }}</b></div>
-    <div class="rn-card rn-kpi blue"><small>Bookings in progress</small><b>{{ rn.kpis.active_bookings }}</b></div>
-    <div class="rn-card rn-kpi gold"><small>Revenue today</small><b>GH₵ {{ rn.kpis.revenue }}</b></div>
+    {% for k in rn.kpis %}
+    <div class="rn-card rn-kpi2" style="--sh:var(--rn-mute)">
+      <div><small>{{ k.label }}</small><b>{{ k.value }}</b>
+        <span class="rn-pillp {{ k.pill_tone }}">{{ k.pill }}</span><em>{{ k.note }}</em></div>
+      <div class="rn-ico {{ k.tone }}"><span class="material-symbols-outlined">{{ k.icon }}</span></div>
+    </div>{% endfor %}
   </div>
 
+  <div class="rn-sub">
+    <div class="rn-card rn-mini"><div class="rn-ico blue"><span class="material-symbols-outlined">route</span></div>
+      <div><b>{{ rn.extra.active_bookings }}</b><small>Bookings in progress</small></div></div>
+    <div class="rn-card rn-mini"><div class="rn-ico gold"><span class="material-symbols-outlined">payments</span></div>
+      <div><b>GH₵ {{ rn.extra.revenue }}</b><small>Revenue today</small></div></div>
+    <a class="rn-card rn-mini" style="text-decoration:none;color:inherit" href="{% url 'admin:api_riderdocument_changelist' %}?status__exact=pending">
+      <div class="rn-ico orange"><span class="material-symbols-outlined">fact_check</span></div>
+      <div><b>{{ rn.todo.docs }}</b><small>Documents to review</small></div></a>
+    <a class="rn-card rn-mini" style="text-decoration:none;color:inherit" href="{{ rn.riders_url }}?verification_status__exact=under_review">
+      <div class="rn-ico teal"><span class="material-symbols-outlined">hourglass_top</span></div>
+      <div><b>{{ rn.todo.under_review }}</b><small>Riders under review</small></div></a>
+    <a class="rn-card rn-mini" style="text-decoration:none;color:inherit" href="{{ rn.riders_url }}">
+      <div class="rn-ico slate"><span class="material-symbols-outlined">badge</span></div>
+      <div><b>{{ rn.todo.licences }}</b><small>Licences expiring ≤ 30 days</small></div></a>
+  </div>
+
+  <!-- Verification donut + rider activity -->
   <div class="rn-grid rn-two">
     <div class="rn-card"><h3>Verification status</h3>
       <div class="rn-donut">
-        <div class="ring" style="background:{{ rn.donut }}"><span>{{ rn.verified_pct }}%</span></div>
+        <div class="ring" style="background:{{ rn.donut }}"><span>{{ rn.verified_pct }}%<small>verified</small></span></div>
         <ul class="rn-leg">{% for l in rn.legend %}
-          <li><i style="background:{{ l.color }}"></i>{{ l.label }}<b>{{ l.n }}</b></li>{% endfor %}</ul>
-      </div>
-      <div class="rn-todo">
-        <a href="{% url 'admin:api_riderdocument_changelist' %}?status__exact=pending"><b>{{ rn.todo.docs }}</b>documents to review</a>
-        <a href="{% url 'admin:api_riderprofile_changelist' %}?verification_status__exact=under_review"><b>{{ rn.todo.under_review }}</b>riders under review</a>
-        <a href="{% url 'admin:api_riderprofile_changelist' %}"><b>{{ rn.todo.licences }}</b>licences expiring ≤ 30 days</a>
+          <li><i style="background:{{ l.color }}"></i>{{ l.label }}<b>{{ l.n }}</b><em>{{ l.pct }}%</em></li>{% endfor %}</ul>
       </div>
     </div>
-    <div class="rn-card"><h3>Booking activity · last 14 days</h3>
-      <svg class="rn-svg" viewBox="0 0 640 150" preserveAspectRatio="none" role="img" aria-label="Bookings per day">
-        <defs><linearGradient id="rg" x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0" stop-color="#1E3FCE" stop-opacity=".30"/><stop offset="1" stop-color="#1E3FCE" stop-opacity="0"/>
-        </linearGradient></defs>
-        <path d="{{ rn.chart.total_area }}" fill="url(#rg)"/>
-        <path d="{{ rn.chart.total_line }}" fill="none" stroke="#1E3FCE" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
-        <path d="{{ rn.chart.done_line }}" fill="none" stroke="#F5B82E" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
+    <div class="rn-card">
+      <div class="rn-chead"><h3>Rider activity · last 14 days</h3>
+        <div class="rn-key"><span><i style="background:#1E3FCE"></i>Riders active</span><span><i style="background:#F06A0A"></i>New sign-ups</span></div></div>
+      <svg class="rn-svg" viewBox="0 0 640 150" preserveAspectRatio="none" role="img" aria-label="Rider activity">
+        <defs><linearGradient id="ra" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#1E3FCE" stop-opacity=".28"/><stop offset="1" stop-color="#1E3FCE" stop-opacity="0"/></linearGradient></defs>
+        <line class="g" x1="0" x2="640" y1="8" y2="8"/><line class="g" x1="0" x2="640" y1="50" y2="50"/>
+        <line class="g" x1="0" x2="640" y1="92" y2="92"/><line class="g" x1="0" x2="640" y1="142" y2="142"/>
+        <path d="{{ rn.activity.area }}" fill="url(#ra)"/>
+        <path d="{{ rn.activity.line }}" fill="none" stroke="#1E3FCE" stroke-width="2.6" vector-effect="non-scaling-stroke"/>
+        <path d="{{ rn.activity.new_line }}" fill="none" stroke="#F06A0A" stroke-width="2.6" vector-effect="non-scaling-stroke"/>
       </svg>
-      <div class="rn-axis"><span>{{ rn.chart.first|date:"j M" }}</span><span>
-        <b style="color:#1E3FCE">● Created</b> &nbsp; <b style="color:#F5B82E">● Completed</b> &nbsp; peak {{ rn.chart.peak }}/day</span>
-        <span>{{ rn.chart.last|date:"j M" }}</span></div>
+      <div class="rn-axis"><span>{{ rn.activity.first|date:"j M" }}</span><span>peak {{ rn.activity.peak }}</span><span>{{ rn.activity.last|date:"j M" }}</span></div>
     </div>
   </div>
 
+  <!-- Live map -->
   <div class="rn-card" style="padding:0;overflow:hidden;margin-bottom:16px">
-    <div style="padding:16px 20px 0"><h3>Live rider map</h3></div>
-    {% include "admin/_live_map_widget.html" with compact=True height="420px" %}
+    <div class="rn-chead" style="padding:16px 20px 0"><h3>Live rider map</h3>
+      <a class="rn-btn ghost sm" href="{{ rn.live_map_url }}">Full screen</a></div>
+    {% include "admin/_live_map_widget.html" with compact=True height="430px" %}
   </div>
 
-  <div class="rn-grid" style="grid-template-columns:repeat(auto-fit,minmax(380px,1fr))">
-    <div class="rn-card"><h3>Recent riders</h3>
-      <table class="rn-tbl"><thead><tr><th>Rider</th><th>Status</th><th>Live</th></tr></thead><tbody>
-      {% for r in rn.recent_riders %}<tr>
-        <td class="rn-who">{% if r.photo %}<img class="rn-av" src="{{ r.photo }}" alt="">{% else %}<span class="rn-av">{{ r.name|slice:":1"|upper }}</span>{% endif %}
-          <div><a href="{{ r.url }}">{{ r.name }}</a><small>{{ r.code }}</small></div></td>
-        <td><span class="rn-pill {{ r.status_key }}">{{ r.status }}</span></td>
-        <td><span class="rn-dot {% if r.online %}on{% endif %}"></span>{% if r.online %}Online{% else %}Offline{% endif %}</td>
-      </tr>{% empty %}<tr><td colspan="3">No riders yet.</td></tr>{% endfor %}</tbody></table>
+  <!-- Today's performance + booking chart -->
+  <div class="rn-grid" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr))">
+    <div class="rn-card"><h3>Today’s performance</h3>
+      <div class="rn-perf">{% for p in rn.perf %}
+        <div><div class="top"><span>{{ p.label }}</span><b style="color:{{ p.color }}">{{ p.pct }}%</b></div>
+          <div class="track"><i style="width:{{ p.pct }}%;--c:{{ p.color }}"></i></div><small>{{ p.detail }}</small></div>{% endfor %}
+      </div>
     </div>
-    <div class="rn-card"><h3>Recent bookings</h3>
-      <table class="rn-tbl"><thead><tr><th>Booking</th><th>Rider</th><th>Status</th><th>Fare</th></tr></thead><tbody>
-      {% for b in rn.recent_bookings %}<tr>
-        <td><a href="{{ b.url }}">{{ b.ref }}</a><small style="display:block;opacity:.6">{{ b.service }} · {{ b.customer }}</small></td>
-        <td>{{ b.rider }}</td><td><span class="rn-pill {{ b.status_key }}">{{ b.status }}</span></td>
-        <td>GH₵ {{ b.fare }}</td>
-      </tr>{% empty %}<tr><td colspan="4">No bookings yet.</td></tr>{% endfor %}</tbody></table>
+    <div class="rn-card">
+      <div class="rn-chead"><h3>Bookings · last 14 days</h3>
+        <div class="rn-key"><span><i style="background:#1E3FCE"></i>Created {{ rn.bookings_chart.total14 }}</span>
+          <span><i style="background:#F5B82E"></i>Completed {{ rn.bookings_chart.done14 }} ({{ rn.bookings_chart.rate }}%)</span></div></div>
+      <svg class="rn-svg" viewBox="0 0 640 150" preserveAspectRatio="none" role="img" aria-label="Bookings">
+        <defs><linearGradient id="rb" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#F5B82E" stop-opacity=".30"/><stop offset="1" stop-color="#F5B82E" stop-opacity="0"/></linearGradient></defs>
+        <line class="g" x1="0" x2="640" y1="8" y2="8"/><line class="g" x1="0" x2="640" y1="50" y2="50"/>
+        <line class="g" x1="0" x2="640" y1="92" y2="92"/><line class="g" x1="0" x2="640" y1="142" y2="142"/>
+        <path d="{{ rn.bookings_chart.area }}" fill="url(#rb)"/>
+        <path d="{{ rn.bookings_chart.line }}" fill="none" stroke="#1E3FCE" stroke-width="2.6" vector-effect="non-scaling-stroke"/>
+        <path d="{{ rn.bookings_chart.done_line }}" fill="none" stroke="#F5B82E" stroke-width="2.6" vector-effect="non-scaling-stroke"/>
+      </svg>
+      <div class="rn-axis"><span>peak {{ rn.bookings_chart.peak }}/day</span></div>
     </div>
+  </div>
+
+  <!-- Recent riders -->
+  <div class="rn-card" style="margin-top:16px">
+    <div class="rn-chead"><h3>Recent riders</h3>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <input class="rn-search" id="rn-rsearch" type="search" placeholder="Search riders…" aria-label="Search recent riders">
+        <a class="rn-btn sm" href="{{ rn.riders_url }}">View all riders</a></div></div>
+    <div style="overflow-x:auto"><table class="rn-tbl" id="rn-rtable"><thead><tr>
+      <th>Rider</th><th>Status</th><th>Live</th><th>Location</th><th>Last seen</th><th>Actions</th></tr></thead><tbody>
+    {% for r in rn.recent_riders %}<tr>
+      <td><div class="rn-who">{% if r.photo %}<img class="rn-av" src="{{ r.photo }}" alt="">{% else %}<span class="rn-av">{{ r.name|slice:":1"|upper }}</span>{% endif %}
+        <div><a href="{{ r.url }}">{{ r.name }}</a><small>{{ r.code }}</small></div></div></td>
+      <td><span class="rn-pill {{ r.status_key }}">{{ r.status }}</span></td>
+      <td><span class="rn-dot {% if r.online %}on{% endif %}"></span>{% if r.online %}Online{% else %}Offline{% endif %}</td>
+      <td>{{ r.location }}</td>
+      <td>{% if r.seen %}{{ r.seen|timesince }} ago{% else %}—{% endif %}</td>
+      <td><a class="rn-btn ghost sm" href="{{ r.url }}">View</a></td>
+    </tr>{% empty %}<tr><td colspan="6">No riders yet.</td></tr>{% endfor %}</tbody></table></div>
+  </div>
+
+  <!-- Recent bookings -->
+  <div class="rn-card" style="margin-top:16px"><h3>Recent bookings</h3>
+    <div style="overflow-x:auto"><table class="rn-tbl"><thead><tr><th>Booking</th><th>Customer</th><th>Rider</th><th>Status</th><th>Fare</th></tr></thead><tbody>
+    {% for b in rn.recent_bookings %}<tr>
+      <td><a href="{{ b.url }}">{{ b.ref }}</a><small style="display:block;opacity:.6">{{ b.service }}</small></td>
+      <td>{{ b.customer }}</td><td>{{ b.rider }}</td>
+      <td><span class="rn-pill {{ b.status_key }}">{{ b.status }}</span></td><td>GH₵ {{ b.fare }}</td>
+    </tr>{% empty %}<tr><td colspan="5">No bookings yet.</td></tr>{% endfor %}</tbody></table></div>
   </div>
 </div>
+<script>
+(function(){var i=document.getElementById('rn-rsearch');if(!i)return;
+ i.addEventListener('input',function(){var q=i.value.toLowerCase();
+  document.querySelectorAll('#rn-rtable tbody tr').forEach(function(r){r.style.display=r.textContent.toLowerCase().indexOf(q)>-1?'':'none'})})})();
+</script>
 {% endblock %}
 
