@@ -264,9 +264,159 @@ class ServiceQualificationAdmin(BaseAdmin):
     pass
 
 
+STATUS_COLORS = {
+    "pending": "#d97706",
+    "approved": "#16a34a",
+    "rejected": "#dc2626",
+    "expired": "#6b7280",
+
+
 @admin.register(RiderDocument)
-class RiderDocumentAdmin(NoDeleteAdminMixin, BaseAdmin):
-    """Verification documents are retained for compliance."""
+class RiderDocumentAdmin(BaseAdmin):
+    list_display = (
+        "rider_name",
+        "document_type",
+        "status_badge",
+        "expiry_display",
+        "preview",
+        "uploaded_at",
+        "reviewed_by",
+    )
+    list_filter = ("status", "document_type", ExpiryFilter, "uploaded_at")
+    search_fields = ("rider_profile__full_name", "notes")
+    list_select_related = ("rider_profile", "reviewed_by")
+    raw_id_fields = ("rider_profile",)
+    date_hierarchy = "uploaded_at"
+    ordering = ("-uploaded_at",)
+    list_per_page = 25
+    save_on_top = True
+    actions = ("approve_documents", "reject_documents", "mark_expired")
+
+    readonly_fields = ("id", "preview_large", "uploaded_at", "reviewed_at", "reviewed_by")
+    fieldsets = (
+        ("Document", {
+            "fields": ("id", "rider_profile", "document_type", "file", "preview_large", "expiry_date"),
+        }),
+        ("Review", {
+            "fields": ("status", "notes", "reviewed_by", "reviewed_at"),
+        }),
+        ("Timestamps", {
+            "fields": ("uploaded_at",),
+            "classes": ("collapse",),
+        }),
+    )
+
+    # ── List columns ──────────────────────────────────────────────
+    @admin.display(description="Rider", ordering="rider_profile__full_name")
+    def rider_name(self, obj):
+        return obj.rider_profile.full_name
+
+    @admin.display(description="Status", ordering="status")
+    def status_badge(self, obj):
+        return format_html(
+            '<span style="background:{};color:#fff;padding:2px 10px;'
+            'border-radius:12px;font-size:11px;font-weight:600;">{}</span>',
+            STATUS_COLORS.get(obj.status, "#6b7280"),
+            obj.get_status_display(),
+        )
+
+    @admin.display(description="Expiry", ordering="expiry_date")
+    def expiry_display(self, obj):
+        if not obj.expiry_date:
+            return "—"
+        if obj.is_expired:
+            return format_html(
+                '<span style="color:#dc2626;font-weight:600;">{} (expired)</span>',
+                obj.expiry_date,
+            )
+        return obj.expiry_date
+
+    @admin.display(description="Preview")
+    def preview(self, obj):
+        return self._render_file(obj, size=48)
+
+    @admin.display(description="Preview")
+    def preview_large(self, obj):
+        if not obj.pk:
+            return "Save the document to see a preview."
+        return self._render_file(obj, size=320)
+
+    @staticmethod
+    def _render_file(obj, size):
+        """Never raises: a broken or missing file must not take down the page."""
+        try:
+            url, ext = get_file_info(obj.file)
+        except Exception:  # storage backend errors (S3/GCS signing, etc.)
+            logger.exception("Could not resolve file for RiderDocument %s", obj.pk)
+            return "File unavailable"
+
+        if not url:
+            return "No file"
+        if ext in IMAGE_EXTENSIONS:
+            return format_html(
+                '<a href="{0}" target="_blank" rel="noopener">'
+                '<img src="{0}" alt="Document" loading="lazy" '
+                'style="max-height:{1}px;max-width:{1}px;border-radius:6px;'
+                'object-fit:cover;" /></a>',
+                url,
+                size,
+            )
+        label = "Open PDF" if ext in PDF_EXTENSIONS else "Open file"
+        return format_html('<a href="{}" target="_blank" rel="noopener">{}</a>', url, label)
+
+    # ── Saving ────────────────────────────────────────────────────
+    def save_model(self, request, obj, form, change):
+        reviewed = {"approved", "rejected"}
+        if change and "status" in form.changed_data and obj.status in reviewed:
+            obj.reviewed_by = request.user
+            obj.reviewed_at = timezone.now()
+        super().save_model(request, obj, form, change)
+
+    # ── Bulk actions ──────────────────────────────────────────────
+    @admin.action(description="Approve selected documents", permissions=["change"])
+    def approve_documents(self, request, queryset):
+        count = self._bulk_review(request, queryset, approve=True)
+        self.message_user(
+            request,
+            ngettext("%d document approved.", "%d documents approved.", count) % count,
+            messages.SUCCESS,
+        )
+
+    @admin.action(description="Reject selected documents", permissions=["change"])
+    def reject_documents(self, request, queryset):
+        count = self._bulk_review(request, queryset, approve=False)
+        self.message_user(
+            request,
+            ngettext("%d document rejected.", "%d documents rejected.", count) % count,
+            messages.WARNING,
+        )
+
+    @admin.action(description="Mark selected documents as expired", permissions=["change"])
+    def mark_expired(self, request, queryset):
+        count = 0
+        with transaction.atomic():
+            for document in queryset.select_for_update().exclude(status="expired"):
+                document.status = "expired"
+                document.save(update_fields=["status"])
+                self.log_change(request, document, "Bulk action: marked as expired.")
+                count += 1
+        self.message_user(
+            request,
+            ngettext("%d document marked as expired.", "%d documents marked as expired.", count) % count,
+            messages.INFO,
+        )
+
+    def _bulk_review(self, request, queryset, approve):
+        """Atomic, row-locked, audited. Uses the model's review() so reviewer/time are stamped."""
+        target = "approved" if approve else "rejected"
+        count = 0
+        with transaction.atomic():
+            for document in queryset.select_for_update().exclude(status=target):
+                document.review(by=request.user, approve=approve)
+                self.log_change(request, document, f"Bulk action: status set to '{target}'.")
+                count += 1
+        return count
+
 
 
 @admin.register(RiderPayoutAccount)
