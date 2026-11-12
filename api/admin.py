@@ -264,9 +264,120 @@ class ServiceQualificationAdmin(BaseAdmin):
     pass
 
 
+import os
+
+from django.contrib import admin
+from django.utils.html import format_html
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+PDF_EXTENSIONS = {".pdf"}
+
+
+def get_file_info(field_file):
+    """
+    Return (url, extension) for a FileField value, or (None, None) if the
+    file is missing or its URL can't be resolved.
+
+    The extension is read from the stored file name, not the URL, so signed
+    URLs with query strings (S3, GCS) are detected correctly.
+    """
+    if not field_file:
+        return None, None
+    try:
+        url = field_file.url
+    except ValueError:
+        return None, None
+    return url, os.path.splitext(field_file.name)[1].lower()
+
+
 @admin.register(RiderDocument)
 class RiderDocumentAdmin(NoDeleteAdminMixin, BaseAdmin):
     """Verification documents are retained for compliance."""
+
+    list_display = (
+        "rider_name",
+        "document_type",
+        "status",
+        "uploaded_at",
+        "file_preview",
+    )
+    list_filter = ("document_type", "status", "uploaded_at")
+    search_fields = (
+        "rider_profile__full_name",
+        "rider_profile__user__email",
+        "rider_profile__user__username",
+    )
+    readonly_fields = ("uploaded_at", "file_preview_large")
+    list_select_related = ("rider_profile", "rider_profile__user")
+    ordering = ("-uploaded_at",)
+    list_per_page = 25
+
+    # ——————————————————————
+    # Columns
+    # ——————————————————————
+    @admin.display(description="Rider Name", ordering="rider_profile__full_name")
+    def rider_name(self, obj):
+        profile = obj.rider_profile
+        user = profile.user
+        return profile.full_name or user.get_full_name() or user.username
+
+    @admin.display(description="Preview")
+    def file_preview(self, obj):
+        """Small thumbnail for the changelist."""
+        url, ext = get_file_info(obj.document_file)
+        if not url:
+            return "—"
+
+        if ext in IMAGE_EXTENSIONS:
+            return format_html(
+                '<a href="{url}" target="_blank" rel="noopener noreferrer">'
+                '<img src="{url}" alt="Document preview" loading="lazy" '
+                'style="max-height:60px; border-radius:4px;"></a>',
+                url=url,
+            )
+        if ext in PDF_EXTENSIONS:
+            return format_html(
+                '<a href="{}" target="_blank" rel="noopener noreferrer">📄 PDF</a>',
+                url,
+            )
+        return format_html(
+            '<a href="{}" target="_blank" rel="noopener noreferrer">📁 View file</a>',
+            url,
+        )
+
+    # ——————————————————————
+    # Detail page
+    # ——————————————————————
+    @admin.display(description="Document Preview")
+    def file_preview_large(self, obj):
+        """Large preview for the change form."""
+        url, ext = get_file_info(obj.document_file)
+        if not url:
+            return "No file uploaded yet."
+
+        if ext in IMAGE_EXTENSIONS:
+            return format_html(
+                '<div style="margin:15px 0;">'
+                '<img src="{url}" alt="Document preview" '
+                'style="max-width:450px; border:1px solid #ddd; border-radius:8px;">'
+                '<br><a href="{url}" target="_blank" rel="noopener noreferrer" '
+                'style="margin-top:8px; display:inline-block;">'
+                "🔍 Open full size in new tab</a></div>",
+                url=url,
+            )
+        if ext in PDF_EXTENSIONS:
+            return format_html(
+                '<iframe src="{url}" style="width:100%; max-width:600px; height:500px; '
+                'border:1px solid #ddd; border-radius:8px;"></iframe>'
+                '<p><a href="{url}" target="_blank" rel="noopener noreferrer">'
+                "📂 Open PDF in new tab</a></p>",
+                url=url,
+            )
+        return format_html(
+            '<p><a href="{}" target="_blank" rel="noopener noreferrer">'
+            "📂 Click to open/download file</a></p>",
+            url,
+        )
 
 
 @admin.register(RiderPayoutAccount)
