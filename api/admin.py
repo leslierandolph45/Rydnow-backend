@@ -264,6 +264,31 @@ class ServiceQualificationAdmin(BaseAdmin):
     pass
 
 
+class ExpiryFilter(admin.SimpleListFilter):
+    title = "expiry"
+    parameter_name = "expiry"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("expired", "Expired"),
+            ("soon", "Expiring within 30 days"),
+            ("none", "No expiry date"),
+        ]
+
+    def queryset(self, request, queryset):
+        today = timezone.localdate()
+        value = self.value()
+        if value == "expired":
+            return queryset.filter(expiry_date__lt=today)
+        if value == "soon":
+            return queryset.filter(
+                expiry_date__gte=today,
+                expiry_date__lte=today + timedelta(days=30),
+            )
+        if value == "none":
+            return queryset.filter(expiry_date__isnull=True)
+        return queryset
+
 STATUS_COLORS = {
     "pending": "#d97706",
     "approved": "#16a34a",
