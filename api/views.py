@@ -485,8 +485,10 @@ def rider_submit_documents(request, rider):
     doc_type = data["document_type"]
 
     if rider.verification_status in (VerificationStatus.SUSPENDED, VerificationStatus.UNDER_REVIEW):
-        return fail("Documents cannot be changed while your account is under review or suspended.",
-                    status.HTTP_409_CONFLICT)
+        return fail(
+            "Documents cannot be changed while your account is under review or suspended.",
+            status.HTTP_409_CONFLICT,
+        )
 
     try:
         with transaction.atomic():
@@ -501,11 +503,21 @@ def rider_submit_documents(request, rider):
                 status=RiderDocument.DocumentStatus.APPROVED
             ).delete()
             document = RiderDocument.objects.create(
-                rider_profile=rider, document_type=doc_type, file=data["document_file"],
+                rider_profile=rider,
+                document_type=doc_type,
+                file=data["document_file"],
                 expiry_date=data.get("expiry_date"),
             )
     except IntegrityError:
         return fail("This document type has already been submitted.", status.HTTP_409_CONFLICT)
+    except Exception:
+        # Storage errors (bad MEDIA_ROOT, S3/Cloudinary credentials, disk) land here.
+        # Return JSON so the frontend shows a real message instead of an HTML 500.
+        logger.exception("Document save failed rider_id=%s type=%s", rider.id, doc_type)
+        return fail(
+            "We couldn't save your file. Please try again in a moment.",
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
     submitted = False
     if rider.documents_uploaded and rider.verification_status in (
@@ -516,6 +528,9 @@ def rider_submit_documents(request, rider):
             submitted = True
         except DjangoValidationError as exc:
             logger.warning("Auto-submit failed rider_id=%s: %s", rider.id, exc.messages)
+        except Exception:
+            # e.g. email/SMTP failure. The document is already saved, so don't fail the upload.
+            logger.exception("Auto-submit crashed rider_id=%s", rider.id)
 
     return ok(
         "Document uploaded successfully.",
@@ -526,6 +541,8 @@ def rider_submit_documents(request, rider):
         documents_uploaded=rider.documents_uploaded,
         submitted_for_review=submitted,
     )
+
+
 
 
 # ===========================================================================
