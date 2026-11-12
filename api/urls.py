@@ -8,8 +8,8 @@ from django.urls import path, include
 from .views import (
     customer_register,
     rider_register, 
-    rider_submit_documents,
     customer_profile,
+    rider_submit_documents,
 )
 from api import admin_dashboard
 
@@ -20,7 +20,7 @@ urlpatterns = [
 
     path("auth/register/customer/", customer_register, name="customer-register"),
     path("auth/register/rider/", rider_register, name="rider-register"),
-    path("rider/verify/", RiderVerifyView.as_view(), name=  "rider-verify")
+    path("rider/verify/", rider_submit_documents, name= "rider-verify"),
 
     # === Rider Wallet ===
     path("rider/wallet/", views.get_rider_wallet, name="rider-wallet"),
