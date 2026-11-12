@@ -1057,7 +1057,7 @@ class RiderProfile(models.Model):
             ),
             # Rating between 0 and 5
             models.CheckConstraint(
-                check=models.Q(rating_average__gte=0) & models.Q(rating_average__lte=5.0),
+                models.Q(rating_average__gte=0) & models.Q(rating_average__lte=5.0),
                 name="rider_rating_0_to_5",
             ),
             # Cannot refer yourself
