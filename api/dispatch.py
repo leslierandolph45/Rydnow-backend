@@ -160,56 +160,65 @@ return (
         servicequalification__service=service_key,
         servicequalification__status=ServiceQualificatiom.Status.APPROVED,
         is_active= True,
-        wallet__balance__gte+cfg.MIN_WALLET_BALANCE,
+        wallet__balance__gte=cfg.MIN_WALLET_BALANCE,
         current_lat__range=(lat - dlat * radius_km, lat + dlat * radius_km),
         current_lng__range=(lng - dlng * radius_km, lng + dlng * radius_km),
     )
-    .filter(Exists(approved_for_service)) .exclude(Exists(busy_on_job))
-    .exclude(dispatch_offers__status=DispatchOffer.Status.PENDING)
-    .exclude(pk__in=exclude_ids)
-    .exclude(current_lat=0, current_lng=0)
+    # EXCLUDE RIDERS WHO ARE BUSY ON JOB
+    .exclude(id__in=exclude_ids)
+    .filter(
+        Exists(
+            DispatchOdder.objects.filter(
+                rider=OuterRef("pk"),
+                status= DispatchOffer.Status.PENDING,
+            
+            )
+        )
+    )
+    .filter(~Exists(busy_on_job))
+    # DISTANCE + FINAL SORT
+    .annotate(distance_km= haversine_km(lat, lng))
     .filter(distance_km__lte=radius_km)
-
-    
-    .order_by("distance_k,", "-rating")
-
-        is_verified=True,
-        is_active=True,
-        is_available=True,
-        deleted_at__isnull=True,
-        licence_expired=False,
-        is_restricted_now=False,
-        user__rider_wallet__is_active=True,
-        user__rider_wallet__balance__gte=cfg.min_wallet, # GHS 50 rule
-        last_location_at__gte=now - timedelta(seconds=cfg.location_max_age_s),
-        current_lat__range=(lat - dlat, lat + dlat),
-        current_lng__range=(lng - dlng, lng + dlng),
+    .order_by ("distance_km", "-rating") 
 )
-.filter(Exists(approved_for_service)) .exclude(Exists(busy_on_job))
-.exclude(dispatch_offers__status=DispatchOffer.Status.PENDING)
-.exclude(pk__in=exclude_ids)
-.exclude(current_lat=0, current_lng=0)
-# qualified for THIS s.annotate(distance_km=_haversine_km(lat, lng))
-.filter(distance_km__lte=radius_km)
-)
-0.8)
+
 def _score(rider: RiderProfile, radius_km: float, now) -> float:
     cfg = get_config()
+    # HOW CLOSE: 1.0 = at pickup, 0.0 = at max radius
     proximity = max(0.0, 1.0 - float(rider.distance_km) / radius_km)
+    # Perfomace Rating : normalize 0-1
     rating = min(max(float(rider.performance_score or 0) / 5.0, 0.0), 1.0)
-    acceptance = float(rider.acceptance_rate if rider.acceptance_rate is not None else reliability = 1.0 - float(rider.cancellation_rate or 0)
+    # Acceptance Rate
+    acceptance = float(rider.acceptance_rate if rider.acceptance_rate is not None else 1.0)
+    # Reliability / cancellation rate
+    reliability = 1.0 - float(rider.cancellation_rate or 0)
+    # Fairness bonus: riders idle longest a small boost
     idle_min = 60.0
     if rider.last_trip_completed_at:
-    idle_min = (now - rider.last_trip_completed_at).total_seconds() / 60
-    fairness = min(idle_min / 60.0, 1.0)
-    return round(cfg.w_proximity * proximity + cfg.w_rating * rating + cfg.w_acceptance * acceptance + cfg.w_reliability * reliability + cfg.w_fairness * fairness,4,
+        idle_min = (now - rider.last_trip_completed_at).total_seconds() / 60
+        idle_min= min(max(idle_min/ 60.0, 1.0), 2.0)
+
+    return round(
+        cfg.w_proximity * proximity
+        + cfg.w_rating * rating
+        + cfg.w_acceptance * acceptance
+        + cfg.w_reliability * reliability
+        + cfg.w_fairness * fairness,
+        4,
 )
 def rank_candidates(booking: Booking, radius_km: float, exclude_ids):
     cfg = get_config()
     now = timezone.now()
-    qs = (qualified_riders(booking.service.key, booking.pickup_lat, booking.pickup_lng, radius_
+    
+    qs = (
+        get_qualified_riders(
+            booking.service.key,
+            booking.pickup_lat,
+            booking.pickup_lng,
+            exclude_ids=exclude_ids,
+        )
     .select_for_update(skip_locked=True, of=("self",)) # other dispatch workers skip lo.order_by("distance_km")[: cfg.candidates_per_round]
-)
+    )
     scored = [(_score(r, radius_km, now), r) for r in qs]
     scored.sort(key=lambda t: t[0], reverse=True)
     return scored
