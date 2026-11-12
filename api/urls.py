@@ -21,6 +21,7 @@ urlpatterns = [
     path("auth/register/customer/", customer_register, name="customer-register"),
     path("auth/register/rider/", rider_register, name="rider-register"),
     path("rider/verify/", rider_submit_documents, name= "rider-verify"),
+    path("rider/verification-status/", views.rider_verification_status, name= "rider-verification-status"),
 
     # === Rider Wallet ===
     path("rider/wallet/", views.get_rider_wallet, name="rider-wallet"),

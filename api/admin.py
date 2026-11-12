@@ -36,6 +36,7 @@ from datetime import timedelta
 from django.utils import timezone
 from django.utils.translation import ngettext
 from . import models as api_models
+from .admin_documents import RiderDocumentPreviewMixin
 
 from .models import (
     # Customer
@@ -326,7 +327,7 @@ def get_file_info(field_file):
 
 
 @admin.register(RiderDocument)
-class RiderDocumentAdmin(BaseAdmin):
+class RiderDocumentAdmin(RiderDocumentPreviewMixin, BaseAdmin):
     list_display = (
         "rider_name",
         "document_type",

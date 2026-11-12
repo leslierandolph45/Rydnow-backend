@@ -542,6 +542,53 @@ def rider_submit_documents(request, rider):
         submitted_for_review=submitted,
     )
 
+ADMIN_NOTE_FIELD = None  # e.g. "<field name on RiderDocument>"; None = no note shown
+
+
+def _stage(rider):
+    """One value the frontend can trust, so it never compares raw enum strings."""
+    if rider.verification_status == VerificationStatus.SUSPENDED:
+        return "suspended"
+    if rider.is_verified:
+        return "approved"
+    if rider.verification_status == VerificationStatus.UNDER_REVIEW:
+        return "under_review"
+    if rider.verification_status == VerificationStatus.REJECTED:
+        return "rejected"
+    return "not_started"
+
+
+def _doc_state(document):
+    if document is None:
+        return "missing"
+    if document.status == RiderDocument.DocumentStatus.APPROVED:
+        return "approved"
+    rejected = getattr(RiderDocument.DocumentStatus, "REJECTED", None)
+    if rejected is not None and document.status == rejected:
+        return "rejected"
+    return "uploaded"
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([WalletReadThrottle])
+@rider_required
+def rider_verification_status(request, rider):
+    """Current review state + per-document state, for the /rider-verify page."""
+    documents = []
+    for value, _label in RiderDocument.DocumentType.choices:
+        document = rider.documents.filter(document_type=value).first()
+        state = _doc_state(document)
+        note = ""
+        if document is not None and state == "rejected" and ADMIN_NOTE_FIELD:
+            note = getattr(document, ADMIN_NOTE_FIELD, "") or ""
+        documents.append({"document_type": value, "state": state, "note": note})
+
+    return ok(stage=_stage(rider), documents=documents)
+
+
+
+
 
 
 
