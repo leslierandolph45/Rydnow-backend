@@ -269,7 +269,7 @@ STATUS_COLORS = {
     "approved": "#16a34a",
     "rejected": "#dc2626",
     "expired": "#6b7280",
-
+}
 
 @admin.register(RiderDocument)
 class RiderDocumentAdmin(BaseAdmin):
