@@ -580,3 +580,9 @@ class PromoRedemptionAdmin(BaseAdmin):
     date_hierarchy = "created_at"
     list_per_page = 50
     search_fields = ()
+
+
+
+from . import admin_riders  # noqa: E402,F401
+
+
