@@ -14,7 +14,6 @@ Optional:
 Local development: set DEBUG=True in your shell or .env file.
 """
 
-
 import os
 import warnings
 from pathlib import Path
@@ -24,7 +23,6 @@ import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
 from django.templatetags.static import static
 from django.urls import reverse_lazy
-
 
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -52,9 +50,7 @@ def env_list(name: str, default=None) -> list:
 
 
 # ─────────────────────────── Core ───────────────────────────
-# Secure by default: production never runs with DEBUG on by accident.
 DEBUG = env_bool("DEBUG", True)
-
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
@@ -62,7 +58,6 @@ if not SECRET_KEY:
         SECRET_KEY = "dev-insecure-key"
     else:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DEBUG is False.")
-
 
 ALLOWED_HOSTS = env_list(
     "ALLOWED_HOSTS",
@@ -72,11 +67,9 @@ _render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 if _render_host and _render_host not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_render_host)
 
-
 ROOT_URLCONF = "rydnow.urls"
 WSGI_APPLICATION = "rydnow.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-
 
 # AUTH_USER_MODEL = "api.User"
 
@@ -90,17 +83,14 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "whitenoise.runserver_nostatic",
-    # Third-party
     "rest_framework",
     "rest_framework.authtoken",
     "corsheaders",
-    # Local
     "api",
     "phonenumber_field",
     "unfold",
     "unfold.contrib.filters",
 ]
-
 
 TEMPLATES = [
     {
@@ -118,9 +108,8 @@ TEMPLATES = [
     },
 ]
 
-
 MIDDLEWARE = [
-    "corsheaders.middleware.CorsMiddleware",  # MUST be first!
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -130,7 +119,6 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
-
 
 PAYSTACK_SECRET_KEY = "sk_..."
 PAYSTACK_CALLBACK_URL = "https://rydnow.app/rider/wallet/callback"
@@ -178,8 +166,6 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-
-# Allow frontend to communicate with backend
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -187,8 +173,6 @@ CORS_ALLOWED_ORIGINS = [
     "https://www.rydnow.app",
 ]
 
-
-# Optional: For development only - cookies & auth headers
 CORS_ALLOW_CREDENTIALS = True
 
 
@@ -204,10 +188,8 @@ STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 
-
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
-
 
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
@@ -215,7 +197,6 @@ STORAGES = {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
 }
-
 
 if os.environ.get("AWS_STORAGE_BUCKET_NAME"):
     STORAGES["default"] = {"BACKEND": "storages.backends.s3.S3Storage"}
@@ -235,7 +216,6 @@ elif not DEBUG:
         RuntimeWarning,
         stacklevel=1,
     )
-
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
@@ -289,14 +269,11 @@ REST_FRAMEWORK = {
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", True)
-
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
-
     SECURE_HSTS_SECONDS = env_int("SECURE_HSTS_SECONDS", 31536000)
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", True)
     SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
-
 
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
@@ -321,7 +298,6 @@ DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Rydnow <no-reply@rydn
 
 # ─────────────────────── Logging ───────────────────────
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG" if DEBUG else "INFO")
-
 
 LOGGING = {
     "version": 1,
@@ -374,9 +350,7 @@ DISPATCH = {
     "w_fairness": 0.05,
 }
 
-
 _ICON = lambda name: name
-
 
 UNFOLD = {
     "SITE_TITLE": "RYDNOW Operations",
