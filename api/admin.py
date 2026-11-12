@@ -286,6 +286,14 @@ class CustomerRiderPreferenceAdmin(BaseAdmin):
 # ══════════════════════════════════════════════════════════
 # 👤 RIDER-RELATED RECORDS  (RiderProfile → admin_riders.py)
 # ══════════════════════════════════════════════════════════
+
+STATUS_COLORS = {
+    "pending": "#d97706",
+    "approved": "#16a34a",
+    "rejected": "#dc2626",
+    "expired": "#6b7280",
+}
+
 @admin.register(RiderStatusHistory)
 class RiderStatusHistoryAdmin(LedgerAdmin):
     """Audit trail: superuser add + edit, never deletable."""
