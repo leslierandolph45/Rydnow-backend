@@ -4187,4 +4187,3 @@ class DispatchOffer(models.Model):
         return timezone.now() >= self.expires_at
 
 
-

@@ -20,7 +20,7 @@ at the very bottom of this file (it needs BaseAdmin from here).
 from __future__ import annotations
 
 import logging
-
+import os
 from django.contrib import admin, messages
 from django.contrib.admin.models import CHANGE, LogEntry
 from django.contrib.auth import get_user_model
@@ -31,8 +31,10 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from unfold.admin import ModelAdmin as UnfoldModelAdmin
 from unfold.forms import AdminPasswordChangeForm, UserChangeForm, UserCreationForm
+from django.utils.html import format_html
 
 from . import models as api_models
+
 from .models import (
     # Customer
     CustomerProfile,
@@ -72,6 +74,7 @@ from .models import (
     PromoCode,
     PromoRedemption,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +205,33 @@ class LedgerAdmin(SuperuserWriteAdminMixin, BaseAdmin):
     list_per_page = 100
 
 
+class ExpiryFilter(admin.SimpleListFilter):
+    title = "expiry"
+    parameter_name = "expiry"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("expired", "Expired"),
+            ("soon", "Expiring within 30 days"),
+            ("none", "No expiry date"),
+        ]
+
+    def queryset(self, request, queryset):
+        today = timezone.localdate()
+        value = self.value()
+        if value == "expired":
+            return queryset.filter(expiry_date__lt=today)
+        if value == "soon":
+            return queryset.filter(
+                expiry_date__gte=today,
+                expiry_date__lte=today + timedelta(days=30),
+            )
+        if value == "none":
+            return queryset.filter(expiry_date__isnull=True)
+        return queryset
+
+
+
 # ══════════════════════════════════════════════════════════
 # 🔐 AUTH (re-registered so Users / Groups use the Unfold theme)
 # ══════════════════════════════════════════════════════════
@@ -264,11 +294,6 @@ class ServiceQualificationAdmin(BaseAdmin):
     pass
 
 
-import os
-
-from django.contrib import admin
-from django.utils.html import format_html
-
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 PDF_EXTENSIONS = {".pdf"}
 
@@ -291,93 +316,147 @@ def get_file_info(field_file):
 
 
 @admin.register(RiderDocument)
-class RiderDocumentAdmin(NoDeleteAdminMixin, BaseAdmin):
-    """Verification documents are retained for compliance."""
-
+class RiderDocumentAdmin(admin.ModelAdmin):
     list_display = (
         "rider_name",
         "document_type",
-        "status",
+        "status_badge",
+        "expiry_display",
+        "preview",
         "uploaded_at",
-        "file_preview",
+        "reviewed_by",
     )
-    list_filter = ("document_type", "status", "uploaded_at")
+    list_filter = ("status", "document_type", ExpiryFilter, "uploaded_at")
     search_fields = (
         "rider_profile__full_name",
-        "rider_profile__user__email",
-        "rider_profile__user__username",
+        "notes",
     )
-    readonly_fields = ("uploaded_at", "file_preview_large")
-    list_select_related = ("rider_profile", "rider_profile__user")
+    list_select_related = ("rider_profile", "reviewed_by")
+    raw_id_fields = ("rider_profile", "reviewed_by")
+    date_hierarchy = "uploaded_at"
     ordering = ("-uploaded_at",)
     list_per_page = 25
+    save_on_top = True
+    actions = ("approve_documents", "reject_documents", "mark_expired")
 
-    # ——————————————————————
-    # Columns
-    # ——————————————————————
-    @admin.display(description="Rider Name", ordering="rider_profile__full_name")
+    readonly_fields = ("id", "preview_large", "uploaded_at", "reviewed_at", "reviewed_by")
+    fieldsets = (
+        ("Document", {
+            "fields": ("id", "rider_profile", "document_type", "file", "preview_large", "expiry_date"),
+        }),
+        ("Review", {
+            "fields": ("status", "notes", "reviewed_by", "reviewed_at"),
+        }),
+        ("Timestamps", {
+            "fields": ("uploaded_at",),
+            "classes": ("collapse",),
+        }),
+    )
+
+    # —————————————————————— #
+    # List columns
+    # —————————————————————— #
+    @admin.display(description="Rider", ordering="rider_profile__full_name")
     def rider_name(self, obj):
-        profile = obj.rider_profile
-        user = profile.user
-        return profile.full_name or user.get_full_name() or user.username
+        return obj.rider_profile.full_name
+
+    @admin.display(description="Status", ordering="status")
+    def status_badge(self, obj):
+        color = STATUS_COLORS.get(obj.status, "#6b7280")
+        return format_html(
+            '<span style="background:{};color:#fff;padding:2px 10px;'
+            'border-radius:12px;font-size:11px;font-weight:600;">{}</span>',
+            color,
+            obj.get_status_display(),
+        )
+
+    @admin.display(description="Expiry", ordering="expiry_date")
+    def expiry_display(self, obj):
+        if not obj.expiry_date:
+            return "—"
+        if obj.is_expired:
+            return format_html(
+                '<span style="color:#dc2626;font-weight:600;">{} (expired)</span>',
+                obj.expiry_date,
+            )
+        return obj.expiry_date
 
     @admin.display(description="Preview")
-    def file_preview(self, obj):
-        """Small thumbnail for the changelist."""
-        url, ext = get_file_info(obj.document_file)
-        if not url:
+    def preview(self, obj):
+        return self._render_file(obj, size=48)
+
+    @admin.display(description="Preview")
+    def preview_large(self, obj):
+        if not obj.pk:
+            return "Save the document to see a preview."
+        return self._render_file(obj, size=320)
+
+    @staticmethod
+    def _render_file(obj, size):
+        if not obj.file:
             return "—"
-
-        if ext in IMAGE_EXTENSIONS:
+        url = obj.file.url
+        if url.lower().endswith(IMAGE_EXTENSIONS):
             return format_html(
-                '<a href="{url}" target="_blank" rel="noopener noreferrer">'
-                '<img src="{url}" alt="Document preview" loading="lazy" '
-                'style="max-height:60px; border-radius:4px;"></a>',
-                url=url,
-            )
-        if ext in PDF_EXTENSIONS:
-            return format_html(
-                '<a href="{}" target="_blank" rel="noopener noreferrer">📄 PDF</a>',
+                '<a href="{0}" target="_blank" rel="noopener">'
+                '<img src="{0}" style="max-height:{1}px;max-width:{1}px;'
+                'border-radius:6px;object-fit:cover;" /></a>',
                 url,
+                size,
             )
-        return format_html(
-            '<a href="{}" target="_blank" rel="noopener noreferrer">📁 View file</a>',
-            url,
+        return format_html('<a href="{}" target="_blank" rel="noopener">Open file</a>', url)
+
+    # —————————————————————— #
+    # Saving
+    # —————————————————————— #
+    def save_model(self, request, obj, form, change):
+        reviewed_statuses = {
+            RiderDocument.DocumentStatus.APPROVED,
+            RiderDocument.DocumentStatus.REJECTED,
+        }
+        if change and "status" in form.changed_data and obj.status in reviewed_statuses:
+            obj.reviewed_by = request.user
+            obj.reviewed_at = timezone.now()
+        super().save_model(request, obj, form, change)
+
+    # —————————————————————— #
+    # Bulk actions
+    # —————————————————————— #
+    @admin.action(description="Approve selected documents")
+    def approve_documents(self, request, queryset):
+        count = self._bulk_review(request, queryset, approve=True)
+        self.message_user(
+            request,
+            ngettext("%d document approved.", "%d documents approved.", count) % count,
+            messages.SUCCESS,
         )
 
-    # ——————————————————————
-    # Detail page
-    # ——————————————————————
-    @admin.display(description="Document Preview")
-    def file_preview_large(self, obj):
-        """Large preview for the change form."""
-        url, ext = get_file_info(obj.document_file)
-        if not url:
-            return "No file uploaded yet."
-
-        if ext in IMAGE_EXTENSIONS:
-            return format_html(
-                '<div style="margin:15px 0;">'
-                '<img src="{url}" alt="Document preview" '
-                'style="max-width:450px; border:1px solid #ddd; border-radius:8px;">'
-                '<br><a href="{url}" target="_blank" rel="noopener noreferrer" '
-                'style="margin-top:8px; display:inline-block;">'
-                "🔍 Open full size in new tab</a></div>",
-                url=url,
-            )
-        if ext in PDF_EXTENSIONS:
-            return format_html(
-                '<iframe src="{url}" style="width:100%; max-width:600px; height:500px; '
-                'border:1px solid #ddd; border-radius:8px;"></iframe>'
-                '<p><a href="{url}" target="_blank" rel="noopener noreferrer">'
-                "📂 Open PDF in new tab</a></p>",
-                url=url,
-            )
-        return format_html(
-            '<p><a href="{}" target="_blank" rel="noopener noreferrer">'
-            "📂 Click to open/download file</a></p>",
-            url,
+    @admin.action(description="Reject selected documents")
+    def reject_documents(self, request, queryset):
+        count = self._bulk_review(request, queryset, approve=False)
+        self.message_user(
+            request,
+            ngettext("%d document rejected.", "%d documents rejected.", count) % count,
+            messages.WARNING,
         )
+
+    @admin.action(description="Mark selected documents as expired")
+    def mark_expired(self, request, queryset):
+        count = queryset.update(status=RiderDocument.DocumentStatus.EXPIRED)
+        self.message_user(
+            request,
+            ngettext("%d document marked as expired.", "%d documents marked as expired.", count) % count,
+            messages.INFO,
+        )
+
+    @staticmethod
+    def _bulk_review(request, queryset, approve):
+        count = 0
+        for document in queryset.select_related("rider_profile"):
+            document.review(by=request.user, approve=approve)
+            count += 1
+        return count
+
 
 
 @admin.register(RiderPayoutAccount)
@@ -621,4 +700,7 @@ for _name in ("Service", "Zone", "PricingRule", "SystemConfig", "Notification"):
 # earlier causes a circular-import crash. Do not import it anywhere else in this file.
 # ══════════════════════════════════════════════════════════
 from . import admin_riders  # noqa: E402,F401
+
+
+
 
