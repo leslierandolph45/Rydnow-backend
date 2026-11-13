@@ -1972,7 +1972,6 @@ class WalletTransaction(models.Model):
     transaction_type = models.CharField(
         max_length=50,
         choices=TRANSACTION_TYPES,
-        default="debit",
         db_index= True
     )
     amount = models.DecimalField(max_digits=12, decimal_places=2, help_text="Signed: + credit, − debit.")
