@@ -10,6 +10,7 @@ from .views import (
     rider_register,
     rider_submit_documents,
 )
+from .profile_views import my_profile
 
 # NOTE: rider document files are NOT served from a public /media/ URL on purpose
 # (Ghana Cards and licences are private). Staff view them through the admin at
@@ -23,6 +24,7 @@ urlpatterns = [
     path("auth/register/rider/", rider_register, name="rider-register"),
     path("rider/verify/", rider_submit_documents, name="rider-verify"),
     path("rider/verification-status/", views.rider_verification_status, name="rider-verification-status"),
+    path("me/", my_profile, name="my_profile"),
 
     # === Rider Wallet ===
     path("rider/wallet/", views.get_rider_wallet, name="rider-wallet"),

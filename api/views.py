@@ -143,25 +143,22 @@ PHONE_VERIFIED_TTL_SECONDS = 1800
 LOW_BALANCE_FALLBACK = Decimal("50.00")
 
 
-def ok(message=None, http_status=status.HTTP_200_OK, **payload):
-    """Success envelope: {"success": true, "message"?, ...payload}."""
-    body = {"success": True}
+def ok(message=None, **kwargs):
+    data = {"success": True}
     if message:
-        body["message"] = message
-    body.update(payload)
-    return Response(body, status=http_status)
+        data["message"] = message
+    data.update(kwargs)
+    return data
 
 
-def fail(error, http_status=status.HTTP_400_BAD_REQUEST, errors=None):
-    """Error envelope: {"success": false, "error": "...", "errors"?}."""
-    body = {"success": False, "error": error}
-    if errors:
-        body["errors"] = errors
-    return Response(body, status=http_status)
+def fail(message: str, status=400):
+    return {"success": False, "error": message}, status
 
 
 def validation_fail(serializer):
-    return fail("Validation failed.", status.HTTP_400_BAD_REQUEST, serializer.errors)
+    errors = [str(v[0]) for v in serializer.errors.values()]
+    return {"success": False, "error": " ".join(errors)}, 400
+
 
 
 def money(value):
@@ -542,7 +539,25 @@ def rider_submit_documents(request, rider):
         submitted_for_review=submitted,
     )
 
-ADMIN_NOTE_FIELD = None  # e.g. "<field name on RiderDocument>"; None = no note shown
+ADMIN_NOTE_FIELD = "notes"
+
+def rider_submit_documents(request, rider):
+    # All your code here, indented:
+    have = set(rider.documents.values_list("document_type", flat=True))
+    required = {t for t, _ in RiderDocument.REQUIRED_TYPES}
+
+    if required < have and rider.verification_status not in (...):
+        rider.verification_status = VerificationStatus.PENDING
+        rider.save()
+    
+
+#in rider_verification_status:
+def rider_verification_status(request, rider):
+    return ok(
+        stage=_stage(rider),
+        documents=documents,
+        rejection_reason=rider.rejection_reason or ""
+    )
 
 
 def _stage(rider):

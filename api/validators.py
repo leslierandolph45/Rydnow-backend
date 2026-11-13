@@ -70,14 +70,14 @@ def normalize_gh_phone(value):
     return phone
 
 
-def clean_phone(value):
-    """Normalise to +233XXXXXXXXX and validate. Raises a DRF ValidationError."""
-    phone = normalize_gh_phone(value)
-    try:
-        phone_validator(phone)
-    except ValidationError as exc:
-        raise serializers.ValidationError(exc.messages)
-    return phone
+def clean_phone(value: str) -> str:
+    """Normalize phone number — keep digits and leading + only"""
+    import re
+    digits = re.sub(r'[\s\-\(\)]+', '', value)
+    if not digits.startswith('+'):
+        digits = '+' + digits
+    return digits
+
 
 
 def check_password_strength(password, user=None):
@@ -88,15 +88,22 @@ def check_password_strength(password, user=None):
     return password
 
 
-def split_name(full_name):
-    first, _, last = (full_name or "").strip().partition(" ")
-    return first, last.strip()
+def split_name(full_name: str) -> tuple [str, str]:
+    """Split full name into first_name, last_name"""
+    parts = full_name.strip().split(maxsplit=1)
+    if len(parts) == 1:
+        return parts [0], ""
+    return parts [0], parts [1]
 
 
-def email_is_taken(email, exclude_user_id=None):
-    User = get_user_model()  # resolved at call time, safe during app loading
-    qs = User.objects.filter(Q(username__iexact=email) | Q(email__iexact=email))
+
+def email_is_taken(email: str, exclude_user_id=None) -> bool:
+    """Check if email exists (excluding optional user ID)"""
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    qs = User.objects.filter(email__iexact=email)
     if exclude_user_id:
         qs = qs.exclude(pk=exclude_user_id)
     return qs.exists()
+
 

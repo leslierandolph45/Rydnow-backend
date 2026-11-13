@@ -40,7 +40,6 @@ from .wallet_deposit import WalletDeposit
 from django.urls import reverse
 
 logger = logging.getLogger(__name__)
-AUTH_USER = settings.AUTH_USER_MODEL
 
 
 class WalletError(Exception):
@@ -457,6 +456,13 @@ class SurgeRule(models.Model):
 # =====================================================================
 
 class CustomerProfile(models.Model):
+
+    user = models.ForeignKey(
+    settings.AUTH_USER_MODEL,
+    on_delete=models.CASCADE
+    )
+
+
     class Segment(models.TextChoices):
         NEW = "new", "New"
         ACTIVE = "active", "Active"
@@ -479,11 +485,11 @@ class CustomerProfile(models.Model):
         AGENT = "agent", "Field Agent"
         OTHER = "other", "Other"
 
-    AUTH_USER = settings.AUTH_USER_MODEL
+    settings.AUTH_USER_MODEL = settings.AUTH_USER_MODEL
 
     # Identity
     user = models.OneToOneField(
-        AUTH_USER,
+        settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="customer_profile"
     )
@@ -678,7 +684,7 @@ class SavedAddress(models.Model):
 class CustomerWallet(models.Model):
     """balance = spendable cash; withdrawable_balance ⊆ balance; bonus_credit = promo money (spend-only, spent first)."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.OneToOneField(AUTH_USER, on_delete=models.PROTECT, related_name="customer_wallet")
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="customer_wallet")
     balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"),
                                   validators=[validate_non_negative_amount])
     withdrawable_balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"),
@@ -945,7 +951,7 @@ class RiderProfileQuerySet(models.QuerySet):
 class RiderProfile(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
-    user = models.OneToOneField(AUTH_USER, on_delete=models.CASCADE, related_name="rider_profile")
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="rider_profile")
 
     # Geneated automatically in save(). Rider share it to refer other rider to join;
     # Customers/Agents can use it for payment look up
@@ -984,7 +990,7 @@ class RiderProfile(models.Model):
     submitted_at = models.DateTimeField(null=True, blank=True)
     verified_at = models.DateTimeField(null=True, blank=True)
     verified_by = models.ForeignKey(
-        AUTH_USER, on_delete=models.SET_NULL, null=True, blank=True,related_name="verified_riders"
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,related_name="verified_riders"
     )
 
     # Suspension (admin action) / restriction (complaint outcome)
@@ -1041,6 +1047,11 @@ class RiderProfile(models.Model):
     @property
     def is_verified(self):
         return self.verification_status == VerificationStatus.VERIFIED
+
+    def record_offer(self, outcome: str, response_s: float = 0):
+        """Track offer outcomes for acceptance/reliability stats"""
+        # Update counters as needed
+        pass
 
     class Meta:
         ordering = ["-created_at"]
@@ -1516,7 +1527,7 @@ class RiderStatusHistory(models.Model):
     rider = models.ForeignKey(RiderProfile, on_delete=models.CASCADE, related_name="status_history")
     from_status = models.CharField(max_length=20)
     to_status = models.CharField(max_length=20)
-    changed_by = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     reason = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -1540,7 +1551,7 @@ class ServiceQualification(models.Model):
     service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="qualifications")
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING, db_index=True)
     approved_at = models.DateTimeField(null=True, blank=True)
-    approved_by = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     status_reason = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1614,7 +1625,7 @@ class RiderDocument(models.Model):
     expiry_date = models.DateField(null=True, blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
     reviewed_at = models.DateTimeField(null=True, blank=True)
-    reviewed_by = models.ForeignKey(AUTH_USER, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     notes = models.TextField(blank=True)
 
     class Meta:
@@ -1878,7 +1889,7 @@ class RiderLocationPing(models.Model):
 
 class RiderProfileAdminNote(models.Model):
     rider_profile = models.ForeignKey(RiderProfile, on_delete=models.CASCADE, related_name="admin_notes")
-    author = models.ForeignKey(AUTH_USER, on_delete=models.SET_NULL, null=True, blank=True)
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     note = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -1958,7 +1969,12 @@ class WalletTransaction(models.Model):
                                         related_name="transactions")
     rider_wallet = models.ForeignKey(RiderWallet, null=True, blank=True, on_delete=models.PROTECT,
                                      related_name="transactions")
-    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES, db_index=True)
+    transaction_type = models.CharField(
+        max_length=50,
+        choices=TRANSACTION_TYPES,
+        default="debit",
+        db_index= True
+    )
     amount = models.DecimalField(max_digits=12, decimal_places=2, help_text="Signed: + credit, − debit.")
     balance_after = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default="GHS")
@@ -2125,7 +2141,7 @@ class Refund(models.Model):
     reason = models.CharField(max_length=255, blank=True)
     provider_ref = models.CharField(max_length=255, blank=True)
     failure_reason = models.CharField(max_length=255, blank=True)
-    initiated_by = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    initiated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
@@ -2279,8 +2295,8 @@ class Referral(models.Model):
         EXPIRED = "expired", "Expired"
 
     kind = models.CharField(max_length=10, choices=Kind.choices)
-    referrer = models.ForeignKey(AUTH_USER, on_delete=models.CASCADE, related_name="referrals_sent")
-    referred = models.OneToOneField(AUTH_USER, on_delete=models.CASCADE, related_name="referral_received")
+    referrer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="referrals_sent")
+    referred = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="referral_received")
     code_used = models.CharField(max_length=16)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
     reward_amount = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
@@ -2394,7 +2410,7 @@ class BusinessAccount(models.Model):
         MONTHLY = "monthly", "Monthly"
 
     name = models.CharField(max_length=150)
-    owner = models.ForeignKey(AUTH_USER, on_delete=models.PROTECT, related_name="owned_business_accounts")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="owned_business_accounts")
     members = models.ManyToManyField(CustomerProfile, blank=True, related_name="business_accounts")
     contact_phone = models.CharField(max_length=30, blank=True, validators=[phone_validator])
     contact_email = models.EmailField(blank=True)
@@ -2578,7 +2594,7 @@ class Booking(models.Model):
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
-    cancelled_by = models.ForeignKey(AUTH_USER, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    cancelled_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
     cancelled_by_role = models.CharField(max_length=10, blank=True)
     cancellation_reason = models.TextField(blank=True)
 
@@ -2970,7 +2986,7 @@ class BookingStatusHistory(models.Model):
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="status_history")
     from_status = models.CharField(max_length=20, blank=True)
     to_status = models.CharField(max_length=20)
-    changed_by = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     note = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -3094,7 +3110,7 @@ class Review(models.Model):
 
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="reviews")
     direction = models.CharField(max_length=3, choices=Direction.choices)
-    reviewer = models.ForeignKey(AUTH_USER, on_delete=models.SET_NULL, null=True, related_name="reviews_written")
+    reviewer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="reviews_written")
     rider = models.ForeignKey(RiderProfile, on_delete=models.CASCADE, related_name="reviews")
     customer = models.ForeignKey(CustomerProfile, null=True, blank=True, on_delete=models.CASCADE, related_name="reviews")
     rating = models.PositiveSmallIntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
@@ -3229,17 +3245,17 @@ class RiderComplaint(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     reference = models.CharField(max_length=30, unique=True, editable=False, blank=True)
     booking = models.ForeignKey(Booking, on_delete=models.PROTECT, related_name="complaints")
-    complainant = models.ForeignKey(AUTH_USER, on_delete=models.PROTECT, related_name="filed_complaints")
+    complainant = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="filed_complaints")
     complaint_type = models.CharField(max_length=40, choices=ComplaintType.choices, db_index=True)
     description = models.TextField()
     priority = models.CharField(max_length=10, choices=Priority.choices, default=Priority.NORMAL, db_index=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
-    assigned_to = models.ForeignKey(AUTH_USER, on_delete=models.PROTECT, null=True, blank=True, related_name="assigned_complaints")
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="assigned_complaints")
     sla_due_at = models.DateTimeField(null=True, blank=True, editable=False, db_index=True)
     first_response_at = models.DateTimeField(null=True, blank=True, editable=False)
     resolution_notes = models.TextField(blank=True)
     action_taken = models.CharField(max_length=100, blank=True)
-    reviewed_by = models.ForeignKey(AUTH_USER, on_delete=models.PROTECT, null=True, blank=True, related_name="reviewed_complaints")
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="reviewed_complaints")
     reviewed_at = models.DateTimeField(null=True, blank=True)
     reopen_count = models.PositiveSmallIntegerField(default=0, editable=False)
     csat_score = models.PositiveSmallIntegerField(null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(5)],
@@ -3452,7 +3468,7 @@ class ComplaintEvidence(models.Model):
     file_name = models.CharField(max_length=255, editable=False)
     file_type = models.CharField(max_length=100, blank=True, editable=False)
     file_size = models.PositiveIntegerField(null=True, blank=True, editable=False, help_text="Size in bytes.")
-    uploaded_by = models.ForeignKey(AUTH_USER, on_delete=models.SET_NULL, null=True, blank=True,
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
                                     related_name="complaint_evidence_uploads")
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -3488,7 +3504,7 @@ class ComplaintEvent(models.Model):
     to_status = models.CharField(max_length=30, blank=True)
     note = models.TextField(blank=True)
     is_internal = models.BooleanField(default=True, help_text="Internal events are hidden from the complainant.")
-    actor = models.ForeignKey(AUTH_USER, on_delete=models.SET_NULL, null=True, blank=True, related_name="complaint_events")
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="complaint_events")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -3552,14 +3568,14 @@ class RiderIncident(models.Model):
     incident_date = models.DateTimeField(default=timezone.now, help_text="When the incident actually happened.")
     date_reported = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    reported_by = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="reported_rider_incidents")
-    assigned_to = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL,
+    reported_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="reported_rider_incidents")
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
                                     related_name="assigned_rider_incidents", limit_choices_to={"is_staff": True},
                                     help_text="Admin handling this incident.")
     status = models.CharField(max_length=30, choices=Status.choices, default=Status.REPORTED, db_index=True)
     resolution_notes = models.TextField(blank=True, default="")
     resolved_at = models.DateTimeField(null=True, blank=True)
-    resolved_by = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="resolved_rider_incidents")
+    resolved_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="resolved_rider_incidents")
 
     objects = RiderIncidentQuerySet.as_manager()
 
@@ -3622,7 +3638,7 @@ class SupportTicket(models.Model):
     SLA_HOURS = {"urgent": 2, "high": 12, "normal": 24, "low": 72}
 
     reference = models.CharField(max_length=30, unique=True, editable=False, default=generate_ticket_ref)
-    customer = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="support_tickets")
+    customer = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="support_tickets")
     booking = models.ForeignKey(Booking, null=True, blank=True, on_delete=models.SET_NULL, related_name="support_tickets")
     category = models.CharField(max_length=20, choices=Category.choices, default=Category.OTHER, db_index=True)
     subject = models.CharField(max_length=200)
@@ -3631,7 +3647,7 @@ class SupportTicket(models.Model):
     priority = models.CharField(max_length=10, choices=[(k, k.title()) for k in SLA_HOURS], default="normal", db_index=True)
     channel = models.CharField(max_length=15, default="app",
                                choices=[("app", "App"), ("web", "Web"), ("phone", "Phone"), ("whatsapp", "WhatsApp")])
-    assigned_to = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL,
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
                                     related_name="assigned_tickets", limit_choices_to={"is_staff": True})
     sla_due_at = models.DateTimeField(null=True, blank=True, editable=False, db_index=True)
     first_response_at = models.DateTimeField(null=True, blank=True, editable=False)
@@ -3696,7 +3712,7 @@ class SupportTicket(models.Model):
 
 class TicketMessage(models.Model):
     ticket = models.ForeignKey(SupportTicket, on_delete=models.CASCADE, related_name="messages")
-    author = models.ForeignKey(AUTH_USER, null=True, on_delete=models.SET_NULL, related_name="+")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL, related_name="+")
     message = models.TextField()
     is_internal = models.BooleanField(default=False, help_text="Staff-only note.")
     attachment = models.FileField(upload_to="tickets/%Y/%m/", null=True, blank=True,
@@ -3716,13 +3732,13 @@ class SafetyAlert(models.Model):
         RESOLVED = "resolved", "Resolved"
         FALSE_ALARM = "false_alarm", "False alarm"
 
-    triggered_by = models.ForeignKey(AUTH_USER, on_delete=models.PROTECT, related_name="safety_alerts")
+    triggered_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="safety_alerts")
     booking = models.ForeignKey(Booking, null=True, blank=True, on_delete=models.SET_NULL, related_name="safety_alerts")
     lat = models.FloatField(null=True, blank=True)
     lng = models.FloatField(null=True, blank=True)
     status = models.CharField(max_length=15, choices=Status.choices, default=Status.ACTIVE, db_index=True)
     message = models.CharField(max_length=300, blank=True)
-    acknowledged_by = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    acknowledged_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     acknowledged_at = models.DateTimeField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
     resolution_notes = models.TextField(blank=True)
@@ -3818,7 +3834,7 @@ class RiderPerformanceCommit(models.Model):
     follow_up_date = models.DateField(null=True, blank=True, help_text="When to check in again.")
     review_status = models.CharField(max_length=20, choices=ReviewStatus.choices, default=ReviewStatus.ACTIVE, db_index=True)
     notes = models.TextField(blank=True, default="", help_text="Internal notes (never shown to rider).")
-    reviewed_by = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL,
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
                                     related_name="reviewed_performance_commits")
     finalized_at = models.DateTimeField(null=True, blank=True, editable=False)
     rider_acknowledged_at = models.DateTimeField(null=True, blank=True, help_text="When the rider confirmed they saw this.")
@@ -4016,7 +4032,7 @@ class Notification(models.Model):
         SMS = "sms", "SMS"
         EMAIL = "email", "Email"
 
-    user = models.ForeignKey(AUTH_USER, on_delete=models.CASCADE, related_name="notifications")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notifications")
     category = models.CharField(max_length=10, choices=Category.choices, default=Category.SYSTEM)
     channel = models.CharField(max_length=10, choices=Channel.choices, default=Channel.PUSH)
     title = models.CharField(max_length=150)
@@ -4050,7 +4066,7 @@ class Notification(models.Model):
 
 
 class DeviceToken(models.Model):
-    user = models.ForeignKey(AUTH_USER, on_delete=models.CASCADE, related_name="device_tokens")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="device_tokens")
     token = models.CharField(max_length=255, unique=True)
     platform = models.CharField(max_length=10, choices=[("android", "Android"), ("ios", "iOS"), ("web", "Web")])
     app_version = models.CharField(max_length=20, blank=True)
@@ -4063,7 +4079,7 @@ class DeviceToken(models.Model):
 
 class AuditLog(models.Model):
     """Append-only: who did what, when, from where. Required for money/KYC disputes and regulators."""
-    actor = models.ForeignKey(AUTH_USER, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     action = models.CharField(max_length=60, db_index=True)
     object_type = models.CharField(max_length=60, db_index=True)
     object_id = models.CharField(max_length=64, db_index=True)
@@ -4213,6 +4229,7 @@ class DispatchOffer(models.Model):
     responded_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
+        app_label = "api"
         db_table = "dispatch_offers"
         ordering = ["-offered_at"]
         indexes = [
