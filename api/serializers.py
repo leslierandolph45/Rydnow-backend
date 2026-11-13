@@ -21,6 +21,7 @@ from rest_framework import serializers
 from .models import (
     TRANSACTION_TYPES,
     CustomerProfile,
+    CustomerWallet,
     RiderDocument,
     RiderProfile,
     RiderWallet,

@@ -25,12 +25,23 @@ class BalanceStatusFilter(admin.SimpleListFilter):
         if self.value() == "ok":
             return queryset.filter(available_balance__gte=conf.min_balance())
 
+class BelowMinFilter(admin.SimpleListFilter):
+    title = "deposit gate"
+    parameter_name = "gate"
+    
+    def lookups(self, request, model_admin):
+        return [("below", "Below minimum")]
+    
+    def queryset(self, request, queryset):
+        if self.value() == "below":
+            min_balance = SystemConfig.get_decimal("MIN_RIDER_BOOKING_BALANCE", "50.00")
+            return queryset.filter(balance__lt=min_balance)
+        return queryset
 
 @admin.site.register(RiderWallet)
 class RiderWalletAdmin(admin.ModelAdmin):
-    list_display = ("rider", "balance", "available_balance", "pending_earnings",
-                    "eligible", "is_frozen", "updated_at")
-    list_filter = (BalanceStatusFilter, "is_frozen", "currency")
+    list_display = ("rider", "balance", "updated_at")
+    list_filter = [BalanceStatusFilter, BelowMinFilter, "is_frozen", "currency"]
     search_fields = ("rider__full_name", "rider__phone")
     list_select_related = ("rider",)
     readonly_fields = ("rider", "balance", "available_balance", "pending_earnings",
@@ -67,6 +78,19 @@ class RiderWalletAdmin(admin.ModelAdmin):
             writer.writerow([w.rider.full_name, getattr(w.rider, "phone", ""), w.balance,
                              w.available_balance, w.pending_earnings, w.is_frozen])
         return response
+
+    @admin.action(description="Approve (mark paid)", permissions=["change"])
+    def mark_completed(self, request, queryset):
+        for w in queryset.filter(status__in=("reserved", "pending")):
+            w.mark_completed()
+            self.log_change(request, w, "Approved.")
+
+    @admin.action(description="Reject & refund rider", permissions=["change"])
+    def mark_failed(self, request, queryset):
+        for w in queryset.filter(status__in=("reserved", "pending")):
+            w.mark_failed("Rejected by admin")
+            self.log_change(request, w, "Rejected; refunded.")
+
 
 
 @admin.register(WalletTransaction)

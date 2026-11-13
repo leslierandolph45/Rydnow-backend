@@ -65,6 +65,15 @@ def to_pesewas(amount: Decimal) -> int:
     return int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+
+def deposit(self, amount, reference, description=""):
+    amount = round_money(amount)
+    validate_positive_amount(amount)
+    ok, msg = self._post("deposit", amount, reference, description)
+    return ok, ("Deposit successful" if ok else msg)
+
+
+
 # ————————————————————————— #
 # Model
 # ————————————————————————— #

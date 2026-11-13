@@ -457,12 +457,6 @@ class SurgeRule(models.Model):
 
 class CustomerProfile(models.Model):
 
-    user = models.ForeignKey(
-    settings.AUTH_USER_MODEL,
-    on_delete=models.CASCADE
-    )
-
-
     class Segment(models.TextChoices):
         NEW = "new", "New"
         ACTIVE = "active", "Active"
@@ -1160,7 +1154,8 @@ class RiderProfile(models.Model):
     def is_currently_restricted(self):
         if not self.is_currently_restricted:
             return False
-        return self.restricted_until is None or self.restricted_until > timezone.now() 
+        return self.restricted_until is None or self.restricted_until > timezone.now()
+    is_restricted_now = is_currently_restricted
 
     @property
     def licence_expired(self):
@@ -1198,7 +1193,11 @@ class RiderProfile(models.Model):
 
     @property
     def commission_rate(self):
-        return TIER_COMMISSION_RATES.get(self.tier, COMMISSION_RATE)
+        from decimal import Decimal
+        base = SystemConfig.get_decimal("COMMISSION_RATE", str(COMMISSION_RATE))
+        discount = COMMISSION_RATE - TIER_COMMISSION_RATES.get(self.tier, COMMISSION_RATE)
+        return max(base - discount, Decimal("0"))
+
 
     @property
     def can_take_cash_jobs(self):
@@ -1508,6 +1507,12 @@ class RiderProfile(models.Model):
             self.rejection_reason = reason
         return False
 
+    @property
+    def documents_uploaded(self):
+        have=set(self.documents.values_list("document_type", flat=True))
+        need = {getattr(c, "value", c) for c, _ in RiderDocument.REQUIRED_TYPES}
+        return need <= have    
+
 
 
 
@@ -1605,16 +1610,26 @@ class RiderDocument(models.Model):
         (DocumentType.VEHICLE_REGISTRATION, "Vehicle Registration"),
     ]
 
-    def review (self, bby, approve, notes =""):
+    def review(self, by, approve, notes=""):
         if notes:
-            self.notes= notes
-        if not approve and not (self.noted or "").strip():
-            raise ValidationError ("Add a short reason before rejecting a document.")
+            self.notes = notes
+        if not approve and not (self.notes or "").strip():
+            raise ValidationError("Add a short reason before rejecting a document.")
+    
         with transaction.atomic():
-            self.status = self.DocumentStatus.APPROVED if approved else self.DocumentStatus.REJECTED
-            self.reviewed_by, self.reviewed_at= by, timezone.now()
-            self.save(update_fields=["status", "reviewed_by", "reviewed_at, notes"])
-            return self.apply_review_effects(by=by)
+            self.status = DocumentStatus.APPROVED if approve else DocumentStatus.REJECTED
+            self.reviewed_by = by
+            self.reviewed_at = timezone.now()
+            # Only update notes if a new value was provided — don't overwrite existing
+            update_fields = ["status", "reviewed_by", "reviewed_at"]
+        if notes:
+            update_fields.append("notes")
+        self.save(update_fields=update_fields)
+        
+        self.apply_review_effects(by)
+    
+        return self
+
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rider_profile = models.ForeignKey(RiderProfile, on_delete=models.CASCADE, related_name="documents")
@@ -1687,6 +1702,19 @@ class RiderDocument(models.Model):
         """Tell Django where to find the edit page for this document"""
         return reverse("admin:api_riderdocument_change", args=[self.pk])
 
+    def get_label_with_notes(self):
+        notes = (self.notes or "").strip()
+        if notes:
+            return f"{self.get_document_type_display()}: {notes}"
+        return self.get_document_type_display()
+
+    @property
+    def documents_uploaded(self):
+        have=set(self.documents.values_list("document_type", flat=True))
+        need = {getattr(c, "value", c) for c, _ in RiderDocument.REQUIRED_TYPES}
+        return need <= have    
+
+   
 # RIDER PAYOUT ACCOUNT
 class RiderPayoutAccount(models.Model):
     class Network(models.TextChoices):
@@ -1953,12 +1981,37 @@ class RiderWallet(models.Model):
                           related_booking, earned=True)
 
     def debit_commission(self, amount, booking_ref="", related_booking=None):
-        """Cash trips: rider already holds the cash, so the platform's cut is taken from the wallet."""
+        from decimal import Decimal
         amount = round_money(amount)
-        if amount <= 0:
-            return True, "No commission due"
-        return self._post("commission", -amount, f"COMM-{booking_ref}", f"Commission {booking_ref}", related_booking)
-
+    
+        # Always refresh to get the latest balance
+        self.refresh_from_db(fields=["balance"])
+    
+        # Never take more than they have — cap at zero
+        due = min(amount, max(self.balance, Decimal("0")))
+    
+        # Log a warning if they couldn't pay the full commission
+        if due < amount:
+            SystemAlert.create_alert(
+                "warning",
+                "Commission shortfall",
+                f"{booking_ref}: wallet could cover only {due} of {amount}.",
+                booking_ref=booking_ref
+            )
+    
+        # Nothing to collect
+        if due <= 0:
+            return True, "No commission collected"
+    
+        # Collect only what's available
+        return self._post(
+            "commission",
+            -due,
+            f"COMM-{booking_ref}",
+            f"Commission {booking_ref}",
+            related_booking,
+            require_funds=True
+        )
 
 class WalletTransaction(models.Model):
     """Immutable double-entry-style ledger line. Corrections are NEW rows (reversal/adjustment)."""
@@ -2637,8 +2690,12 @@ class Booking(models.Model):
         validate_fare_breakdown(self.total_fare, self.platform_commission, self.rider_payout)
 
     def apply_fare_split(self, rate=None):
-        rate = rate if rate is not None else (self.assigned_rider.commission_rate if self.assigned_rider_id else COMMISSION_RATE)
-        self.platform_commission, self.rider_payout = compute_fare_split(self.total_fare, rate)
+        rate = rate if rate is not None else (
+            self.assigned_rider.commission_rate
+            if self.assigned_rider
+            else SystemConfig.get_decimal("COMMISSION_RATE", COMMISSION_RATE)
+        )
+
 
     def save(self, *args, **kwargs):
         if self.total_fare > 0 and self.platform_commission == 0 and self.rider_payout == 0:
@@ -2710,7 +2767,13 @@ class Booking(models.Model):
             self.status = b.status
         return True, "Searching for a rider"
 
+
+
     def assign_rider(self, rider):
+
+        if not rider.has_minimum_deposit:
+            return False, "Please deposit at least GH₵50 to start accepting bookings"
+
         """Atomic assignment — locks rider AND booking so nobody is double-booked."""
         with transaction.atomic():
             rider = RiderProfile.objects.select_for_update().get(pk=rider.pk)
