@@ -1586,11 +1586,23 @@ class RiderDocument(models.Model):
 
     Status = DocumentStatus
     REQUIRED_TYPES = [
-        (DocumentType.GHANA_CARD, "Ghana Card"),
+        (DocumentType.GHANA_CARD, "Ghana Card (Front)"),
+        (DocumentType.GHANA_CARD_BACK, "Ghana Card (Back)"),
         (DocumentType.PASSPORT_PHOTO, "Passport Photo"),
         (DocumentType.RIDING_LICENSE, "Riding Licence"),
         (DocumentType.VEHICLE_REGISTRATION, "Vehicle Registration"),
     ]
+
+    def review (self, bby, approve, notes =""):
+        if notes:
+            self.notes= notes
+        if not approve and not (self.noted or "").strip():
+            raise ValidationError ("Add a short reason before rejecting a document.")
+        with transaction.atomic():
+            self.status = self.DocumentStatus.APPROVED if approved else self.DocumentStatus.REJECTED
+            self.reviewed_by, self.reviewed_at= by, timezone.now()
+            self.save(update_fields=["status", "reviewed_by", "reviewed_at, notes"])
+            return self.apply_review_effects(by=by)
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     rider_profile = models.ForeignKey(RiderProfile, on_delete=models.CASCADE, related_name="documents")
@@ -2570,16 +2582,17 @@ class Booking(models.Model):
     cancellation_reason = models.TextField(blank=True)
 
     
-class Status(models.TextChoices):
-    SEARCHING = "searching", "Searching"
-    ASSIGNED = "assigned", "Assigned"
-    NO_RIDER_FOUND = "no_rider_found", "No Rider Found"
-    # Add your existing statuses below here if you have them:
-    PENDING = "pending", "Pending"
-    CONFIRMED = "confirmed", "Confirmed"
-    IN_PROGRESS = "in_progress", "In Progress"
-    COMPLETED = "completed", "Completed"
-    CANCELLED = "cancelled", "Cancelled"
+    class Status(models.TextChoices):
+        #NOTE: the `status` field above uses STATUS_CHOICES ("searching_rider", ...), not this enum.
+        SEARCHING = "searching", "Searching"
+        ASSIGNED = "assigned", "Assigned"
+        NO_RIDER_FOUND = "no_rider_found", "No Rider Found"
+        # Add your existing statuses below here if you have them:
+        PENDING = "pending", "Pending"
+        CONFIRMED = "confirmed", "Confirmed"
+        IN_PROGRESS = "in_progress", "In Progress"
+        COMPLETED = "completed", "Completed"
+        CANCELLED = "cancelled", "Cancelled"
 
     class Meta:
         ordering = ["-created_at"]
@@ -4174,52 +4187,6 @@ class RiderDocumentType(models.TextChoices):
 
 
 
-
-
-# ——— Wallet Transaction Model ———
-class WalletTransaction(models.Model):
-    class Type(models.TextChoices):
-        DEPOSIT = "deposit", "Deposit"
-        WITHDRAWAL = "withdrawal", "Withdrawal"
-        RIDE_PAYMENT = "ride_payment", "Ride payment"
-        EARNING = "earning", "Earning"
-        TRANSFER_IN = "transfer_in", "Transfer in"
-        TRANSFER_OUT = "transfer_out", "Transfer out"
-        REFUND = "refund", "Refund"
-        BONUS = "bonus", "Bonus"
-        FEE = "fee", "Fee"
-
-    class Direction(models.TextChoices):
-        CREDIT = "credit", "Credit"
-        DEBIT = "debit", "Debit"
-
-    class Status(models.TextChoices):
-        PENDING = "pending", "Pending"
-        SUCCESS = "success", "Success"
-        FAILED = "failed", "Failed"
-        REVERSED = "reversed", "Reversed"
-
-    wallet = models.ForeignKey(RiderWallet, on_delete=models.PROTECT, related_name="transactions")
-    type = models.CharField(max_length=20, choices=Type.choices)
-    direction = models.CharField(max_length=8, choices=Direction.choices)
-    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
-    amount = models.DecimalField(max_digits=14, decimal_places=2)
-    balance_after = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
-    reference = models.CharField(max_length=64, unique=True)
-    description = models.CharField(max_length=255, blank=True)
-    metadata = models.JSONField(default=dict, blank=True)
-    created_at = models.DateTimeField(default=timezone.now, db_index=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-        indexes = [
-            models.Index(fields=["wallet", "-created_at"]),
-            models.Index(fields=["wallet", "type", "-created_at"]),
-            models.Index(fields=["wallet", "status", "-created_at"]),
-        ]
-
-    def __str__(self):
-        return f"{self.reference} {self.direction} {self.amount}"
 
 
 
