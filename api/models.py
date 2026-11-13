@@ -37,6 +37,7 @@ from django.db.models import Avg, Count, F, Q, Sum
 from django.urls import reverse
 from django.utils import timezone
 from phonenumber_field.modelfields import PhoneNumberField
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -4327,9 +4328,9 @@ DEFAULT_CURRENCY = getattr(settings, "WALLET_DEFAULT_CURRENCY", "USD")
 class WalletDeposit(models.Model):
     """A single attempt to add funds to a Wallet.
 
-    The wallet balance is only credited when the deposit moves
-    PENDING -> COMPLETED, via mark_completed(). Never edit
-    Wallet.balance directly from views or webhooks.
+    The wallet is credited only when a deposit moves PENDING -> COMPLETED
+    through mark_completed(). Do not change Wallet.balance directly from
+    views or webhooks.
     """
 
     class Status(models.TextChoices):
@@ -4337,6 +4338,7 @@ class WalletDeposit(models.Model):
         COMPLETED = "completed", "Completed"
         FAILED = "failed", "Failed"
         CANCELLED = "cancelled", "Cancelled"
+        EXPIRED = "expired", "Expired"
 
     class Method(models.TextChoices):
         CARD = "card", "Card"
@@ -4344,20 +4346,30 @@ class WalletDeposit(models.Model):
         MOBILE_MONEY = "mobile_money", "Mobile money"
         OTHER = "other", "Other"
 
-    # Public, non-guessable identifier. Use this in APIs and webhooks,
-    # not the integer pk.
-    reference = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    # UUID primary key. Keep this if your existing table already uses a
+    # UUID id; changing the pk type breaks the migration on Postgres.
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     wallet = models.ForeignKey(
         "RiderWallet",
-        on_delete=models.PROTECT,  # never lose financial records by cascade
+        on_delete=models.PROTECT,  # never delete financial records by cascade
         related_name="deposits",
     )
+    # Who initiated the deposit (kept separate from the wallet owner for audit).
+    initiated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+
     amount = models.DecimalField(
         max_digits=12,
         decimal_places=2,
         validators=[MinValueValidator(Decimal("0.01"))],
     )
+    fee = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     currency = models.CharField(max_length=3, default=DEFAULT_CURRENCY)
 
     status = models.CharField(
@@ -4367,14 +4379,26 @@ class WalletDeposit(models.Model):
         max_length=20, choices=Method.choices, default=Method.OTHER
     )
 
-    # Payment provider details (idempotency / reconciliation)
+    # Payment provider details (reconciliation and idempotency)
     provider = models.CharField(max_length=50, blank=True)
     provider_reference = models.CharField(max_length=128, blank=True)
+    idempotency_key = models.CharField(
+        max_length=64, null=True, blank=True, unique=True
+    )
     failure_reason = models.CharField(max_length=255, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
 
+    # Wallet balance snapshots, written when the deposit completes.
+    balance_before = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True, editable=False
+    )
+    balance_after = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True, editable=False
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
     processed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -4388,7 +4412,10 @@ class WalletDeposit(models.Model):
                 condition=Q(amount__gt=0),
                 name="walletdeposit_amount_gt_0",
             ),
-            # One provider transaction can only map to one deposit.
+            models.CheckConstraint(
+                condition=Q(fee__gte=0) & Q(fee__lte=F("amount")),
+                name="walletdeposit_fee_valid",
+            ),
             models.UniqueConstraint(
                 fields=["provider", "provider_reference"],
                 condition=~Q(provider_reference=""),
@@ -4397,19 +4424,43 @@ class WalletDeposit(models.Model):
         ]
 
     def __str__(self):
-        return f"Deposit {self.reference} {self.amount} {self.currency} [{self.status}]"
+        return f"Deposit {self.id} {self.amount} {self.currency} [{self.status}]"
+
+    @property
+    def net_amount(self) -> Decimal:
+        """Amount actually credited to the wallet."""
+        return self.amount - self.fee
 
     @property
     def is_final(self) -> bool:
         return self.status != self.Status.PENDING
+
+    @property
+    def is_expired(self) -> bool:
+        return (
+            self.status == self.Status.PENDING
+            and self.expires_at is not None
+            and self.expires_at <= timezone.now()
+        )
+
+    # ---- internals -------------------------------------------------------
 
     def _locked(self):
         """Re-fetch this row with a row lock. Call inside transaction.atomic()."""
         return type(self).objects.select_for_update().get(pk=self.pk)
 
     def _sync_from(self, other):
-        for field in ("status", "processed_at", "failure_reason", "provider_reference"):
+        for field in (
+            "status",
+            "processed_at",
+            "failure_reason",
+            "provider_reference",
+            "balance_before",
+            "balance_after",
+        ):
             setattr(self, field, getattr(other, field))
+
+    # ---- state transitions ----------------------------------------------
 
     def mark_completed(self, *, provider_reference: str = "") -> "WalletDeposit":
         """Complete the deposit and credit the wallet exactly once.
@@ -4428,6 +4479,16 @@ class WalletDeposit(models.Model):
                     f"Cannot complete a deposit that is {deposit.status}."
                 )
 
+            wallet_model = self._meta.get_field("wallet").related_model
+            wallet = wallet_model.objects.select_for_update().get(
+                pk=deposit.wallet_id
+            )
+
+            deposit.balance_before = wallet.balance
+            wallet.balance = wallet.balance + deposit.net_amount
+            wallet.save(update_fields=["balance"])
+
+            deposit.balance_after = wallet.balance
             deposit.status = self.Status.COMPLETED
             deposit.processed_at = timezone.now()
             if provider_reference:
@@ -4437,13 +4498,10 @@ class WalletDeposit(models.Model):
                     "status",
                     "processed_at",
                     "provider_reference",
+                    "balance_before",
+                    "balance_after",
                     "updated_at",
                 ]
-            )
-
-            wallet_model = self._meta.get_field("wallet").related_model
-            wallet_model.objects.filter(pk=deposit.wallet_id).update(
-                balance=F("balance") + deposit.amount
             )
 
             self._sync_from(deposit)
@@ -4454,6 +4512,9 @@ class WalletDeposit(models.Model):
 
     def mark_cancelled(self, reason: str = "") -> "WalletDeposit":
         return self._close(self.Status.CANCELLED, reason)
+
+    def mark_expired(self) -> "WalletDeposit":
+        return self._close(self.Status.EXPIRED, "Deposit expired.")
 
     def _close(self, new_status: str, reason: str) -> "WalletDeposit":
         with transaction.atomic():
