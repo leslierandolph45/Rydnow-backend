@@ -27,6 +27,7 @@ from .models import (
     RiderWallet,
     Service,
     WalletTransaction,
+    WalletDeposit
 )
 from .validators import (
     check_password_strength,
@@ -490,3 +491,13 @@ class TransactionQuerySerializer(serializers.Serializer):
             raise serializers.ValidationError({"max_amount": "Must not be less than min_amount."})
         return attrs
 
+class WalletDepositSerializer(serializers.ModelSerializer):
+    rider_name = serializers.CharField(source="rider_wallet.rider.full_name", read_only=True)
+
+    class Meta:
+        model = WalletDeposit
+        fields = [
+            "id", "rider_name", "amount", "currency", "reference",
+            "payment_method", "status", "note", "created_at", "processed_at"
+        ]
+        read_only_fields = ["id", "reference", "created_at", "processed_at"]

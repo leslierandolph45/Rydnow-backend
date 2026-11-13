@@ -41,6 +41,23 @@ from phonenumber_field.modelfields import PhoneNumberField
 logger = logging.getLogger(__name__)
 
 
+
+
+def validate_positive_amount(value):
+    if value <= Decimal("0"):
+        raise ValidationError("Amount must be greater than zero")
+
+def generate_deposit_ref():
+    return f"DEP-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+def money(amount):
+    return f"{amount:.2f}"
+
+
+
+
+
+
 class WalletError(Exception):
     """Raised inside a wallet mutation to refuse it (e.g. insufficient balance)."""
 
@@ -4300,4 +4317,162 @@ class DispatchOffer(models.Model):
     @property
     def is_expired(self) -> bool:
         return timezone.now() >= self.expires_at
+
+
+# Imports above go at the top of models.py (skip any already imported).
+
+DEFAULT_CURRENCY = getattr(settings, "WALLET_DEFAULT_CURRENCY", "USD")
+
+
+class WalletDeposit(models.Model):
+    """A single attempt to add funds to a Wallet.
+
+    The wallet balance is only credited when the deposit moves
+    PENDING -> COMPLETED, via mark_completed(). Never edit
+    Wallet.balance directly from views or webhooks.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    class Method(models.TextChoices):
+        CARD = "card", "Card"
+        BANK_TRANSFER = "bank_transfer", "Bank transfer"
+        MOBILE_MONEY = "mobile_money", "Mobile money"
+        OTHER = "other", "Other"
+
+    # Public, non-guessable identifier. Use this in APIs and webhooks,
+    # not the integer pk.
+    reference = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+
+    wallet = models.ForeignKey(
+        "RiderWallet",
+        on_delete=models.PROTECT,  # never lose financial records by cascade
+        related_name="deposits",
+    )
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+    )
+    currency = models.CharField(max_length=3, default=DEFAULT_CURRENCY)
+
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING
+    )
+    method = models.CharField(
+        max_length=20, choices=Method.choices, default=Method.OTHER
+    )
+
+    # Payment provider details (idempotency / reconciliation)
+    provider = models.CharField(max_length=50, blank=True)
+    provider_reference = models.CharField(max_length=128, blank=True)
+    failure_reason = models.CharField(max_length=255, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=["wallet", "-created_at"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name="walletdeposit_amount_gt_0",
+            ),
+            # One provider transaction can only map to one deposit.
+            models.UniqueConstraint(
+                fields=["provider", "provider_reference"],
+                condition=~Q(provider_reference=""),
+                name="walletdeposit_unique_provider_ref",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Deposit {self.reference} {self.amount} {self.currency} [{self.status}]"
+
+    @property
+    def is_final(self) -> bool:
+        return self.status != self.Status.PENDING
+
+    def _locked(self):
+        """Re-fetch this row with a row lock. Call inside transaction.atomic()."""
+        return type(self).objects.select_for_update().get(pk=self.pk)
+
+    def _sync_from(self, other):
+        for field in ("status", "processed_at", "failure_reason", "provider_reference"):
+            setattr(self, field, getattr(other, field))
+
+    def mark_completed(self, *, provider_reference: str = "") -> "WalletDeposit":
+        """Complete the deposit and credit the wallet exactly once.
+
+        Idempotent: calling it again on a completed deposit does nothing,
+        so duplicate webhooks cannot double-credit.
+        """
+        with transaction.atomic():
+            deposit = self._locked()
+
+            if deposit.status == self.Status.COMPLETED:
+                self._sync_from(deposit)
+                return self
+            if deposit.status != self.Status.PENDING:
+                raise ValidationError(
+                    f"Cannot complete a deposit that is {deposit.status}."
+                )
+
+            deposit.status = self.Status.COMPLETED
+            deposit.processed_at = timezone.now()
+            if provider_reference:
+                deposit.provider_reference = provider_reference
+            deposit.save(
+                update_fields=[
+                    "status",
+                    "processed_at",
+                    "provider_reference",
+                    "updated_at",
+                ]
+            )
+
+            wallet_model = self._meta.get_field("wallet").related_model
+            wallet_model.objects.filter(pk=deposit.wallet_id).update(
+                balance=F("balance") + deposit.amount
+            )
+
+            self._sync_from(deposit)
+        return self
+
+    def mark_failed(self, reason: str = "") -> "WalletDeposit":
+        return self._close(self.Status.FAILED, reason)
+
+    def mark_cancelled(self, reason: str = "") -> "WalletDeposit":
+        return self._close(self.Status.CANCELLED, reason)
+
+    def _close(self, new_status: str, reason: str) -> "WalletDeposit":
+        with transaction.atomic():
+            deposit = self._locked()
+
+            if deposit.status == new_status:
+                self._sync_from(deposit)
+                return self
+            if deposit.status != self.Status.PENDING:
+                raise ValidationError(
+                    f"Cannot change a deposit that is {deposit.status}."
+                )
+
+            deposit.status = new_status
+            deposit.processed_at = timezone.now()
+            deposit.failure_reason = reason[:255]
+            deposit.save(
+                update_fields=["status", "processed_at", "failure_reason", "updated_at"]
+            )
+            self._sync_from(deposit)
+        return self
 

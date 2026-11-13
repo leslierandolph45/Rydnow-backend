@@ -287,7 +287,7 @@ class GroupAdmin(BaseGroupAdmin, UnfoldModelAdmin):
 # ══════════════════════════════════════════════════════════
 @admin.register(CustomerProfile)
 class CustomerProfileAdmin(BaseAdmin):
-    list_display = ("__str__", "pk", "created_at")
+    list_display = ("__str__", "pk", "created_at",)
     search_fields = ("user__username", "user__email")
     readonly_fields = ("created_at",)
     list_select_related = ("user",)
@@ -905,7 +905,7 @@ class WalletDepositAdmin(LedgerAdmin):
     list_display = ("__str__", "pk", "status", "created_at")
     list_filter = ("status", "created_at")
     search_fields = ("reference",)
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = ("created_at", "processed_at")
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
 
