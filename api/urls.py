@@ -1,11 +1,13 @@
 """
 URL configuration for the `api` app.
 
-IMPORTANT (admin 500 fix):
-- The live-map route is named "rn_live_map" (underscores). Unfold's sidebar
-  (settings.UNFOLD["SIDEBAR"]) reverses this exact name, so it must match.
-- The live-map route MUST come before `admin/`, otherwise Django's admin
-  catches `admin/live-map/` first and the route is never reached.
+Admin 500 fix:
+- admin_dashboard.py calls reverse("rn_live_map") AND reverse("rn_live_map_data").
+  Both names must exist here, spelled exactly like this.
+- Both live-map routes MUST come before `admin/`, otherwise Django's admin
+  catches `admin/live-map/...` first and the routes are never reached.
+- Both are wrapped in admin.site.admin_view so only logged-in staff can open
+  them (the data endpoint returns rider phone numbers and live locations).
 """
 
 from django.contrib import admin
@@ -31,6 +33,11 @@ urlpatterns = [
         "admin/live-map/",
         admin.site.admin_view(admin_dashboard.live_map_page),
         name="rn_live_map",
+    ),
+    path(
+        "admin/live-map/data/",
+        admin.site.admin_view(admin_dashboard.live_map_data),
+        name="rn_live_map_data",
     ),
     path("admin/", admin.site.urls),
 
