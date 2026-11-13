@@ -79,9 +79,9 @@ def env_list(name: str, default=None) -> list:
 
 
 
-REST_FRAMEWORK = EXCEPTION_HANDLER': 'rest_framework.views.exception_handler
-
-
+REST_FRAMEWORK = {
+    'EXCEPTION_HANDLER': 'rest_frameword.views.exception_handler',
+}
 
 # ─────────────────────────── Core ───────────────────────────
 # Secure by default: DEBUG is OFF unless you explicitly turn it on (e.g. in a local .env).
