@@ -78,6 +78,12 @@ def env_list(name: str, default=None) -> list:
 
 
 
+
+REST_FRAMEWORK - {
+    'EXCEPTION_HANDLER': 'api.exception_handler.rydnow_handler'
+}
+
+
 # ─────────────────────────── Core ───────────────────────────
 # Secure by default: DEBUG is OFF unless you explicitly turn it on (e.g. in a local .env).
 DEBUG = env_bool("DEBUG", False)
