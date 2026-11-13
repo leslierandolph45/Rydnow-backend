@@ -103,6 +103,7 @@ from .serializers import (
     VerifyCodeSerializer,
     VerifyPaymentSerializer,
     WithdrawalRequestSerializer,
+    CustomerProfileSerializer
 )
 
 User = get_user_model()
@@ -143,22 +144,20 @@ PHONE_VERIFIED_TTL_SECONDS = 1800
 LOW_BALANCE_FALLBACK = Decimal("50.00")
 
 
-def ok(message=None, **kwargs):
+def ok(message=None, status_code=status.HTTP_200_OK, **kwargs):
     data = {"success": True}
     if message:
         data["message"] = message
     data.update(kwargs)
-    return data
+    return Response(data, status=status_code)
 
 
-def fail(message: str, status=400):
-    return {"success": False, "error": message}, status
+def fail(message, status_code=status.HTTP_400_BAD_REQUEST):
+    return Response({"success": False, "error": message}, status=status_code)
 
 
 def validation_fail(serializer):
-    errors = [str(v[0]) for v in serializer.errors.values()]
-    return {"success": False, "error": " ".join(errors)}, 400
-
+    return fail(" ".join(str(v[0]) for v in serializer.errors.values()))
 
 
 def money(value):
@@ -539,29 +538,86 @@ def rider_submit_documents(request, rider):
         submitted_for_review=submitted,
     )
 
+# ─────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────
 ADMIN_NOTE_FIELD = "notes"
 
+
+# ─────────────────────────────────────────────────────────────
+# Rider: Submit Documents
+# ─────────────────────────────────────────────────────────────
 def rider_submit_documents(request, rider):
-    # All your code here, indented:
+    """
+    Handle document uploads from riders.
+    Updates verification status based on what's been uploaded.
+    """
+    # Get uploaded document types
     have = set(rider.documents.values_list("document_type", flat=True))
     required = {t for t, _ in RiderDocument.REQUIRED_TYPES}
 
-    if required < have and rider.verification_status not in (...):
+    # If not enough docs yet → set to PENDING
+    if required < have and rider.verification_status not in (
+        VerificationStatus.UNDER_REVIEW,
+        VerificationStatus.SUSPENDED,
+    ):
         rider.verification_status = VerificationStatus.PENDING
         rider.save()
-    
 
-#in rider_verification_status:
+    try:
+        # Your existing upload logic creates 'document' and 'submitted'
+        return ok(
+            "Document uploaded successfully.",
+            status=HTTP_201_CREATED,
+            id=str(document.id),
+            document_type=document.document_type,
+            document_status=document.status,
+            documents_uploaded=rider.documents_uploaded,
+            submitted_for_review=submitted,
+        )
+    except Exception as e:
+        logger.exception("Auto-submit crashed rider_id=%s", rider.id)
+        return error("Upload saved but notification failed.", status=500)
+
+
+# ─────────────────────────────────────────────────────────────
+# Rider: Verification Status
+# ─────────────────────────────────────────────────────────────
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([WalletReadThrottle])
+@rider_required
 def rider_verification_status(request, rider):
+    """
+    Current review state + per-document state, for the rider-verify page.
+    Frontend-friendly status strings, no raw enum values.
+    """
+    documents = []
+    for value, label in RiderDocument.DocumentType.choices:
+        doc = rider.documents.filter(document_type=value).first()
+        documents.append({
+            "type": value,
+            "label": label,
+            "status": _doc_state(doc),
+            "name": doc.name if doc else None,
+            "url": doc.file.url if doc and doc.file else None,
+        })
+
     return ok(
         stage=_stage(rider),
         documents=documents,
-        rejection_reason=rider.rejection_reason or ""
+        rejection_reason=rider.rejection_reason or "",
     )
 
 
+# ─────────────────────────────────────────────────────────────
+# Helper: Verification Stage String
+# ─────────────────────────────────────────────────────────────
 def _stage(rider):
-    """One value the frontend can trust, so it never compares raw enum strings."""
+    """
+    One value the frontend can trust — never compares raw enum strings.
+    Returns: suspended | approved | under_review | rejected | not_started
+    """
     if rider.verification_status == VerificationStatus.SUSPENDED:
         return "suspended"
     if rider.is_verified:
@@ -573,7 +629,13 @@ def _stage(rider):
     return "not_started"
 
 
+# ─────────────────────────────────────────────────────────────
+# Helper: Single Document Status String
+# ─────────────────────────────────────────────────────────────
 def _doc_state(document):
+    """
+    Return frontend-friendly status for one document.
+    """
     if document is None:
         return "missing"
     if document.status == RiderDocument.DocumentStatus.APPROVED:
