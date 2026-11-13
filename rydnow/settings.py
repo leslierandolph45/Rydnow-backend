@@ -79,9 +79,14 @@ def env_list(name: str, default=None) -> list:
 
 
 
-REST_FRAMEWORK - {
-    'EXCEPTION_HANDLER': 'api.exception_handler.rydnow_handler'
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.SessionAuthentication',
+        'rest_framework.authentication.TokenAuthentication',
+    ],
+    'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
 }
+
 
 
 # ─────────────────────────── Core ───────────────────────────
