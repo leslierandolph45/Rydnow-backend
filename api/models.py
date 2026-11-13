@@ -1587,7 +1587,7 @@ class RiderDocument(models.Model):
 
     Status = DocumentStatus
     REQUIRED_TYPES = [
-        (DocumentType.GHANA_CARD, "Ghana Card (Front)"),
+        (DocumentType.GHANA_CARD_Front, "Ghana Card (Front)"),
         (DocumentType.GHANA_CARD_BACK, "Ghana Card (Back)"),
         (DocumentType.PASSPORT_PHOTO, "Passport Photo"),
         (DocumentType.RIDING_LICENSE, "Riding Licence"),
