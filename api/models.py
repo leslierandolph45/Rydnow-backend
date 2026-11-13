@@ -42,6 +42,10 @@ from django.urls import reverse
 logger = logging.getLogger(__name__)
 AUTH_USER = settings.AUTH_USER_MODEL
 
+
+class WalletError(Exception):
+    """ Raised inside a wallet mutation to refuse it (e.g. insufficient balance)."""
+
 # =====================================================================
 # 0. VALIDATORS, HELPERS, CONSTANTS
 # =====================================================================
@@ -1137,13 +1141,13 @@ class RiderProfile(models.Model):
 
     @property
     def is_suspended(self):
-        if self.suspended_at:
+        if not self.suspended_at:
             return False
         return self.suspended_until is None or self.suspended_until > timezone.now()
 
     @property
     def is_currently_restricted(self):
-        if not self.is_restricted:
+        if not self.is_currently_restricted:
             return False
         return self.restricted_until is None or self.restricted_until > timezone.now() 
 
@@ -1172,7 +1176,7 @@ class RiderProfile(models.Model):
             self.is_active
             and self.deleted_at is None
             and self.is_verified 
-            and not selfis_suspended
+            and not self.is_suspended
             and not self.is_currently_restricted
         )
 
@@ -1297,10 +1301,7 @@ class RiderProfile(models.Model):
 
     @property
     def documents_complete(self):
-        required = {c for c, _ in RiderDocument.REQUIRED_TYPES}
-        have = set(self.documents.filter(status=RiderDocument.DocumentStatus.APPROVED)
-                   .values_list("document_type", flat=True))
-        return required.issubset(have)
+        return not self.missing_required_documents()
 
 
     # ---- live state --------------------------------------------------------
@@ -1458,6 +1459,46 @@ class RiderProfile(models.Model):
         return self._transition(VerificationStatus.VERIFIED, by=by, reason=reason,
                                 suspended_at=None, suspended_until=None, suspension_reason="")
 
+    def missing_required_documents(self):
+        """Labels of required documents that do not have an APPROVED upload yet."""
+        have = set(self.documents.filter(status=RiderDocument.DocumentStatus.APPROVED)
+                .values_list("document_type", flat=True))
+        return [label for code, label in RiderDocument.REQUIRED_TYPES
+                if getattr(code, "value", code) not in have]
+
+    def sync_verification_from_documents(self, by=None):
+        """
+        Make the rider Verified once EVERY required document is approved
+        (Ghana Card, passport photo, riding licence, vehicle registration).
+        Returns True if the status changed.
+        """
+        if self.verification_status not in (VerificationStatus.PENDING,
+                                            VerificationStatus.UNDER_REVIEW,
+                                            VerificationStatus.REJECTED):
+            return False
+        if self.missing_required_documents():
+            return False
+        self._transition(VerificationStatus.VERIFIED, by=by,
+                         reason="All required documents approved",
+                         verified_at=timezone.now(), verified_by=by, rejection_reason="")
+        return True
+
+    def note_document_rejected(self, document, by=None):
+        """
+        Store why a document was rejected. A rider who was under review goes back to Rejected
+        (they can fix it and resubmit). Returns True if the status changed.
+        """
+        reason = f"{document.get_document_type_display()}: {(document.notes or '').strip()}"
+        if self.verification_status == VerificationStatus.UNDER_REVIEW:
+            self._transition(VerificationStatus.REJECTED, by=by, reason=reason, rejection_reason=reason)
+            return True
+        if self.verification_status == VerificationStatus.PENDING:
+            RiderProfile.objects.filter(pk=self.pk).update(rejection_reason=reason)
+            self.rejection_reason = reason
+        return False
+
+
+
 
 class RiderStatusHistory(models.Model):
     class Status(models.TextChoices):
@@ -1574,15 +1615,55 @@ class RiderDocument(models.Model):
     def is_expired(self):
         return bool(self.expiry_date and self.expiry_date < timezone.localdate())
 
-    def review(self, by, approve, notes=""):
-        self.status = self.DocumentStatus.APPROVED if approve else self.DocumentStatus.REJECTED
-        self.reviewed_by, self.reviewed_at, self.notes = by, timezone.now(), notes
-        self.save(update_fields=["status", "reviewed_by", "reviewed_at", "notes"])
+    def clean(self):
+        super().clean()
+        if self.status == self.DocumentStatus.REJECTED and not (self.notes or "").strip():
+            raise ValidationError({"notes": "Add a short reason so the rider knows what to fix."})
 
-def get_absolute_url(self):
+    def review(self, by, approve, notes=""):
+        """
+        Approve  or reject, stamp the reviewer, then sync the rider's verification status.
+        Return "verified" (rider just became Verified), "rejected" (rider sent back), or "".
+        """
+        if notes:
+            self.notes = notes 
+        if not approve and not (self.noted or "").strip():
+            raise ValidationError("Add a short reason before rejecting a document.")
+        with transaction.atomic():
+            self.status = self.DocumentStatus.APPROVED if approve else self.DocumentStatus.REJECTED
+            self.reviewed_by, self.reviewed_at, self.notes = by, timezone.now(), notes
+            self.save(update_fields=["status", "reviewed_by", "reviewed_at", "notes"])
+            return self.apply_review_effects(by=by)
+
+    def apply_review_effects(self, by=None):
+        """
+        Side effects of a decision that is Already saved on this row.
+        Approved -> if every required document is approved, the rider becomes Verified.
+        Rejected -> the reason is stored on the rider, they are notified, and a rider who was 
+                    under review goes back to Rejected so they can fix and resubmit.
+        """
+        rider = self.rider_profile
+        if self.status == self.DocumentStatus.APPROVED:
+            if rider.sync_verification_from_documents(by=by):
+                Notification.notify(rider.user, "You're verified!",
+                                    "All your documents are approved. You can now go online and take jobs.",
+                                    category=Notification.Category.SYSTEM)
+                return "verified"
+            return ""
+        if self.status == self.DocumentStatus.REJECTED:
+            changed = rider.note_document_rejected(self, by=by)
+            Notification.notify(rider.user, "A document need attention",
+                                f"{self.get_document_type_display()}: {(self.notes or "").strip()}",
+                                category= Notification.Category.SYSTEM)
+            return "rejected" if changed else ""
+        return ""
+
+                    
+    def get_absolute_url(self):
         """Tell Django where to find the edit page for this document"""
         return reverse("admin:api_riderdocument_change", args=[self.pk])
 
+# RIDER PAYOUT ACCOUNT
 class RiderPayoutAccount(models.Model):
     class Network(models.TextChoices):
         MTN = "mtn", "MTN MoMo"

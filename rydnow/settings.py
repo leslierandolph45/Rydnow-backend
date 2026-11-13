@@ -1,18 +1,29 @@
 """
 Django settings for the Rydnow project (rides, delivery & waste collection).
 
+
 All environment-specific values come from environment variables.
+
 
 Required in production:
     DJANGO_SECRET_KEY, DATABASE_URL
 
+
+REQUIRED for rider documents to survive deploys (Render's disk is wiped on every deploy):
+    AWS_STORAGE_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+    (+ AWS_S3_ENDPOINT_URL and AWS_S3_REGION_NAME for Cloudflare R2 / Backblaze B2 / Supabase)
+
+
 Recommended in production:
-    AWS_STORAGE_BUCKET_NAME (+ AWS_* for S3 / Cloudflare R2) so uploads survive deploys,
     PAYSTACK_SECRET_KEY, SENTRY_DSN, REDIS_URL
+
 
 Optional:
     DEBUG, ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS,
-    LOG_LEVEL, EMAIL_*, SECURE_HSTS_SECONDS, ADMIN_SESSION_HOURS
+    LOG_LEVEL, EMAIL_*, SECURE_HSTS_SECONDS, ADMIN_SESSION_HOURS,
+    MEDIA_ROOT (only if you mount a persistent disk instead of using a bucket),
+    AWS_S3_ADDRESSING_STYLE ("path" or "virtual"), AWS_QUERYSTRING_EXPIRE
+
 
 Local development: set DEBUG=True in your shell or .env file.
 """
@@ -21,27 +32,30 @@ import warnings
 from decimal import Decimal
 from pathlib import Path
 
+
 import dj_database_url
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 from django.templatetags.static import static
 from django.urls import reverse_lazy
 
+
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-CLOUDINARY_STORAGE = {
-    'CLOUD_NAME': 'kiacglev',
-    'API_KEY': '879488669349531',
-    'API_SECRET': 'SH4ixqpDloF5CufoOVod9xiuOiY',
-}
+# NOTE: the old hard-coded CLOUDINARY_STORAGE block was removed on purpose.
+# It was never wired into STORAGES / INSTALLED_APPS (so it did nothing), and it
+# exposed an API secret in source code. Rotate that secret in the Cloudinary dashboard.
+
 
 
 
 # ────────────────────────── Env helpers ──────────────────────────
 def env_bool(name: str, default: bool = False) -> bool:
     return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
 
 
 def env_int(name: str, default: int) -> int:
@@ -54,15 +68,20 @@ def env_int(name: str, default: int) -> int:
         raise ImproperlyConfigured(f"{name} must be an integer, got {raw!r}.") from exc
 
 
+
+
 def env_list(name: str, default=None) -> list:
     raw = os.environ.get(name, "")
     items = [item.strip() for item in raw.split(",") if item.strip()]
     return items or list(default or [])
 
 
+
+
 # ─────────────────────────── Core ───────────────────────────
 # Secure by default: DEBUG is OFF unless you explicitly turn it on (e.g. in a local .env).
 DEBUG = env_bool("DEBUG", False)
+
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
@@ -70,6 +89,7 @@ if not SECRET_KEY:
         SECRET_KEY = "dev-insecure-key"
     else:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DEBUG is False.")
+
 
 ALLOWED_HOSTS = env_list(
     "ALLOWED_HOSTS",
@@ -79,11 +99,15 @@ _render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 if _render_host and _render_host not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_render_host)
 
+
 ROOT_URLCONF = "rydnow.urls"
 WSGI_APPLICATION = "rydnow.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+
 # AUTH_USER_MODEL = "api.User"
+
+
 
 
 # ─────────────────────── Applications ───────────────────────
@@ -108,6 +132,7 @@ INSTALLED_APPS = [
     "api",
 ]
 
+
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
@@ -125,6 +150,7 @@ TEMPLATES = [
     },
 ]
 
+
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
@@ -138,6 +164,8 @@ MIDDLEWARE = [
 ]
 
 
+
+
 # ─────────────────────── Payments ───────────────────────
 # Never hard-code keys. If a real Paystack key was ever committed to git, rotate it now.
 PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
@@ -147,6 +175,8 @@ PAYSTACK_CALLBACK_URL = os.environ.get(
 WALLET_MIN_BALANCE = os.environ.get("WALLET_MIN_BALANCE", "50.00")
 if not DEBUG and not PAYSTACK_SECRET_KEY:
     warnings.warn("PAYSTACK_SECRET_KEY is not set: card/MoMo payments will fail.", RuntimeWarning)
+
+
 
 
 # ─────────────────────── Database ───────────────────────
@@ -160,6 +190,8 @@ DATABASES = {
 }
 if not DEBUG and DATABASES["default"]["ENGINE"].endswith("sqlite3"):
     raise ImproperlyConfigured("Set DATABASE_URL to a PostgreSQL database in production.")
+
+
 
 
 # ───────────────────────── Cache ─────────────────────────
@@ -179,6 +211,8 @@ else:
     }
 
 
+
+
 # ─────────────────── Auth & Passwords ───────────────────
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -190,8 +224,11 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
+
 # Admins are logged out after this many hours (default 12).
 SESSION_COOKIE_AGE = env_int("ADMIN_SESSION_HOURS", 12) * 3600
+
+
 
 
 # ────────────────────── CORS / CSRF ──────────────────────
@@ -206,10 +243,13 @@ CORS_ALLOWED_ORIGINS = env_list(
 )
 CORS_ALLOW_CREDENTIALS = True
 
+
 CSRF_TRUSTED_ORIGINS = env_list(
     "CSRF_TRUSTED_ORIGINS",
     default=["https://rydnow-backend.onrender.com"],
 )
+
+
 
 
 # ─────────────────── Internationalization ───────────────────
@@ -220,13 +260,20 @@ USE_TZ = True
 PHONENUMBER_DEFAULT_REGION = "GH"
 
 
+
+
 # ───────────────────── Static & Media ─────────────────────
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"] if (BASE_DIR / "static").is_dir() else []
 
+
 MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+# Only used when NO bucket is configured (local dev, or a Render persistent disk mounted
+# at e.g. /var/data/media -> set MEDIA_ROOT=/var/data/media). Never public: rider documents
+# are streamed to staff only through the admin (see RiderDocumentAdmin.file_view).
+MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT") or (BASE_DIR / "media"))
+
 
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
@@ -235,14 +282,17 @@ STORAGES = {
 # A missing static reference should degrade (unstyled asset), not 500 the whole admin page.
 WHITENOISE_MANIFEST_STRICT = False
 
+
 if os.environ.get("AWS_STORAGE_BUCKET_NAME"):
-    # Needs: pip install "django-storages[s3]" boto3
+    # Any S3-compatible bucket works: AWS S3, Cloudflare R2, Backblaze B2, Supabase Storage.
+    # Needs: pip install "django-storages[s3]" boto3   (add both to requirements.txt)
     STORAGES["default"] = {"BACKEND": "storages.backends.s3.S3Storage"}
     AWS_STORAGE_BUCKET_NAME = os.environ["AWS_STORAGE_BUCKET_NAME"]
     AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
     AWS_S3_ENDPOINT_URL = os.environ.get("AWS_S3_ENDPOINT_URL") or None
     AWS_S3_REGION_NAME = os.environ.get("AWS_S3_REGION_NAME") or None
+    AWS_S3_ADDRESSING_STYLE = os.environ.get("AWS_S3_ADDRESSING_STYLE") or None
     AWS_S3_SIGNATURE_VERSION = "s3v4"
     AWS_DEFAULT_ACL = None
     AWS_QUERYSTRING_AUTH = True  # private files (Ghana Cards, licences) use short-lived signed URLs
@@ -250,13 +300,17 @@ if os.environ.get("AWS_STORAGE_BUCKET_NAME"):
     AWS_S3_FILE_OVERWRITE = False
 elif not DEBUG:
     warnings.warn(
-        "No object storage configured. Uploaded files will be lost on deploy.",
+        "No object storage configured (AWS_STORAGE_BUCKET_NAME). Uploaded rider documents are "
+        "written to the server disk and WILL BE LOST on the next deploy or restart.",
         RuntimeWarning,
         stacklevel=1,
     )
 
+
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
+
+
 
 
 # ──────────────────── Django REST Framework ────────────────────
@@ -290,6 +344,8 @@ REST_FRAMEWORK = {
 }
 
 
+
+
 # ─────────────────────── Security ───────────────────────
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -301,6 +357,7 @@ if not DEBUG:
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", True)
     SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
 
+
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SAMESITE = "Lax"
@@ -308,6 +365,8 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 # "same-origin" would stop the live map's OpenStreetMap tiles loading (OSM requires a Referer).
 SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 X_FRAME_OPTIONS = "DENY"
+
+
 
 
 # ───────────────────────── Email ─────────────────────────
@@ -323,8 +382,11 @@ else:
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Rydnow <no-reply@rydnow.app>")
 
 
+
+
 # ─────────────────────── Logging ───────────────────────
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG" if DEBUG else "INFO")
+
 
 LOGGING = {
     "version": 1,
@@ -345,10 +407,13 @@ LOGGING = {
 }
 
 
+
+
 # ────────────────────── Error Monitoring ──────────────────────
 _sentry_dsn = os.environ.get("SENTRY_DSN")
 if _sentry_dsn:
     import sentry_sdk
+
 
     sentry_sdk.init(
         dsn=_sentry_dsn,
@@ -357,6 +422,8 @@ if _sentry_dsn:
         traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", 0.1)),
         send_default_pii=False,
     )
+
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -375,6 +442,8 @@ DISPATCH = {
     "w_reliability": 0.10,
     "w_fairness": 0.05,
 }
+
+
 
 
 # ─────────────────────────────────────────────────────────────
