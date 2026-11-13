@@ -1,7 +1,6 @@
 """
 Rydnow serializers — written against the consolidated models.py.
 
-
 Model facts these serializers rely on:
     RiderProfile        user (OneToOne), full_name, phone, current_lat/current_lng,
                         verification_status, `is_verified` is a PROPERTY
@@ -10,19 +9,14 @@ Model facts these serializers rely on:
                         status in {pending, completed, failed, reversed}
     RiderDocument       rider_profile (FK), document_type, `file`, status
     Service             primary key is `key` ("okada", "parcel", "waste-bin")
+    CustomerProfile     user (OneToOne), full_name, email, phone
 """
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
-from django.db import transaction
-from django.core.exceptions import ValidationError as DjangoValidationError
-from django.contrib.auth.password_validation import validate_password
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import serializers
-from .utils import clean_phone
-
-
 
 from .models import (
     TRANSACTION_TYPES,
@@ -40,14 +34,33 @@ from .validators import (
     split_name,
 )
 
-
 User = get_user_model()
-
 
 REFERENCE_RE = r"^[A-Za-z0-9_.\-]{6,100}$"
 MAX_DOCUMENT_SIZE_MB = 10
 ALLOWED_DOCUMENT_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "pdf")
 WALLET_TX_STATUSES = ("pending", "completed", "failed", "reversed")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _create_auth_user(*, email, password, full_name=""):
+    """
+    Single place where auth Users are created.
+
+    NOTE: Django's signature is create_user(username, email=None, password=None, **extra).
+    The 2nd positional argument is `email`, NOT `password`, so every argument is
+    passed by keyword to make argument-order bugs impossible.
+    """
+    first, last = split_name(full_name) if full_name else ("", "")
+    return User.objects.create_user(
+        username=email,
+        email=email,
+        password=password,
+        first_name=first,
+        last_name=last,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -85,44 +98,41 @@ class _SignupBase(serializers.Serializer):
         confirm = attrs.pop("password_confirm", None)
         if confirm is not None and confirm != attrs["password"]:
             raise serializers.ValidationError({"password_confirm": "Passwords do not match."})
-        probe = User(username=attrs["email"], email=attrs["email"],
-                     first_name=split_name(attrs["full_name"])[0])
+        probe = User(
+            username=attrs["email"],
+            email=attrs["email"],
+            first_name=split_name(attrs["full_name"])[0],
+        )
         check_password_strength(attrs["password"], user=probe)
         return attrs
 
     def _create_user(self, data):
-        first, last = split_name(data["full_name"])
-        return User.objects.create_user(
-            username=data["email"], email=data["email"], password=data["password"],
-            first_name=first, last_name=last,
+        return _create_auth_user(
+            email=data["email"],
+            password=data["password"],
+            full_name=data["full_name"],
         )
 
 
-from django.contrib.auth import get_user_model
-from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError, transaction
-from rest_framework import serializers
-
-from .models import CustomerProfile
-from .utils import clean_phone  # adjust import path if needed
-
-User = get_user_model()
-
-
 class RegistrationSerializer(serializers.Serializer):
-    """Customer sign-up: creates the User and its CustomerProfile together."""
+    """
+    Customer sign-up: creates the User and its CustomerProfile together.
+    save() returns the User.
+    """
 
     email = serializers.EmailField(max_length=254)
     password = serializers.CharField(write_only=True, min_length=8, trim_whitespace=False)
     full_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
-    phone = serializers.CharField(max_length=20, required=False, allow_blank=True, default="")
+    phone = serializers.CharField(max_length=30, required=False, allow_blank=True, default="")
 
     def validate_email(self, value):
         email = value.strip().lower()
-        if User.objects.filter(email__iexact=email).exists():
+        if email_is_taken(email):
             raise serializers.ValidationError("This email is already registered.")
         return email
+
+    def validate_full_name(self, value):
+        return " ".join(value.split())
 
     def validate_phone(self, value):
         if not value or not value.strip():
@@ -138,42 +148,34 @@ class RegistrationSerializer(serializers.Serializer):
         return phone
 
     def validate(self, attrs):
-        try:
-            validate_password(attrs["password"])
-        except DjangoValidationError as e:
-            raise serializers.ValidationError({"password": list(e.messages)})
+        probe = User(
+            username=attrs["email"],
+            email=attrs["email"],
+            first_name=split_name(attrs["full_name"])[0] if attrs.get("full_name") else "",
+        )
+        check_password_strength(attrs["password"], user=probe)
         return attrs
 
-    def _create_user(self, data):
-        full_name = (data.get("full_name") or "").strip()
-        first, _, last = full_name.partition(" ")
-        fields = {"email": data["email"], "first_name": first, "last_name": last}
-        # Only set username if your User model has one
-        if "username" in [f.name for f in User._meta.get_fields()]:
-            fields["username"] = data["email"]
-        return User.objects.create_user(password=data["password"], **fields)
-
-    @transaction.atomic
     def create(self, validated_data):
         try:
-            # ✅ SAVE values FIRST — before _create_user modifies validated_data
-            full_name = validated_data.get("full_name", "")
-            phone = validated_data.get("phone", "")
-            
-            user = self._create_user(validated_data)
-            
-            CustomerProfile.objects.create(
-                user=user,
-                full_name=full_name,
-                phone=phone,
-            )
+            with transaction.atomic():
+                user = _create_auth_user(
+                    email=validated_data["email"],
+                    password=validated_data["password"],
+                    full_name=validated_data.get("full_name", ""),
+                )
+                CustomerProfile.objects.create(
+                    user=user,
+                    full_name=validated_data.get("full_name", ""),
+                    email=validated_data["email"],
+                    phone=validated_data.get("phone", ""),
+                )
         except IntegrityError:
-            # Race condition: duplicate slipped past validation
+            # Race condition: another request registered the same email/phone first.
             raise serializers.ValidationError(
                 {"detail": "An account with this email or phone already exists."}
             )
         return user
-
 
 
 class RiderRegistrationSerializer(_SignupBase):
@@ -185,13 +187,20 @@ class RiderRegistrationSerializer(_SignupBase):
             raise serializers.ValidationError("This phone number is already registered.")
         return phone
 
-    @transaction.atomic
     def create(self, validated_data):
-        user = self._create_user(validated_data)
-        rider = RiderProfile.objects.create(
-            user=user, full_name=validated_data["full_name"], phone=validated_data["phone"],
-        )
-        RiderWallet.objects.create(rider=rider)
+        try:
+            with transaction.atomic():
+                user = self._create_user(validated_data)
+                rider = RiderProfile.objects.create(
+                    user=user,
+                    full_name=validated_data["full_name"],
+                    phone=validated_data["phone"],
+                )
+                RiderWallet.objects.create(rider=rider)
+        except IntegrityError:
+            raise serializers.ValidationError(
+                {"detail": "An account with this email or phone already exists."}
+            )
         return rider
 
 
