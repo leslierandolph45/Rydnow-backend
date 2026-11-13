@@ -1572,7 +1572,8 @@ def rider_document_path(instance, filename):
 
 class RiderDocument(models.Model):
     class DocumentType(models.TextChoices):
-        GHANA_CARD = "ghana_card", "Ghana Card"
+        GHANA_CARD = "ghana_card", "Ghana Card(Front)"
+        GHANA_CARD = "ghana_card", "Ghana Card (Back)"
         PASSPORT_PHOTO = "passport_photo", "Passport Photo"
         RIDING_LICENSE = "riding_license", "Riding Licence"
         VEHICLE_REGISTRATION = "vehicle_registration", "Vehicle Registration"
