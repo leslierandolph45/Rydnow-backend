@@ -1,26 +1,18 @@
 """
-Rydnow API views — written against the consolidated models.py and serializers.py.
+Rydnow API views (audited + hardened).
 
 Sections
     1. Constants, response helpers, throttles, decorators
     2. Authentication & customer registration
     3. Phone verification (OTP)
     4. Rider onboarding
-    5. Customer profile
+    5. Customer profile & customer wallet
     6. Rider location & nearby-rider search
     7. Rider wallet, withdrawals, transaction history
-    8. Payments (Paystack): wallet deposits and booking payments
+    8. Payments (Paystack)
+    9. "Who am I" profile endpoint (formerly profile_views.py)
 
-Settings (all optional except PAYSTACK_SECRET_KEY and, in production, SMS_BACKEND):
-    PAYSTACK_SECRET_KEY, PAYSTACK_CALLBACK_URL, PAYMENT_CURRENCY="GHS"
-    MIN_DEPOSIT="10.00", MAX_DEPOSIT="100000.00"
-    SMS_BACKEND="path.to.send_sms"          # callable(phone, message)
-    REQUIRE_PHONE_VERIFICATION=False        # True: registration needs a prior OTP check
-SystemConfig keys (editable in admin):
-    MIN_RIDER_BOOKING_BALANCE ("50.00")  minimum wallet balance to receive jobs
-    MIN_WITHDRAWAL ("10.00"), WITHDRAWAL_FEE ("0.00")
-
-Money rules:
+Money rules
     * A wallet is NEVER credited by a client-supplied amount; only after Paystack verifies it.
     * Booking payments only mark the booking paid (escrow "held"). The rider is credited
       by Booking.complete_booking(), never here.
@@ -31,6 +23,7 @@ import hmac
 import json
 import logging
 import math
+import os
 import re
 import secrets
 import time
@@ -54,7 +47,7 @@ from django.http import StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.module_loading import import_string
-from rest_framework import generics, status
+from rest_framework import generics, serializers, status
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import (
     api_view,
@@ -64,20 +57,23 @@ from rest_framework.decorators import (
     throttle_classes,
 )
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
 from .models import (
     Booking,
+    BookingOffer,
     CustomerProfile,
+    CustomerWallet,
     Payment,
     RiderDocument,
     RiderPayoutAccount,
     RiderProfile,
     RiderWallet,
     Service,
+    ServiceQualification,
     SystemAlert,
     SystemConfig,
     VerificationStatus,
@@ -85,11 +81,11 @@ from .models import (
     WebhookEvent,
     WithdrawalRequest,
     haversine_km,
-    BookingOffer,
 )
 from .serializers import (
     REFERENCE_RE,
     AmountSerializer,
+    CustomerProfileSerializer,
     InitializePaymentSerializer,
     LoginSerializer,
     NearbyRidersQuerySerializer,
@@ -104,8 +100,8 @@ from .serializers import (
     VerifyCodeSerializer,
     VerifyPaymentSerializer,
     WithdrawalRequestSerializer,
-    CustomerProfileSerializer
 )
+from .validators import clean_phone, email_is_taken, split_name
 
 
 User = get_user_model()
@@ -158,8 +154,26 @@ def fail(message, status_code=status.HTTP_400_BAD_REQUEST):
     return Response({"success": False, "error": message}, status=status_code)
 
 
+def _flatten_errors(errors):
+    """Yield plain strings from any nesting of DRF error dicts/lists."""
+    if isinstance(errors, dict):
+        for value in errors.values():
+            yield from _flatten_errors(value)
+    elif isinstance(errors, (list, tuple)):
+        for item in errors:
+            yield from _flatten_errors(item)
+    else:
+        yield str(errors)
+
+
 def validation_fail(serializer):
-    return fail(" ".join(str(v[0]) for v in serializer.errors.values()))
+    """First message per field. Safe for nested/non-field errors (never raises)."""
+    messages = []
+    for value in serializer.errors.values():
+        first = next(_flatten_errors(value), None)
+        if first:
+            messages.append(first)
+    return fail(" ".join(messages) or "Invalid request.")
 
 
 def money(value):
@@ -202,8 +216,16 @@ class PaymentThrottle(UserRateThrottle):
     rate = "20/min"
 
 
+class ProfileThrottle(UserRateThrottle):
+    scope = "profile"
+    rate = "60/min"
+
+
 def rider_required(view):
-    """Inject the authenticated user's RiderProfile as `rider`, or return 404."""
+    """Inject the authenticated user's RiderProfile as `rider`, or return 404.
+
+    The wrapped view MUST accept a `rider` argument.
+    """
     @wraps(view)
     def wrapper(request, *args, **kwargs):
         rider = RiderProfile.objects.filter(user=request.user, deleted_at__isnull=True).first()
@@ -241,7 +263,6 @@ def user_login(request):
     if "@" in identifier:
         identifier = identifier.lower()  # accounts are created with lowercase email usernames
 
-    # ModelBackend already rejects inactive users.
     user = authenticate(
         request=request,
         username=identifier,
@@ -265,8 +286,6 @@ def user_login(request):
         "role": "rider" if rider else "customer",
     }
     if rider:
-        # Unverified riders may log in (they must upload documents); the app gates
-        # going online on these values.
         user_payload["is_verified"] = rider.is_verified
         user_payload["verification_status"] = rider.verification_status
 
@@ -406,7 +425,6 @@ def verify_code(request):
         return fail("Invalid verification code.", status.HTTP_400_BAD_REQUEST)
 
     cache.delete(key)
-    # Registration endpoints check this flag when REQUIRE_PHONE_VERIFICATION is on.
     cache.set(_verified_key(phone), True, PHONE_VERIFIED_TTL_SECONDS)
     return ok("Phone number verified.", verified=True)
 
@@ -509,8 +527,7 @@ def rider_submit_documents(request, rider):
     except IntegrityError:
         return fail("This document type has already been submitted.", status.HTTP_409_CONFLICT)
     except Exception:
-        # Storage errors (bad MEDIA_ROOT, S3/Cloudinary credentials, disk) land here.
-        # Return JSON so the frontend shows a real message instead of an HTML 500.
+        # Storage errors (MEDIA_ROOT, S3/Cloudinary credentials, disk) land here.
         logger.exception("Document save failed rider_id=%s type=%s", rider.id, doc_type)
         return fail(
             "We couldn't save your file. Please try again in a moment.",
@@ -527,7 +544,6 @@ def rider_submit_documents(request, rider):
         except DjangoValidationError as exc:
             logger.warning("Auto-submit failed rider_id=%s: %s", rider.id, exc.messages)
         except Exception:
-            # e.g. email/SMTP failure. The document is already saved, so don't fail the upload.
             logger.exception("Auto-submit crashed rider_id=%s", rider.id)
 
     return ok(
@@ -541,42 +557,9 @@ def rider_submit_documents(request, rider):
     )
 
 
-# ─────────────────────────────────────────────────────────────
-# Rider: Verification Status
-# ─────────────────────────────────────────────────────────────
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-@throttle_classes([WalletReadThrottle])
-@rider_required
-def rider_verification_status(request, rider):
-    """
-    Current review state + per-document state, for the rider-verify page.
-    Frontend-friendly status strings, no raw enum values.
-    """
-    documents = []
-    for value, label in RiderDocument.DocumentType.choices:
-        doc = rider.documents.filter(document_type=value).first()
-        documents.append({
-            "type": value,
-            "label": label,
-            "status": _doc_state(doc),
-            "name": doc.name if doc else None,
-            "url": doc.file.url if doc and doc.file else None,
-        })
-
-    return ok(
-        stage=_stage(rider),
-        documents=documents,
-        rejection_reason=rider.rejection_reason or "",
-    )
-
-
-# ─────────────────────────────────────────────────────────────
-# Helper: Verification Stage String
-# ─────────────────────────────────────────────────────────────
 def _stage(rider):
     """
-    One value the frontend can trust — never compares raw enum strings.
+    One value the frontend can trust.
     Returns: suspended | approved | under_review | rejected | not_started
     """
     if rider.verification_status == VerificationStatus.SUSPENDED:
@@ -590,26 +573,58 @@ def _stage(rider):
     return "not_started"
 
 
-# ─────────────────────────────────────────────────────────────
-# Helper: Single Document Status String
-# ─────────────────────────────────────────────────────────────
 def _doc_state(document):
-    """
-    Return frontend-friendly status for one document.
-    """
+    """Frontend-friendly status for one document."""
     if document is None:
         return "missing"
     if document.status == RiderDocument.DocumentStatus.APPROVED:
         return "approved"
-    rejected = getattr(RiderDocument.DocumentStatus, "REJECTED", None)
-    if rejected is not None and document.status == rejected:
+    if document.status == RiderDocument.DocumentStatus.REJECTED:
         return "rejected"
     return "uploaded"
 
 
+def _file_url(field_file):
+    """URL of a stored file, or None. A storage problem must never break the endpoint."""
+    try:
+        return field_file.url if field_file and field_file.name else None
+    except Exception:  # noqa: BLE001
+        logger.warning("File URL unavailable", exc_info=True)
+        return None
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([WalletReadThrottle])
+@rider_required
+def rider_verification_status(request, rider):
+    """Current review state + per-document state, for the rider-verify page."""
+    latest = {}
+    for doc in rider.documents.all().order_by("uploaded_at"):
+        latest[doc.document_type] = doc  # newest wins
+
+    documents = []
+    for value, label in RiderDocument.DocumentType.choices:
+        doc = latest.get(value)
+        documents.append({
+            "type": value,
+            "label": label,
+            # RiderDocument has no `name` field; derive it from the stored file.
+            "name": os.path.basename(doc.file.name) if doc and doc.file else None,
+            "status": _doc_state(doc),
+            "url": _file_url(doc.file) if doc else None,
+            "notes": (doc.notes or "") if doc and doc.status == RiderDocument.DocumentStatus.REJECTED else "",
+        })
+
+    return ok(
+        stage=_stage(rider),
+        documents=documents,
+        rejection_reason=rider.rejection_reason or "",
+    )
+
 
 # ===========================================================================
-# 5. CUSTOMER PROFILE
+# 5. CUSTOMER PROFILE & CUSTOMER WALLET
 # ===========================================================================
 @api_view(["GET", "PATCH"])
 @permission_classes([IsAuthenticated])
@@ -624,35 +639,40 @@ def customer_profile(request):
         )
 
     if request.method == "GET":
-        return ok(data=CustomerProfileSerializer(profile).data)
+        return ok(data=CustomerProfileSerializer(profile, context={"request": request}).data)
 
     update_data = {f: request.data[f] for f in CUSTOMER_EDITABLE_FIELDS if f in request.data}
     if not update_data:
         return fail(f"No valid fields provided. You can update: {', '.join(CUSTOMER_EDITABLE_FIELDS)}.")
 
-    serializer = CustomerProfileSerializer(profile, data=update_data, partial=True)
+    serializer = CustomerProfileSerializer(
+        profile, data=update_data, partial=True, context={"request": request}
+    )
     if not serializer.is_valid():
         return validation_fail(serializer)
     serializer.save()
     return ok("Profile updated successfully.", data=serializer.data)
 
 
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+@throttle_classes([WalletReadThrottle])
 def customer_wallet(request):
-    customer = request.user.customerprofile
-    wallet = CustomerWallet.objects.get_or_create(user=request.user)[0]
-    transactions = CustomerWalletTransaction.objects.filter(
-        wallet=wallet
-    ).order_by("-created_at")[:20]
-    
-    return ok({
-        "balance": wallet.balance,
-        "currency": wallet.currency,
-        "transactions": TransactionSerializer(transactions, many=True).data
-    })
+    """Customer wallet balance + last 20 ledger lines."""
+    if not CustomerProfile.objects.filter(user=request.user).exists():
+        return fail("Customer profile not found.", status.HTTP_404_NOT_FOUND)
 
+    wallet, _ = CustomerWallet.objects.get_or_create(user=request.user)
+    transactions = (
+        WalletTransaction.objects.filter(customer_wallet=wallet).order_by("-created_at")[:20]
+    )
+    return ok(
+        balance=money(wallet.balance),
+        withdrawable_balance=money(wallet.withdrawable_balance),
+        bonus_credit=money(wallet.bonus_credit),
+        currency=wallet.currency,
+        transactions=TransactionSerializer(transactions, many=True).data,
+    )
 
 
 # ===========================================================================
@@ -682,9 +702,15 @@ def update_rider_location(request, rider):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
-@rider_required  # rider locations are private
+@throttle_classes([LocationThrottle])
 def get_nearby_riders(request):
-    """Riders who can take a job right now, near the given point, for the given service."""
+    """
+    Riders who can take a job right now, near the given point, for the given service.
+
+    NOTE: this used to be wrapped in @rider_required but did not accept the `rider`
+    argument it injects, so EVERY call crashed with a TypeError (HTTP 500). It is also
+    the customer-facing "riders near me" search, so any authenticated user may call it.
+    """
     query = NearbyRidersQuerySerializer(data=request.query_params)
     if not query.is_valid():
         return validation_fail(query)
@@ -698,8 +724,6 @@ def get_nearby_riders(request):
     lat_delta = radius_km / KM_PER_DEGREE
     lng_delta = radius_km / (KM_PER_DEGREE * max(math.cos(math.radians(lat)), 0.01))
 
-    # dispatchable() already enforces: verified, active, online, fresh GPS, not restricted,
-    # licence valid, approved for the service, and not already on a job.
     candidates = (
         RiderProfile.objects.dispatchable(service=service)
         .filter(
@@ -756,16 +780,18 @@ def get_rider_wallet(request, rider):
     wallet = _get_wallet(rider)
     recent = WalletTransaction.objects.filter(rider_wallet=wallet).order_by("-created_at")[:10]
 
+    minimum = min_wallet_balance()
     can_go_online = _can_go_online(rider, wallet)
 
     return ok(
         balance=money(wallet.balance),
         currency=wallet.currency,
-        minimum_required=money(min_wallet_balance()),
-        can_go_online=_can_go_online(rider, wallet),
+        minimum_required=money(minimum),
+        can_go_online=can_go_online,
         transactions=TransactionSerializer(recent, many=True).data,
-        message= None if can_go_online else "Please deposit at least GH₵50 to start accepting bookings",
+        message=None if can_go_online else f"Please deposit at least GH₵{money(minimum)} to start accepting bookings",
     )
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -773,14 +799,16 @@ def get_rider_wallet(request, rider):
 def accept_offer(request, rider, offer_id):
     minimum = min_wallet_balance()
     wallet = _get_wallet(rider)
-    
+
     if wallet.balance < minimum:
-        return fail(f"Please deposit at least GH₵{minimum} to start accepting bookings", 403)
-    
+        return fail(
+            f"Please deposit at least GH₵{money(minimum)} to start accepting bookings",
+            status.HTTP_403_FORBIDDEN,
+        )
+
     offer = get_object_or_404(BookingOffer, pk=offer_id, rider=rider)
     done, msg = offer.accept()
-    return ok(msg) if done else fail(msg, 409)
-
+    return ok(msg) if done else fail(msg, status.HTTP_409_CONFLICT)
 
 
 def _apply_filters(qs, f):
@@ -963,7 +991,6 @@ def request_withdrawal(request, rider):
                 f"You must keep at least {money(minimum)} in your wallet. "
                 f"Maximum withdrawable: {money(max(wallet.balance - fee - minimum, 0))}."
             )
-        # Reserves the funds and writes the ledger line in one step; refunded if payout fails.
         withdrawal, message = WithdrawalRequest.create_request(wallet, account, amount)
         if withdrawal is None:
             return fail(message)
@@ -1144,7 +1171,10 @@ def _settle_booking_payment(reference, paystack, requesting_user):
 
     with transaction.atomic():  # any PaymentError raised inside rolls everything back
         payment = Payment.objects.select_for_update().filter(reference=reference).first()
-        booking_qs = Booking.objects.select_for_update().select_related("customer")
+        # of=("self",): Booking.customer is nullable, and PostgreSQL refuses
+        # FOR UPDATE on the nullable side of the outer join select_related creates
+        # (that was a 500 on every booking payment).
+        booking_qs = Booking.objects.select_for_update(of=("self",)).select_related("customer")
         if payment is not None:
             booking = booking_qs.get(pk=payment.booking_id)
         else:  # references issued before Payment rows existed
@@ -1167,7 +1197,6 @@ def _settle_booking_payment(reference, paystack, requesting_user):
 
         if booking.payment_status in PAID_STATUSES:
             if booking.payment_ref != reference:
-                # The customer paid twice (e.g. re-initialised checkout). Needs a manual refund.
                 logger.error("DUPLICATE PAYMENT booking_ref=%s extra_reference=%s",
                              booking.booking_ref, reference)
                 SystemAlert.create_alert(
@@ -1194,8 +1223,6 @@ def _settle_booking_payment(reference, paystack, requesting_user):
                          booking.booking_ref, verified_amount, booking_amount)
             raise PaymentError("Payment amount does not match booking total.", status.HTTP_409_CONFLICT)
 
-        # A re-initialised checkout replaces booking.payment_ref; honour whichever
-        # reference the customer actually paid.
         method = CHANNEL_TO_METHOD.get(paystack.get("channel"), "debit")
         Booking.objects.filter(pk=booking.pk).update(payment_ref=reference, payment_method=method)
 
@@ -1232,7 +1259,8 @@ def _settle_wallet_deposit(reference, paystack, metadata, requesting_user):
         wallet = _get_wallet(rider, lock=True)  # serialises concurrent settlements
         already_recorded = WalletTransaction.objects.filter(reference=reference).exists()
         if not already_recorded:
-            # Writes balance + ledger line together; the unique reference makes it idempotent.
+            # Needs RiderWallet.deposit() (added in models fixes). The unique
+            # reference makes this idempotent.
             deposited, message = wallet.deposit(
                 amount, reference=reference, description=f"Wallet deposit - GHS {money(amount)}"
             )
@@ -1274,7 +1302,7 @@ def _settle_response(reference, user):
 def wallet_deposit(request, rider):
     """
     Start a wallet top-up. The wallet is NEVER credited here: funds are added only
-    after Paystack confirms payment (verify_payment): funds are added only via deposit_verify or the webhook.
+    after Paystack confirms payment (deposit_verify or the webhook).
     """
     serializer = AmountSerializer(data=request.data)
     if not serializer.is_valid():
@@ -1361,7 +1389,7 @@ def verify_payment(request):
 @permission_classes([IsAuthenticated])
 @throttle_classes([PaymentThrottle])
 def deposit_verify(request, reference):
-    """Polling endpoint: GET /deposits/verify/<reference>/. Returns 202 while pending."""
+    """Polling endpoint. Returns 202 while pending."""
     if not REFERENCE_PATTERN.match(reference):
         return fail("Invalid reference format.")
     return _settle_response(reference, request.user)
@@ -1429,63 +1457,19 @@ def paystack_webhook(request):
                 if exc.retryable:
                     logger.error("Webhook settlement failed (will retry) ref=%s: %s", reference, exc.message)
                     return Response(status=status.HTTP_503_SERVICE_UNAVAILABLE)
-                # Non-retryable (unknown reference, amount mismatch, ...): acknowledge so Paystack
-                # stops retrying, and keep the failed WebhookEvent row for reconciliation.
                 logger.warning("Webhook payment not settled ref=%s: %s", reference, exc.message)
 
     return Response(status=status.HTTP_200_OK)
 
 
-
-
-
-
-
-"""
-api/profile_views.py -- "who am I" endpoint for riders and customers.
-
-    GET   /me/   the logged-in user's own profile
-    PATCH /me/   update full_name / phone / email / profile_photo (multipart for the photo)
-
-Security rules
-    * Token required. There is NO id in the URL: the profile is always looked up from
-      request.user, so nobody can ask for someone else's details.
-    * Only display fields are returned. No password, no document numbers, no wallet data.
-    * A blocked customer gets 403 (same rule as user_login).
-
-Example response (rider)
-    {
-      "success": true,
-      "id": "6c1f...", "role": "rider", "full_name": "John Doe",
-      "email": "john@example.com", "phone_number": "0241234567",
-      "profile_photo": "https://...", "status": "approved",
-      "created_at": "2026-11-01T10:00:00+00:00", ...rider extras...
-    }
-"""
-import logging
-
-from django.db import IntegrityError, transaction
-from rest_framework import serializers
-from rest_framework import status as http
-from rest_framework.decorators import (
-    api_view,
-    parser_classes,
-    permission_classes,
-    throttle_classes,
-)
-from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.throttling import UserRateThrottle
-
-from .models import CustomerProfile, RiderProfile, Service, ServiceQualification
-from .validators import clean_phone, email_is_taken, split_name
-from .views import fail, ok, validation_fail
-
-logger = logging.getLogger(__name__)
-
+# ===========================================================================
+# 9. "WHO AM I" PROFILE ENDPOINT  (merged from profile_views.py)
+#     GET   /auth/me/   the logged-in user's own profile
+#     PATCH /auth/me/   update full_name / phone / email / profile_photo
+# No id in the URL: the profile is always looked up from request.user.
+# ===========================================================================
 MAX_PHOTO_MB = 5
 
-# What the frontend shows. Anything unknown falls back to "pending".
 RIDER_STATUS = {
     "pending": "pending",
     "under_review": "under_review",
@@ -1495,14 +1479,6 @@ RIDER_STATUS = {
 }
 
 
-class ProfileThrottle(UserRateThrottle):
-    scope = "profile"
-    rate = "60/min"
-
-
-# ---------------------------------------------------------------------------
-# Output
-# ---------------------------------------------------------------------------
 def _photo_url(request, field):
     """Absolute URL of an ImageField, or None. A storage problem must never break the profile."""
     try:
@@ -1534,7 +1510,6 @@ def _rider_payload(request, rider):
         "status": status_value,
         "rejection_reason": (rider.rejection_reason or "") if status_value == "rejected" else "",
         "created_at": rider.created_at.isoformat(),
-        # dashboard extras
         "rating": rider.rating_average,
         "completed_jobs": rider.completed_trips,
         "vehicle_plate": rider.motorbike_plate_number,
@@ -1551,7 +1526,6 @@ def _customer_payload(request, customer):
         "id": customer.pk,
         "role": "customer",
         "full_name": customer.full_name or user.get_full_name() or "",
-        # CustomerProfile.email is not filled at registration; the User row is the source of truth.
         "email": user.email or customer.email or "",
         "phone_number": customer.phone or "",
         "profile_photo": _photo_url(request, customer.profile_photo),
@@ -1560,9 +1534,6 @@ def _customer_payload(request, customer):
     }
 
 
-# ---------------------------------------------------------------------------
-# Input (PATCH)
-# ---------------------------------------------------------------------------
 INPUT_ALIASES = {
     "full_name": ("full_name", "name"),
     "phone": ("phone", "phone_number"),
@@ -1625,9 +1596,6 @@ def _collect_input(request):
     return data
 
 
-# ---------------------------------------------------------------------------
-# View
-# ---------------------------------------------------------------------------
 @api_view(["GET", "PATCH"])
 @parser_classes([JSONParser, MultiPartParser, FormParser])
 @permission_classes([IsAuthenticated])
@@ -1642,9 +1610,9 @@ def my_profile(request):
     if rider is None:
         customer = CustomerProfile.objects.select_related("user").filter(user=request.user).first()
     if rider is None and customer is None:
-        return fail("Profile not found.", http.HTTP_404_NOT_FOUND)
+        return fail("Profile not found.", status.HTTP_404_NOT_FOUND)
     if customer is not None and customer.is_blocked:
-        return fail("This account has been blocked. Contact support.", http.HTTP_403_FORBIDDEN)
+        return fail("This account has been blocked. Contact support.", status.HTTP_403_FORBIDDEN)
 
     role = "rider" if rider else "customer"
     profile = rider or customer
@@ -1676,8 +1644,8 @@ def my_profile(request):
                 old_email = (user.email or "").lower()
                 user.email = values["email"]
                 user_fields.append("email")
-                # Accounts are created with username = email and login looks up the username,
-                # so keep them in step or the new email could not be used to sign in.
+                # Accounts are created with username = email and login looks up the
+                # username, so keep them in step.
                 if (user.username or "").lower() == old_email:
                     user.username = values["email"]
                     user_fields.append("username")
@@ -1691,7 +1659,7 @@ def my_profile(request):
                 user.save(update_fields=user_fields)
             profile.save()
     except IntegrityError:
-        return fail("That phone number or email is already in use.", http.HTTP_409_CONFLICT)
+        return fail("That phone number or email is already in use.", status.HTTP_409_CONFLICT)
 
     return ok("Profile updated.", **build(request, profile))
 
