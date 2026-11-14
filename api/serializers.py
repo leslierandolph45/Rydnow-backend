@@ -189,13 +189,15 @@ class RegistrationSerializer(serializers.Serializer):
 class RiderRegistrationSerializer(_SignupBase):
     """Rider sign-up: creates User -> RiderProfile -> RiderWallet. save() returns the RiderProfile."""
 
+
     def validate_phone(self, value):
         phone = clean_phone(value)
         if RiderProfile.objects.filter(phone=phone).exists():
             raise serializers.ValidationError("This phone number is already registered.")
         return phone
 
-       def _create_user(self, validated_data):
+
+    def _create_user(self, validated_data):
         return _create_auth_user(
             email=validated_data["email"],
             password=validated_data["password"],
@@ -218,6 +220,9 @@ class RiderRegistrationSerializer(_SignupBase):
                 {"detail": "An account with this email or phone already exists."}
             )
         return rider
+
+
+
 
 
 
