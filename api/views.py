@@ -108,7 +108,7 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
-curl -H "Authorization: Token YOUR_TOKEN_HERE" https://rydnow-backend.onrender.com/api/profile/
+CUSTOMER_EDITABLE_FIELDS = ('full_name', 'phone')
 
 
 # ===========================================================================
