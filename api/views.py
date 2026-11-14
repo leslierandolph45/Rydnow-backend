@@ -108,7 +108,7 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
-CUSTOMER_EDITABLE_FIELDS = ('full_name', 'phone')
+
 
 
 # ===========================================================================
@@ -281,18 +281,26 @@ def user_login(request):
 
     update_last_login(None, user)
     token, _ = Token.objects.get_or_create(user=user)
+    profile= CustomerProfile.objects.filter(user=user).first()
+    return ok (
+        " Account created successfully. "
+        status.HTTP_201_CREATED,
+        user_id=user.id,
+        email=user.email,
+        token=token.key,
+        user={
+            "id":user.id,
+            "username":user.username,
+            "email": user.email,
+            "role": "customer",
+            "full_name": (profile.full_name if profile else "") or "",
+            "phone": str (profile.phone) if profile and profile.phone else "",
+        },        
+    )
+        
+    
 
-    user_payload = {
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "role": "rider" if rider else "customer",
-    }
-    if rider:
-        user_payload["is_verified"] = rider.is_verified
-        user_payload["verification_status"] = rider.verification_status
-
-    return ok(token=token.key, user=user_payload)
+   
 
 
 @api_view(["POST"])
@@ -1619,11 +1627,15 @@ def my_profile(request):
 
     role = "rider" if rider else "customer"
     profile = rider or customer
-    user_payload["full_name"] =(gatattr(profile, "full_name", "") or
-    user.get_full_name() or "")
-
-    user_payload["phone_number"] =(Rider.phone if rider else
-    gatattr(customer, "phone", "")) or ""
+    phone = gatattr(profile, "phone", "") if profile else ""
+    user_payload = {
+        "id": user.id
+        "username": user.username,
+        "email": user.email,
+        "role": "rider" if rider else "customer",
+        "full_name":(gatattr(profile, "full_name" "") if profile else "") or user.get_full_name() or"",
+        "phone":str(phone) if phone else "",
+    }
     
 
     if request.method == "GET":
