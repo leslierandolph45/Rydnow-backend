@@ -1620,21 +1620,15 @@ def my_profile(request):
     if customer is not None and customer.is_blocked:
         return fail("This account has been blocked. Contact support.", status.HTTP_403_FORBIDDEN)
 
+
     role = "rider" if rider else "customer"
     profile = rider or customer
-    phone = gatattr(profile, "phone", "") if profile else ""
-    user_payload = {
-        role = "rider" of rider else "customer"
-        profile = rider or customer 
-        build = _rider_payload if rider else _customer_payload
-        
-        if request.method == "GET":
-            return ok(**build(request, profile))
-    }
-    
+    build = _rider_payload if rider else _customer_payload
+
 
     if request.method == "GET":
         return ok(**build(request, profile))
+
 
     serializer = MeUpdateSerializer(
         data=_collect_input(request),
@@ -1646,6 +1640,7 @@ def my_profile(request):
     values = serializer.validated_data
     if not values:
         return fail("Nothing to update.")
+
 
     user = profile.user
     try:
@@ -1659,8 +1654,6 @@ def my_profile(request):
                 old_email = (user.email or "").lower()
                 user.email = values["email"]
                 user_fields.append("email")
-                # Accounts are created with username = email and login looks up the
-                # username, so keep them in step.
                 if (user.username or "").lower() == old_email:
                     user.username = values["email"]
                     user_fields.append("username")
@@ -1676,5 +1669,11 @@ def my_profile(request):
     except IntegrityError:
         return fail("That phone number or email is already in use.", status.HTTP_409_CONFLICT)
 
+
     return ok("Profile updated.", **build(request, profile))
+
+
+
+
+
 
