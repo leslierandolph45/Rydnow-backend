@@ -17,6 +17,7 @@ from rest_framework.authtoken.views import obtain_auth_token
 from api import admin_dashboard
 
 from . import views
+from . import booking_views as v
 
 
 # NOTE: Rider document files are NOT served from a public /media/ URL in
@@ -91,6 +92,24 @@ urlpatterns = [
     path("rider/update-location/", views.update_rider_location, name="rider-location"),
     path("riders/nearby/", views.get_nearby_riders, name="get-nearby-riders"),
 
+    # Customer
+    path("bookings/quote/", v.booking_quote, name="booking-quote"),
+    path("bookings/", v.bookings_collection, name="bookings"),
+    path("bookings/<str:ref>/cancel/", v.booking_cancel, name="booking-cancel"),
+    path("bookings/<str:ref>/", v.booking_detail, name="booking-detail"),
+    path("promos/validate/", v.promo_validate, name="promo-validate"),
+
+    # Rider (list-bookings/ is the path the current rider dashboard already calls)
+    path("list-bookings/", v.rider_bookings, name="list-bookings"),
+    path("rider/bookings/", v.rider_bookings, name="rider-bookings"),
+    path("rider/presence/", v.rider_presence, name="rider-presence"),
+    path("accept-booking/", v.accept_booking, name="accept-booking"),
+    path("decline-booking/", v.decline_booking, name="decline-booking"),
+    path("arrive-ride/", v.arrive_ride, name="arrive-ride"),
+    path("start-ride/", v.start_ride, name="start-ride"),
+    path("complete-ride/", v.complete_ride, name="complete-ride"),
+    path("release-booking/", v.release_booking, name="release-booking"),
+
     # ─────────────────────────────────────
     # Payments — Paystack
     # ─────────────────────────────────────
@@ -98,4 +117,5 @@ urlpatterns = [
     path("payments/initialize/", views.initialize_payment, name="paystack-initialize"),
     path("payments/verify/", views.verify_payment, name="paystack-verify"),
 ]
+
 

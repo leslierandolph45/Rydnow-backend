@@ -1616,7 +1616,12 @@ def my_profile(request):
 
     role = "rider" if rider else "customer"
     profile = rider or customer
-    build = _rider_payload if rider else _customer_payload
+    user_payload["full_name"] =(gatattr(profile, "full_name", "") or
+    user.get_full_name() or "")
+
+    user_payload["phone_number"] =(Rider.phone if rider else
+    gatattr(customer, "phone", "")) or ""
+    
 
     if request.method == "GET":
         return ok(**build(request, profile))

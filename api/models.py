@@ -702,12 +702,13 @@ class CustomerWallet(models.Model):
                 return False, f"Duplicate transaction: {ref}"
             return False, "Database error"
 
-    def deposit(self, amount, reference=None, description="", related_booking=None):
+    def deposit(self, amount, reference=None, description=""):
+        """Credit a verified top-up. Idempotent via the unique reference. """
         amount = round_money(amount)
         validate_positive_amount(amount)
-        ok, msg = self._apply("deposit", lambda w: (amount, amount, Decimal("0"), amount),
-                              reference=reference, description=description, related_booking=related_booking)
-        return ok, "Deposit successful" if ok else msg
+        ref = reference or generate_transaction_ref()
+        return self.apply("deposit", amount, ref, description or "Wallet deposit")
+        
 
     def withdraw(self, amount, reference=None, description=""):
         amount = round_money(amount)
@@ -1937,6 +1938,14 @@ class RiderWallet(models.Model):
         ref = reference or (f"PAYOUT-{booking_ref}" if booking_ref else generate_transaction_ref())
         return self._post(tx_type, amount, ref, description or f"Earnings {booking_ref}".strip(),
                           related_booking, earned=True)
+
+    def deposit(self, amount, reference, description=""):
+        amount = round_money(amount)
+        validate_positive_amount(amount)
+        ok, msg = self._post("deposit", amount, reference, description or "Wallet deposit")
+        return ok, ("Deposit successful" if ok else msg)
+
+
 
     def debit_commission(self, amount, booking_ref="", related_booking=None):
         """Collect commission on a cash trip, never more than the wallet holds."""
@@ -4322,7 +4331,7 @@ class DispatchOffer(models.Model):
 
 # Imports above go at the top of models.py (skip any already imported).
 
-DEFAULT_CURRENCY = getattr(settings, "WALLET_DEFAULT_CURRENCY", "USD")
+DEFAULT_CURRENCY = getattr(settings, "WALLET_DEFAULT_CURRENCY", "GHS")
 
 
 class WalletDeposit(models.Model):

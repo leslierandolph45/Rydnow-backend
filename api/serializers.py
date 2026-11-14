@@ -7,6 +7,10 @@ Model facts these serializers rely on:
     RiderWallet         rider (OneToOne -> RiderProfile)
     WalletTransaction   rider_wallet / customer_wallet, transaction_type, signed `amount`,
                         status in {pending, completed, failed, reversed}
+    WalletDeposit       wallet (FK -> RiderWallet), amount, fee, currency, status, method,
+                        provider, provider_reference, failure_reason, balance_before,
+                        balance_after, created_at, expires_at, processed_at;
+                        `net_amount` and `is_expired` are PROPERTIES
     RiderDocument       rider_profile (FK), document_type, `file`, status
     Service             primary key is `key` ("okada", "parcel", "waste-bin")
     CustomerProfile     user (OneToOne), full_name, email, phone
@@ -26,8 +30,8 @@ from .models import (
     RiderProfile,
     RiderWallet,
     Service,
+    WalletDeposit,
     WalletTransaction,
-    WalletDeposit
 )
 from .validators import (
     check_password_strength,
@@ -491,13 +495,29 @@ class TransactionQuerySerializer(serializers.Serializer):
             raise serializers.ValidationError({"max_amount": "Must not be less than min_amount."})
         return attrs
 
+
 class WalletDepositSerializer(serializers.ModelSerializer):
-    rider_name = serializers.CharField(source="rider_wallet.rider.full_name", read_only=True)
+    """
+    Read-only view of a WalletDeposit.
+
+    Deposits are created by the Paystack flow in views.py and credited only through
+    WalletDeposit.mark_completed(), so this serializer never writes. Every field below
+    exists on the model (or is one of its properties).
+    """
+    rider_name = serializers.CharField(source="wallet.rider.full_name", read_only=True)
+    method_display = serializers.CharField(source="get_method_display", read_only=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    net_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = WalletDeposit
         fields = [
-            "id", "rider_name", "amount", "currency", "reference",
-            "payment_method", "status", "note", "created_at", "processed_at"
+            "id", "rider_name", "amount", "fee", "net_amount", "currency",
+            "method", "method_display", "status", "status_display",
+            "provider", "provider_reference", "failure_reason",
+            "balance_before", "balance_after",
+            "created_at", "expires_at", "processed_at", "is_expired",
         ]
-        read_only_fields = ["id", "reference", "created_at", "processed_at"]
+        read_only_fields = fields
+
