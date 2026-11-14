@@ -1,5 +1,6 @@
 """
-Rydnow serializers — written against the consolidated models.py.
+Rydnow serializers - written against the consolidated models.py.
+
 
 Model facts these serializers rely on:
     RiderProfile        user (OneToOne), full_name, phone, current_lat/current_lng,
@@ -17,10 +18,12 @@ Model facts these serializers rely on:
 """
 from decimal import Decimal
 
+
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import serializers
+
 
 from .models import (
     TRANSACTION_TYPES,
@@ -40,12 +43,16 @@ from .validators import (
     split_name,
 )
 
+
 User = get_user_model()
+
 
 REFERENCE_RE = r"^[A-Za-z0-9_.\-]{6,100}$"
 MAX_DOCUMENT_SIZE_MB = 10
 ALLOWED_DOCUMENT_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "pdf")
 WALLET_TX_STATUSES = ("pending", "completed", "failed", "reversed")
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +61,7 @@ WALLET_TX_STATUSES = ("pending", "completed", "failed", "reversed")
 def _create_auth_user(*, email, password, full_name=""):
     """
     Single place where auth Users are created.
+
 
     NOTE: Django's signature is create_user(username, email=None, password=None, **extra).
     The 2nd positional argument is `email`, NOT `password`, so every argument is
@@ -69,6 +77,8 @@ def _create_auth_user(*, email, password, full_name=""):
     )
 
 
+
+
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
@@ -78,6 +88,8 @@ class LoginSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, trim_whitespace=False)
 
 
+
+
 class _SignupBase(serializers.Serializer):
     full_name = serializers.CharField(max_length=150)
     email = serializers.EmailField()
@@ -85,11 +97,13 @@ class _SignupBase(serializers.Serializer):
     password = serializers.CharField(write_only=True, trim_whitespace=False)
     password_confirm = serializers.CharField(write_only=True, required=False, trim_whitespace=False)
 
+
     def validate_full_name(self, value):
         value = " ".join(value.split())
         if len(value) < 2:
             raise serializers.ValidationError("Enter your full name.")
         return value
+
 
     def validate_email(self, value):
         value = value.strip().lower()
@@ -97,8 +111,10 @@ class _SignupBase(serializers.Serializer):
             raise serializers.ValidationError("An account with this email already exists.")
         return value
 
+
     def validate_phone(self, value):
         return clean_phone(value)
+
 
     def validate(self, attrs):
         confirm = attrs.pop("password_confirm", None)
@@ -112,14 +128,15 @@ class _SignupBase(serializers.Serializer):
         check_password_strength(attrs["password"], user=probe)
         return attrs
 
-    def _create_auth_user(email, password, full_name= ""):
-        User = get_user_model()
-        return User.objects.create_user(
-            username=email,
-            email=email,
-            password=password,
-            full_name=full_name
+
+    def _create_user(self, validated_data):
+        return _create_auth_user(
+            email=validated_data["email"],
+            password=validated_data["password"],
+            full_name=validated_data["full_name"],
         )
+
+
 
 
 class RegistrationSerializer(serializers.Serializer):
@@ -128,10 +145,12 @@ class RegistrationSerializer(serializers.Serializer):
     save() returns the User.
     """
 
+
     email = serializers.EmailField(max_length=254)
     password = serializers.CharField(write_only=True, min_length=8, trim_whitespace=False)
     full_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
     phone = serializers.CharField(max_length=30, required=False, allow_blank=True, default="")
+
 
     def validate_email(self, value):
         email = value.strip().lower()
@@ -139,8 +158,10 @@ class RegistrationSerializer(serializers.Serializer):
             raise serializers.ValidationError("This email is already registered.")
         return email
 
+
     def validate_full_name(self, value):
         return " ".join(value.split())
+
 
     def validate_phone(self, value):
         if not value or not value.strip():
@@ -155,6 +176,7 @@ class RegistrationSerializer(serializers.Serializer):
             raise serializers.ValidationError("This phone number is already registered.")
         return phone
 
+
     def validate(self, attrs):
         probe = User(
             username=attrs["email"],
@@ -163,6 +185,7 @@ class RegistrationSerializer(serializers.Serializer):
         )
         check_password_strength(attrs["password"], user=probe)
         return attrs
+
 
     def create(self, validated_data):
         try:
@@ -186,6 +209,8 @@ class RegistrationSerializer(serializers.Serializer):
         return user
 
 
+
+
 class RiderRegistrationSerializer(_SignupBase):
     """Rider sign-up: creates User -> RiderProfile -> RiderWallet. save() returns the RiderProfile."""
 
@@ -195,14 +220,6 @@ class RiderRegistrationSerializer(_SignupBase):
         if RiderProfile.objects.filter(phone=phone).exists():
             raise serializers.ValidationError("This phone number is already registered.")
         return phone
-
-
-    def _create_user(self, validated_data):
-        return _create_auth_user(
-            email=validated_data["email"],
-            password=validated_data["password"],
-            full_name=validated_data["full_name"],
-        )
 
 
     def create(self, validated_data):
@@ -224,8 +241,6 @@ class RiderRegistrationSerializer(_SignupBase):
 
 
 
-
-
 # ---------------------------------------------------------------------------
 # Account
 # ---------------------------------------------------------------------------
@@ -236,10 +251,13 @@ class AccountSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+
+
 class AccountUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ["first_name", "last_name", "email"]
+
 
     def validate_email(self, value):
         value = value.strip().lower()
@@ -248,15 +266,19 @@ class AccountUpdateSerializer(serializers.ModelSerializer):
         return value
 
 
+
+
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(write_only=True, trim_whitespace=False)
     new_password = serializers.CharField(write_only=True, trim_whitespace=False)
     new_password_confirm = serializers.CharField(write_only=True, trim_whitespace=False)
 
+
     def validate_old_password(self, value):
         if not self.context["request"].user.check_password(value):
             raise serializers.ValidationError("Current password is incorrect.")
         return value
+
 
     def validate(self, attrs):
         if attrs["new_password"] != attrs["new_password_confirm"]:
@@ -267,18 +289,25 @@ class ChangePasswordSerializer(serializers.Serializer):
         return attrs
 
 
+
+
 # ---------------------------------------------------------------------------
 # Phone verification (OTP)
 # ---------------------------------------------------------------------------
 class PhoneSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=30)
 
+
     def validate_phone(self, value):
         return clean_phone(value)
 
 
+
+
 class VerifyCodeSerializer(PhoneSerializer):
     code = serializers.RegexField(r"^\d{6}$", error_messages={"invalid": "Enter the 6-digit code."})
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -292,11 +321,14 @@ class CustomerSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+
+
 class CustomerProfileSerializer(serializers.ModelSerializer):
     """Only full_name and phone are writable; everything else is read-only."""
     phone = serializers.CharField(max_length=30, required=False)
     can_book = serializers.BooleanField(read_only=True)
     loyalty_tier = serializers.CharField(read_only=True)
+
 
     class Meta:
         model = CustomerProfile
@@ -307,11 +339,13 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [f for f in fields if f not in ("full_name", "phone")]
 
+
     def validate_full_name(self, value):
         value = " ".join(value.split())
         if len(value) < 2:
             raise serializers.ValidationError("Enter your full name.")
         return value
+
 
     def validate_phone(self, value):
         phone = clean_phone(value)
@@ -323,6 +357,8 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
         return phone
 
 
+
+
 # ---------------------------------------------------------------------------
 # Riders
 # ---------------------------------------------------------------------------
@@ -332,7 +368,9 @@ class RiderProfileSerializer(serializers.ModelSerializer):
     profile_completion = serializers.IntegerField(read_only=True)
     documents_uploaded = serializers.BooleanField(read_only=True)
 
+
     LOCKED_AFTER_VERIFICATION = ("ghana_card_number", "license_number")
+
 
     class Meta:
         model = RiderProfile
@@ -350,6 +388,7 @@ class RiderProfileSerializer(serializers.ModelSerializer):
             "is_online", "tier", "rating_average", "rating_count", "completed_trips", "created_at",
         ]
 
+
     def validate_phone(self, value):
         phone = clean_phone(value)
         qs = RiderProfile.objects.filter(phone=phone)
@@ -358,6 +397,7 @@ class RiderProfileSerializer(serializers.ModelSerializer):
         if qs.exists():
             raise serializers.ValidationError("This phone number is already registered.")
         return phone
+
 
     def _unique_or_blank(self, field, value):
         value = (value or "").strip()
@@ -370,11 +410,14 @@ class RiderProfileSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("This value is already registered to another rider.")
         return value
 
+
     def validate_ghana_card_number(self, value):
         return self._unique_or_blank("ghana_card_number", value.upper())
 
+
     def validate_license_number(self, value):
         return self._unique_or_blank("license_number", value.upper())
+
 
     def validate(self, attrs):
         if self.instance is not None and self.instance.is_verified:
@@ -387,6 +430,7 @@ class RiderProfileSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(locked)
         return attrs
 
+
     @transaction.atomic
     def update(self, instance, validated_data):
         instance = super().update(instance, validated_data)
@@ -396,11 +440,14 @@ class RiderProfileSerializer(serializers.ModelSerializer):
         return instance
 
 
+
+
 class RiderDocumentSerializer(serializers.Serializer):
     """Upload payload. The uploaded file maps to RiderDocument.file."""
     document_type = serializers.ChoiceField(choices=RiderDocument.DocumentType.choices)
     document_file = serializers.FileField(write_only=True)
     expiry_date = serializers.DateField(required=False, allow_null=True)
+
 
     def validate_document_file(self, f):
         ext = f.name.rsplit(".", 1)[-1].lower() if "." in f.name else ""
@@ -412,20 +459,26 @@ class RiderDocumentSerializer(serializers.Serializer):
             raise serializers.ValidationError(f"File too large. Maximum size is {MAX_DOCUMENT_SIZE_MB} MB.")
         return f
 
+
     def validate_expiry_date(self, value):
         if value and value < timezone.localdate():
             raise serializers.ValidationError("This document has already expired.")
         return value
 
 
+
+
 class RiderLocationSerializer(serializers.Serializer):
     latitude = serializers.FloatField(min_value=-90, max_value=90)
     longitude = serializers.FloatField(min_value=-180, max_value=180)
+
 
     def validate(self, attrs):
         if attrs["latitude"] == 0 and attrs["longitude"] == 0:
             raise serializers.ValidationError("Invalid coordinates.")
         return attrs
+
+
 
 
 class NearbyRidersQuerySerializer(serializers.Serializer):
@@ -435,11 +488,14 @@ class NearbyRidersQuerySerializer(serializers.Serializer):
     radius_km = serializers.FloatField(required=False, default=5.0, min_value=0.5, max_value=25)
     limit = serializers.IntegerField(required=False, default=10, min_value=1, max_value=50)
 
+
     def validate_service(self, value):
         value = value.strip().lower()
         if not Service.objects.filter(pk=value, is_active=True).exists():
             raise serializers.ValidationError("Unknown or inactive service.")
         return value
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -449,17 +505,23 @@ class AmountSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
 
 
+
+
 class WithdrawalRequestSerializer(AmountSerializer):
     payout_account_id = serializers.IntegerField(required=False, min_value=1)
+
+
 
 
 class InitializePaymentSerializer(serializers.Serializer):
     PURPOSES = ("booking", "wallet_deposit")
 
+
     purpose = serializers.ChoiceField(choices=PURPOSES, default="booking")
     booking_ref = serializers.CharField(required=False, max_length=32)
     amount = serializers.DecimalField(required=False, max_digits=12, decimal_places=2,
                                       min_value=Decimal("0.01"))
+
 
     def validate(self, attrs):
         if attrs["purpose"] == "booking" and not attrs.get("booking_ref"):
@@ -469,14 +531,19 @@ class InitializePaymentSerializer(serializers.Serializer):
         return attrs
 
 
+
+
 class VerifyPaymentSerializer(serializers.Serializer):
     reference = serializers.RegexField(REFERENCE_RE, error_messages={"invalid": "Invalid reference format."})
+
+
 
 
 class TransactionSerializer(serializers.ModelSerializer):
     type_display = serializers.CharField(source="get_transaction_type_display", read_only=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     direction = serializers.SerializerMethodField()
+
 
     class Meta:
         model = WalletTransaction
@@ -486,12 +553,16 @@ class TransactionSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+
     def get_direction(self, obj):
         return "credit" if obj.amount >= 0 else "debit"
 
 
+
+
 class TransactionQuerySerializer(serializers.Serializer):
     ORDERING = ("-created_at", "created_at", "-amount", "amount")
+
 
     type = serializers.ChoiceField(choices=[c for c, _ in TRANSACTION_TYPES], required=False)
     status = serializers.ChoiceField(choices=WALLET_TX_STATUSES, required=False)
@@ -504,6 +575,7 @@ class TransactionQuerySerializer(serializers.Serializer):
     ordering = serializers.ChoiceField(choices=ORDERING, required=False, default="-created_at")
     export = serializers.ChoiceField(choices=("csv",), required=False)
 
+
     def validate(self, attrs):
         if "date_from" in attrs and "date_to" in attrs and attrs["date_from"] > attrs["date_to"]:
             raise serializers.ValidationError({"date_to": "Must not be earlier than date_from."})
@@ -512,9 +584,12 @@ class TransactionQuerySerializer(serializers.Serializer):
         return attrs
 
 
+
+
 class WalletDepositSerializer(serializers.ModelSerializer):
     """
     Read-only view of a WalletDeposit.
+
 
     Deposits are created by the Paystack flow in views.py and credited only through
     WalletDeposit.mark_completed(), so this serializer never writes. Every field below
@@ -526,6 +601,7 @@ class WalletDepositSerializer(serializers.ModelSerializer):
     net_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     is_expired = serializers.BooleanField(read_only=True)
 
+
     class Meta:
         model = WalletDeposit
         fields = [
@@ -536,4 +612,5 @@ class WalletDepositSerializer(serializers.ModelSerializer):
             "created_at", "expires_at", "processed_at", "is_expired",
         ]
         read_only_fields = fields
+
 

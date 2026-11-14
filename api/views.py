@@ -262,9 +262,11 @@ def user_login(request):
     if not serializer.is_valid():
         return validation_fail(serializer)
 
+
     identifier = serializer.validated_data["username"].strip()
     if "@" in identifier:
-        identifier = identifier.lower()  # accounts are created with lowercase email usernames
+        identifier = identifier.lower()
+
 
     user = authenticate(
         request=request,
@@ -274,28 +276,32 @@ def user_login(request):
     if user is None:
         return fail("Invalid credentials.", status.HTTP_401_UNAUTHORIZED)
 
+
     rider = RiderProfile.objects.filter(user=user, deleted_at__isnull=True).first()
     customer = None if rider else CustomerProfile.objects.filter(user=user).first()
     if customer is not None and customer.is_blocked:
         return fail("This account has been blocked. Contact support.", status.HTTP_403_FORBIDDEN)
 
+
     update_last_login(None, user)
     token, _ = Token.objects.get_or_create(user=user)
 
-    profile= rider or customer
-    phone = gatattr(profile, "phone", "") if profile else ""
+
+    profile = rider or customer
+    phone = getattr(profile, "phone", "") if profile else ""
     user_payload = {
-        "id":user.id,
+        "id": user.id,
         "username": user.username,
-        "email":user.email,
+        "email": user.email,
         "role": "rider" if rider else "customer",
-        "full_name": (gatattr(profile, "full_name" "") if profile else "") or user.get_full_name() or "",
-        "phone": str(phone) if phone else "", 
+        "full_name": (getattr(profile, "full_name", "") if profile else "") or user.get_full_name() or "",
+        "phone": str(phone) if phone else "",
     }
     if rider:
         user_payload["is_verified"] = rider.is_verified
         user_payload["verification_status"] = rider.verification_status
-    return ok ( token= token.key, user=user_payload)
+    return ok(token=token.key, user=user_payload)
+
         
 
 @api_view(["POST"])
@@ -308,18 +314,42 @@ def customer_register(request):
     if not serializer.is_valid():
         return validation_fail(serializer)
 
+
     phone = serializer.validated_data["phone"]
     if not _phone_verification_ok(phone):
         return fail("Verify your phone number first.", status.HTTP_403_FORBIDDEN)
+
 
     try:
         user = serializer.save()
     except IntegrityError:
         return fail("An account with these details already exists.", status.HTTP_409_CONFLICT)
 
+
     _consume_phone_verification(phone)
     logger.info("Customer registered: user_id=%s", user.id)
-    return ok("Account created successfully.", status.HTTP_201_CREATED, user_id=user.id, email=user.email)
+
+
+    token, _ = Token.objects.get_or_create(user=user)
+    profile = CustomerProfile.objects.filter(user=user).first()
+    return ok(
+        "Account created successfully.",
+        status.HTTP_201_CREATED,
+        user_id=user.id,
+        email=user.email,
+        token=token.key,
+        user={
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "role": "customer",
+            "full_name": (profile.full_name if profile else "") or "",
+            "phone": str(profile.phone) if profile and profile.phone else "",
+        },
+    )
+
+
+
 
 
 # ===========================================================================
