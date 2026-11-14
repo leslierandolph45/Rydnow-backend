@@ -108,6 +108,9 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
+curl -H "Authorization: Token YOUR_TOKEN_HERE" https://rydnow-backend.onrender.com/api/profile/
+
+
 # ===========================================================================
 # 1. CONSTANTS, HELPERS, THROTTLES, DECORATORS
 # ===========================================================================
