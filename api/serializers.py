@@ -195,6 +195,14 @@ class RiderRegistrationSerializer(_SignupBase):
             raise serializers.ValidationError("This phone number is already registered.")
         return phone
 
+       def _create_user(self, validated_data):
+        return _create_auth_user(
+            email=validated_data["email"],
+            password=validated_data["password"],
+            full_name=validated_data["full_name"],
+        )
+
+
     def create(self, validated_data):
         try:
             with transaction.atomic():
@@ -210,6 +218,7 @@ class RiderRegistrationSerializer(_SignupBase):
                 {"detail": "An account with this email or phone already exists."}
             )
         return rider
+
 
 
 # ---------------------------------------------------------------------------
