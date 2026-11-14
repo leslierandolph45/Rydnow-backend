@@ -112,11 +112,13 @@ class _SignupBase(serializers.Serializer):
         check_password_strength(attrs["password"], user=probe)
         return attrs
 
-    def _create_user(self, data):
-        return _create_auth_user(
-            email=data["email"],
-            password=data["password"],
-            full_name=data["full_name"],
+    def _create_auth_user(email, password, full_name= ""):
+        User = get_user_model()
+        return User.objects.create_user(
+            username=email,
+            email=email,
+            password=password,
+            full_name=full_name
         )
 
 
