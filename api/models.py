@@ -5661,14 +5661,14 @@ class Booking(models.Model):
         ]
         constraints = [
             models.CheckConstraint(
-                Q(total_price__gte=0), name="booking_total_price_gte_0"
+                check=(total_price__gte=0), name="booking_total_price_gte_0"
             ),
             models.CheckConstraint(
-                Q(discount_amount__lte=F("subtotal")),
+                check=(discount_amount__lte=F("subtotal")),
                 name="booking_discount_lte_subtotal",
             ),
             models.CheckConstraint(
-                ~Q(rider=F("customer")), name="booking_rider_not_customer"
+                check=(rider=F("customer")), name="booking_rider_not_customer"
             ),
             # A rider must be assigned once a booking is past pending
             # (unless cancelled, or the rider account was later deleted).
