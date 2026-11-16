@@ -40,7 +40,7 @@ from django.db.models import Q
 from django.db.models.signals import post_save
 from django.utils import timezone
 
-from .models import Booking, RiderProfile, Service, SystemConfig
+from .models import Booking, DispatchOffer, RiderProfile, Service, SystemConfig
 
 log = logging.getLogger("rydnow.dispatch")
 

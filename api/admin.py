@@ -1,7 +1,6 @@
 """
 Django admin configuration for RYDNOW (django-unfold theme).
 
-
 Design principles
 ─────────────────
 * Every registered model has an "Add" page and can be operated manually.
@@ -14,19 +13,17 @@ Design principles
   pages stay fast and never try to render thousands of options.
 * Every model is registered exactly once (Django raises AlreadyRegistered on
   duplicates, which crashes the app at import time).
-
+* Admin classes reference ONLY fields that exist on their model.
 
 RiderProfile and Booking are registered in admin_riders.py, which is imported
 at the very bottom of this file (it needs BaseAdmin from here).
 """
 from __future__ import annotations
 
-
 import logging
 import mimetypes
 import os
 from datetime import timedelta
-
 
 from django.contrib import admin, messages
 from django.contrib.admin.models import CHANGE, LogEntry
@@ -47,7 +44,6 @@ from django.utils.translation import ngettext
 from unfold.admin import ModelAdmin as UnfoldModelAdmin
 from unfold.decorators import action
 from unfold.forms import AdminPasswordChangeForm, UserChangeForm, UserCreationForm
-
 
 from . import models as api_models
 from .models import (
@@ -90,15 +86,11 @@ from .models import (
     PromoRedemption,
 )
 
-
 logger = logging.getLogger(__name__)
-
 
 admin.site.site_header = "RYDNOW Operations"
 admin.site.site_title = "RYDNOW Admin"
 admin.site.index_title = "Dashboard"
-
-
 
 
 # ══════════════════════════════════════════════════════════
@@ -107,29 +99,21 @@ admin.site.index_title = "Dashboard"
 class ReadOnlyAdminMixin:
     """View-only admin: no add, edit or delete for anyone. Apply to lock a model down."""
 
-
     def has_add_permission(self, request):
         return False
-
 
     def has_change_permission(self, request, obj=None):
         return False
 
-
     def has_delete_permission(self, request, obj=None):
         return False
-
-
 
 
 class NoDeleteAdminMixin:
     """Prevents deletion of records that must be retained for auditing."""
 
-
     def has_delete_permission(self, request, obj=None):
         return False
-
-
 
 
 class SuperuserWriteAdminMixin:
@@ -138,19 +122,14 @@ class SuperuserWriteAdminMixin:
     nobody may delete them. Other staff keep view access via Django permissions.
     """
 
-
     def has_add_permission(self, request):
         return request.user.is_superuser and super().has_add_permission(request)
-
 
     def has_change_permission(self, request, obj=None):
         return request.user.is_superuser and super().has_change_permission(request, obj)
 
-
     def has_delete_permission(self, request, obj=None):
         return False
-
-
 
 
 class AutoRawIdMixin:
@@ -158,7 +137,6 @@ class AutoRawIdMixin:
     Use ID-lookup widgets for every concrete ForeignKey / OneToOne field,
     unless raw_id_fields is set explicitly on the admin class.
     """
-
 
     def __init__(self, model, admin_site):
         if not self.raw_id_fields:
@@ -170,27 +148,21 @@ class AutoRawIdMixin:
         super().__init__(model, admin_site)
 
 
-
-
 class BulkStatusActionMixin:
     """
     Safe bulk status transitions: one transaction, rows locked, objects already in a
     final state are skipped, and one admin LogEntry is written per changed object.
-
 
     NOTE: this changes the status column only. It does NOT run the model's lifecycle
     (wallet credits, refunds, notifications). Use it for housekeeping, not for settling money.
     Subclasses set final_statuses.
     """
 
-
     final_statuses: tuple[str, ...] = ()
-
 
     def _apply_status(self, request, queryset, new_status: str) -> None:
         manager = self.model._default_manager
         selected_ids = list(queryset.values_list("pk", flat=True))
-
 
         with transaction.atomic():
             eligible_ids = list(
@@ -200,7 +172,6 @@ class BulkStatusActionMixin:
                 .values_list("pk", flat=True)
             )
             changed = manager.filter(pk__in=eligible_ids).update(status=new_status)
-
 
             if eligible_ids:
                 content_type = ContentType.objects.get_for_model(self.model)
@@ -216,7 +187,6 @@ class BulkStatusActionMixin:
                     for obj in manager.filter(pk__in=eligible_ids)
                 )
 
-
         skipped = len(selected_ids) - changed
         logger.info(
             "%s bulk status -> %s by user=%s changed=%s skipped=%s",
@@ -226,31 +196,24 @@ class BulkStatusActionMixin:
             self.message_user(request, f"{changed} record(s) marked as {new_status}.", messages.SUCCESS)
         if skipped:
             self.message_user(
-                request, f"{skipped} record(s) skipped because they were already in a final state.",
+                request,
+                f"{skipped} record(s) skipped because they were already in a final state.",
                 messages.WARNING,
             )
 
 
-
-
 class BaseAdmin(AutoRawIdMixin, UnfoldModelAdmin):
     """Safe defaults for every model: Unfold look, fast FK widgets, sensible list."""
-
 
     list_display = ("__str__", "pk")
     ordering = ("-pk",)
     list_per_page = 50
 
 
-
-
 class LedgerAdmin(SuperuserWriteAdminMixin, BaseAdmin):
     """Financial / audit records: superuser add + edit, never deletable."""
 
-
     list_per_page = 100
-
-
 
 
 # ══════════════════════════════════════════════════════════
@@ -258,12 +221,9 @@ class LedgerAdmin(SuperuserWriteAdminMixin, BaseAdmin):
 # ══════════════════════════════════════════════════════════
 User = get_user_model()
 
-
 for _model in (User, Group):
     if admin.site.is_registered(_model):
         admin.site.unregister(_model)
-
-
 
 
 @admin.register(User)
@@ -273,13 +233,9 @@ class UserAdmin(BaseUserAdmin, UnfoldModelAdmin):
     change_password_form = AdminPasswordChangeForm
 
 
-
-
 @admin.register(Group)
 class GroupAdmin(BaseGroupAdmin, UnfoldModelAdmin):
     pass
-
-
 
 
 # ══════════════════════════════════════════════════════════
@@ -287,7 +243,7 @@ class GroupAdmin(BaseGroupAdmin, UnfoldModelAdmin):
 # ══════════════════════════════════════════════════════════
 @admin.register(CustomerProfile)
 class CustomerProfileAdmin(BaseAdmin):
-    list_display = ("__str__", "pk", "created_at",)
+    list_display = ("__str__", "pk", "created_at")
     search_fields = ("user__username", "user__email")
     readonly_fields = ("created_at",)
     list_select_related = ("user",)
@@ -295,24 +251,19 @@ class CustomerProfileAdmin(BaseAdmin):
     date_hierarchy = "created_at"
 
 
-
-
 @admin.register(SavedAddress)
 class SavedAddressAdmin(BaseAdmin):
     pass
 
 
-
-
 @admin.register(CustomerRiderPreference)
 class CustomerRiderPreferenceAdmin(BaseAdmin):
-    list_display = ("customer", "preference", "rider", "created_at")
-    list_filter = ("preference", "created_at")
-    search_fields = ("customer__user__username", "rider__user__username")
+    # 'customer', 'preference' and 'rider' were removed: the model does not expose them
+    # as list_display / list_filter fields.
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
     readonly_fields = ("created_at",)
     ordering = ("-created_at",)
-
-
 
 
 # ══════════════════════════════════════════════════════════
@@ -323,19 +274,14 @@ class RiderStatusHistoryAdmin(LedgerAdmin):
     """Audit trail: superuser add + edit, never deletable."""
 
 
-
-
 @admin.register(ServiceQualification)
 class ServiceQualificationAdmin(BaseAdmin):
     pass
 
 
-
-
 class ExpiryFilter(admin.SimpleListFilter):
     title = "expiry"
     parameter_name = "expiry"
-
 
     def lookups(self, request, model_admin):
         return [
@@ -343,7 +289,6 @@ class ExpiryFilter(admin.SimpleListFilter):
             ("soon", "Expiring within 30 days"),
             ("none", "No expiry date"),
         ]
-
 
     def queryset(self, request, queryset):
         today = timezone.localdate()
@@ -403,8 +348,8 @@ class RiderDocumentAdmin(BaseAdmin):
     * Approving the LAST required document makes the rider Verified automatically.
       Rejecting a document stores the reason on the rider and notifies them.
     """
-    D = RiderDocument.DocumentStatus
 
+    D = RiderDocument.DocumentStatus
 
     list_display = (
         "rider_name",
@@ -428,7 +373,6 @@ class RiderDocumentAdmin(BaseAdmin):
     actions_row = ["approve_row"]
     actions_submit_line = ["approve_submit", "reject_submit"]
 
-
     readonly_fields = (
         "id", "rider_summary", "preview_large", "uploaded_at", "reviewed_at", "reviewed_by",
     )
@@ -451,13 +395,11 @@ class RiderDocumentAdmin(BaseAdmin):
         }),
     )
 
-
     def get_readonly_fields(self, request, obj=None):
         fields = super().get_readonly_fields(request, obj)
         if obj is not None:  # don't let a reviewed file be swapped or re-assigned
             fields = tuple(fields) + ("rider_profile", "document_type", "file")
         return fields
-
 
     # ── Staff-only file URL ───────────────────────────────────────
     def get_urls(self):
@@ -471,7 +413,6 @@ class RiderDocumentAdmin(BaseAdmin):
         ]
         return custom + super().get_urls()
 
-
     def file_view(self, request, object_id):
         """
         Stream (local disk) or redirect to a FRESH signed URL (S3/R2/B2) for the document.
@@ -483,13 +424,15 @@ class RiderDocumentAdmin(BaseAdmin):
         if not obj.file:
             raise Http404("This document has no file.")
 
-
         storage = obj.file.storage
         if isinstance(storage, FileSystemStorage):
             try:
                 handle = obj.file.open("rb")
             except (FileNotFoundError, ValueError, OSError):
-                raise Http404("The file is missing from the server (lost on a redeploy?). Ask the rider to re-upload.")
+                raise Http404(
+                    "The file is missing from the server (lost on a redeploy?). "
+                    "Ask the rider to re-upload."
+                )
             content_type = mimetypes.guess_type(obj.file.name)[0] or "application/octet-stream"
             response = FileResponse(handle, content_type=content_type)
             response["Content-Disposition"] = 'inline; filename="%s"' % os.path.basename(obj.file.name)
@@ -502,17 +445,14 @@ class RiderDocumentAdmin(BaseAdmin):
         response["Cache-Control"] = "private, no-store"
         return response
 
-
     # ── List / detail columns ─────────────────────────────────────
     @admin.display(description="Rider", ordering="rider_profile__full_name")
     def rider_name(self, obj):
         return obj.rider_profile.full_name
 
-
     @admin.display(description="Document status", ordering="status")
     def status_badge(self, obj):
         return _badge(DOC_STATUS_COLORS.get(obj.status, "#6b7280"), obj.get_status_display())
-
 
     @admin.display(description="Rider status")
     def rider_status(self, obj):
@@ -521,7 +461,6 @@ class RiderDocumentAdmin(BaseAdmin):
             RIDER_STATUS_COLORS.get(rider.verification_status, "#6b7280"),
             rider.get_verification_status_display(),
         )
-
 
     @admin.display(description="Rider")
     def rider_summary(self, obj):
@@ -543,7 +482,6 @@ class RiderDocumentAdmin(BaseAdmin):
             ),
         )
 
-
     @admin.display(description="Expiry", ordering="expiry_date")
     def expiry_display(self, obj):
         if not obj.expiry_date:
@@ -555,18 +493,15 @@ class RiderDocumentAdmin(BaseAdmin):
             )
         return obj.expiry_date
 
-
     @admin.display(description="Preview")
     def preview(self, obj):
         return self._render_file(obj, size=48)
-
 
     @admin.display(description="Preview")
     def preview_large(self, obj):
         if not obj.pk:
             return "Save the document to see a preview."
         return self._render_file(obj, size=320)
-
 
     @staticmethod
     def _render_file(obj, size):
@@ -586,7 +521,6 @@ class RiderDocumentAdmin(BaseAdmin):
             logger.exception("Could not resolve file for RiderDocument %s", obj.pk)
             return "File unavailable"
 
-
         ext = os.path.splitext(obj.file.name)[1].lower().lstrip(".")
         if ext in IMAGE_EXTENSIONS:
             return format_html(
@@ -600,7 +534,6 @@ class RiderDocumentAdmin(BaseAdmin):
         label = "Open PDF" if ext in PDF_EXTENSIONS else "Open file"
         return format_html('<a href="{}" target="_blank" rel="noopener">{}</a>', url, label)
 
-
     # ── Saving from the change page (status dropdown + notes) ─────
     def save_model(self, request, obj, form, change):
         decided = {self.D.APPROVED, self.D.REJECTED}
@@ -608,17 +541,14 @@ class RiderDocumentAdmin(BaseAdmin):
         rejection_note_changed = obj.status == self.D.REJECTED and "notes" in form.changed_data
         needs_review = obj.status in decided and (status_changed or rejection_note_changed)
 
-
         if needs_review:
             obj.reviewed_by = request.user
             obj.reviewed_at = timezone.now()
         super().save_model(request, obj, form, change)
 
-
         if needs_review:
             outcome = obj.apply_review_effects(by=request.user)
             self._report(request, obj, outcome)
-
 
     def _report(self, request, doc, outcome):
         """Tell the admin exactly what happened to the document AND the rider."""
@@ -638,18 +568,19 @@ class RiderDocumentAdmin(BaseAdmin):
             )
         elif doc.status == self.D.APPROVED:
             missing = rider.missing_required_documents()
-            extra = f" Still needed before {rider.full_name} is Verified: {', '.join(missing)}." if missing else ""
+            extra = (
+                f" Still needed before {rider.full_name} is Verified: {', '.join(missing)}."
+                if missing else ""
+            )
             self.message_user(request, f"{label} approved.{extra}", messages.SUCCESS)
         elif doc.status == self.D.REJECTED:
             self.message_user(request, f"{label} rejected. The rider has been told why.", messages.WARNING)
-
 
     # ── Buttons ───────────────────────────────────────────────────
     def _approve_one(self, request, doc):
         outcome = doc.review(by=request.user, approve=True)
         self.log_change(request, doc, "Approved.")
         self._report(request, doc, outcome)
-
 
     @action(description="Approve", url_path="approve", permissions=["change"])
     def approve_row(self, request, object_id):
@@ -662,12 +593,10 @@ class RiderDocumentAdmin(BaseAdmin):
             self._approve_one(request, doc)
         return redirect(request.META.get("HTTP_REFERER") or reverse("admin:api_riderdocument_changelist"))
 
-
     @action(description="✅ Approve & save", permissions=["change"])
     def approve_submit(self, request, obj):
         if obj.status != self.D.APPROVED:
             self._approve_one(request, obj)
-
 
     @action(description="❌ Reject & save", permissions=["change"])
     def reject_submit(self, request, obj):
@@ -682,7 +611,6 @@ class RiderDocumentAdmin(BaseAdmin):
         self.log_change(request, obj, "Rejected.")
         self._report(request, obj, outcome)
 
-
     # ── Bulk actions ──────────────────────────────────────────────
     @admin.action(description="Approve selected documents", permissions=["change"])
     def approve_documents(self, request, queryset):
@@ -691,7 +619,11 @@ class RiderDocumentAdmin(BaseAdmin):
         pks = list(queryset.values_list("pk", flat=True))
         approved = verified = 0
         with transaction.atomic():
-            documents = self.model.objects.select_for_update().filter(pk__in=pks).exclude(status=self.D.APPROVED)
+            documents = (
+                self.model.objects.select_for_update()
+                .filter(pk__in=pks)
+                .exclude(status=self.D.APPROVED)
+            )
             for document in documents:
                 outcome = document.review(by=request.user, approve=True)
                 self.log_change(request, document, "Bulk action: approved.")
@@ -704,13 +636,16 @@ class RiderDocumentAdmin(BaseAdmin):
             messages.SUCCESS,
         )
 
-
     @admin.action(description="Mark selected documents as expired", permissions=["change"])
     def mark_expired(self, request, queryset):
         pks = list(queryset.values_list("pk", flat=True))
         count = 0
         with transaction.atomic():
-            for document in self.model.objects.select_for_update().filter(pk__in=pks).exclude(status=self.D.EXPIRED):
+            for document in (
+                self.model.objects.select_for_update()
+                .filter(pk__in=pks)
+                .exclude(status=self.D.EXPIRED)
+            ):
                 document.status = self.D.EXPIRED
                 document.save(update_fields=["status"])
                 self.log_change(request, document, "Bulk action: marked as expired.")
@@ -722,13 +657,9 @@ class RiderDocumentAdmin(BaseAdmin):
         )
 
 
-
-
 @admin.register(RiderPayoutAccount)
 class RiderPayoutAccountAdmin(NoDeleteAdminMixin, BaseAdmin):
     """Payout details are sensitive; deletion is disabled."""
-
-
 
 
 @admin.register(RiderEmergencyContact)
@@ -741,20 +672,14 @@ class RiderEmergencyContactAdmin(BaseAdmin):
     ordering = ("-created_at",)
 
 
-
-
 @admin.register(RiderOnlineSession)
 class RiderOnlineSessionAdmin(LedgerAdmin):
     pass
 
 
-
-
 @admin.register(RiderLocationPing)
 class RiderLocationPingAdmin(LedgerAdmin):
     """High-volume telemetry."""
-
-
 
 
 @admin.register(RiderProfileAdminNote)
@@ -767,13 +692,10 @@ class RiderProfileAdminNoteAdmin(NoDeleteAdminMixin, BaseAdmin):
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
 
-
     def save_model(self, request, obj, form, change):
         if not change:
             obj.author = request.user
         super().save_model(request, obj, form, change)
-
-
 
 
 @admin.register(RiderIncident)
@@ -782,8 +704,6 @@ class RiderIncidentAdmin(NoDeleteAdminMixin, BaseAdmin):
     search_fields = ("reference_code", "title", "description")
     list_select_related = ("rider_profile", "assigned_to")
     ordering = ("-pk",)
-
-
 
 
 @admin.register(RiderComplaint)
@@ -796,8 +716,6 @@ class RiderComplaintAdmin(NoDeleteAdminMixin, BaseAdmin):
     date_hierarchy = "created_at"
 
 
-
-
 # ══════════════════════════════════════════════════════════
 # 📋 BOOKING-RELATED RECORDS  (Booking → admin_riders.py)
 # ══════════════════════════════════════════════════════════
@@ -806,34 +724,26 @@ class BookingStatusHistoryAdmin(LedgerAdmin):
     """Audit trail: superuser add + edit, never deletable."""
 
 
-
-
 @admin.register(ParcelDetail)
 class ParcelDetailAdmin(BaseAdmin):
     pass
 
 
-
-
 @admin.register(BookingOffer)
 class BookingOfferAdmin(BaseAdmin):
-    """Rider offers on bookings. Related records are chosen by ID lookup, not dropdown."""
+    """Rider offers. Related records are chosen by ID lookup, not dropdown."""
 
-
-    list_display = ("__str__", "pk", "booking", "rider", "status")
+    # BookingOffer has no 'booking' field, so it is not referenced anywhere here.
+    list_display = ("__str__", "pk", "rider", "status")
     list_filter = ("status",)
     search_fields = ("rider__user__username", "rider__user__email")
-    list_select_related = ("booking", "rider", "rider__user")
-    raw_id_fields = ("booking", "rider")
-
-
+    list_select_related = ("rider", "rider__user")
+    raw_id_fields = ("rider",)
 
 
 @admin.register(Review)
 class ReviewAdmin(NoDeleteAdminMixin, BaseAdmin):
     pass
-
-
 
 
 # ══════════════════════════════════════════════════════════
@@ -843,10 +753,7 @@ class ReviewAdmin(NoDeleteAdminMixin, BaseAdmin):
 class RiderWalletAdmin(LedgerAdmin):
     """Manual balance edits are superuser-only and logged by Django admin."""
 
-
     list_select_related = ("rider",)
-
-
 
 
 @admin.register(CustomerWallet)
@@ -854,12 +761,9 @@ class CustomerWalletAdmin(LedgerAdmin):
     """Manual balance edits are superuser-only and logged by Django admin."""
 
 
-
-
 @admin.register(WalletTransaction)
 class WalletTransactionAdmin(LedgerAdmin):
     """Ledger entries: superuser add + edit, never deletable."""
-
 
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
@@ -868,74 +772,58 @@ class WalletTransactionAdmin(LedgerAdmin):
     date_hierarchy = "created_at"
 
 
-
-
 @admin.register(WithdrawalRequest)
 class WithdrawalRequestAdmin(BulkStatusActionMixin, NoDeleteAdminMixin, BaseAdmin):
-    list_display = ("__str__", "pk", "status", "created_at")
-    list_filter = ("status", "created_at")
-    readonly_fields = ("created_at",)
-    ordering = ("-created_at",)
-    date_hierarchy = "created_at"
+    # WithdrawalRequest has no 'created_at', so ordering falls back to the primary key.
+    list_display = ("__str__", "pk", "status")
+    list_filter = ("status",)
+    ordering = ("-pk",)
     actions = ("mark_completed", "mark_failed")
     final_statuses = ("completed", "failed")
-
 
     def has_add_permission(self, request):
         return False
 
-
     @admin.action(description="Mark selected withdrawals as completed", permissions=["change"])
     def mark_completed(self, request, queryset):
         self._apply_status(request, queryset, "completed")
-
 
     @admin.action(description="Mark selected withdrawals as failed", permissions=["change"])
     def mark_failed(self, request, queryset):
         self._apply_status(request, queryset, "failed")
 
 
-
-
 @admin.register(WalletDeposit)
 class WalletDepositAdmin(LedgerAdmin):
     """Payment-gateway records: superuser add + edit, never deletable."""
 
-
-    list_display = ("__str__", "pk", "status", "created_at")
-    list_filter = ("status", "created_at")
+    # 'status' and 'processed_at' are not fields on WalletDeposit, so they are not used.
+    list_display = ("__str__", "pk", "created_at")
+    list_filter = ("created_at",)
     search_fields = ("reference",)
-    readonly_fields = ("created_at", "processed_at")
+    readonly_fields = ("created_at",)
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
-
-
 
 
 @admin.register(Payment)
 class PaymentAdmin(LedgerAdmin):
     """Payment records."""
 
-
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
-
-
 
 
 @admin.register(Refund)
 class RefundAdmin(LedgerAdmin):
     """Refund records."""
 
-
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
-
-
 
 
 @admin.register(LoyaltyAccount)
@@ -943,19 +831,14 @@ class LoyaltyAccountAdmin(LedgerAdmin):
     """Loyalty balances change only through the ledger."""
 
 
-
-
 @admin.register(LoyaltyTransaction)
 class LoyaltyTransactionAdmin(LedgerAdmin):
     """Immutable loyalty ledger."""
-
 
     list_display = ("__str__", "pk", "created_at")
     list_filter = ("created_at",)
     ordering = ("-created_at",)
     date_hierarchy = "created_at"
-
-
 
 
 # ══════════════════════════════════════════════════════════
@@ -968,13 +851,9 @@ class _CreatedAdmin(BaseAdmin):
     date_hierarchy = "created_at"
 
 
-
-
 @admin.register(Referral)
 class ReferralAdmin(_CreatedAdmin):
     pass
-
-
 
 
 @admin.register(ReferralCode)
@@ -982,13 +861,9 @@ class ReferralCodeAdmin(_CreatedAdmin):
     pass
 
 
-
-
 @admin.register(BusinessAccount)
 class BusinessAccountAdmin(_CreatedAdmin):
     pass
-
-
 
 
 @admin.register(WasteSubscription)
@@ -996,34 +871,24 @@ class WasteSubscriptionAdmin(_CreatedAdmin):
     pass
 
 
-
-
 @admin.register(PromoCode)
 class PromoCodeAdmin(_CreatedAdmin):
     pass
 
 
-
-
 @admin.register(PromoRedemption)
-class PromoRedemptionAdmin(_CreatedAdmin):
-    pass
-
-
+class PromoRedemptionAdmin(BaseAdmin):
+    """PromoRedemption has no 'created_at', so it uses the BaseAdmin defaults."""
 
 
 # ══════════════════════════════════════════════════════════
 # ⚙️ PLATFORM CONFIG
-# Your models.py uses these (Service, Zone, PricingRule, SystemConfig, Notification) but
-# they had no admin, so you couldn't add services, zones or pricing from the console.
 # Registered only if they exist, and only once.
 # ══════════════════════════════════════════════════════════
 for _name in ("Service", "Zone", "PricingRule", "SystemConfig", "Notification"):
     _model = getattr(api_models, _name, None)
     if _model is not None and not admin.site.is_registered(_model):
         admin.site.register(_model, type(f"{_name}Admin", (BaseAdmin,), {}))
-
-
 
 
 # ══════════════════════════════════════════════════════════

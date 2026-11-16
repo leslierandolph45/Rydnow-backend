@@ -1,8 +1,13 @@
 """
 Professional Rider + Booking admin for RYDNOW (django-unfold).
 
-Replaces the minimal RiderProfileAdmin and BookingAdmin in admin.py.
-Every field name below comes from the models.py you pasted.
+Registers RiderProfile and Booking. Imported at the very bottom of admin.py, because it
+needs BaseAdmin and BulkStatusActionMixin from there (importing it earlier would be circular).
+
+Rules this file follows:
+* It references ONLY fields that exist on each model.
+* BookingOffer has no ForeignKey to Booking, so there is no dispatch-offers inline on
+  BookingAdmin (see the note above BookingAdmin for how to add it back).
 """
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
@@ -12,12 +17,11 @@ from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 from unfold.admin import TabularInline
 from unfold.decorators import action, display
-from .admin_maxims import AutoRawIdMixin, BulkStatusActionMixin, BaseAdmin
 
 
+from .admin import BaseAdmin, BulkStatusActionMixin
 from .models import (
     Booking,
-    BookingOffer,
     BookingStatusHistory,
     RiderDocument,
     RiderEmergencyContact,
@@ -186,8 +190,10 @@ class RiderProfileAdmin(BaseAdmin):
             av = format_html('<img class="rn-av" src="{}">', obj.profile_photo.url)
         else:
             av = format_html('<span class="rn-av">{}</span>', (obj.full_name or "?")[:1].upper())
-        return format_html('<div class="rn-who">{}<div>{}<small>{}</small></div></div>',
-                           av, obj.full_name, obj.rider_code or "no code")
+        return format_html(
+            '<div class="rn-who">{}<div>{}<small>{}</small></div></div>',
+            av, obj.full_name, obj.rider_code or "no code",
+        )
 
     @display(description="Status", ordering="verification_status", label={
         "Verified": "success", "Pending Documents": "warning", "Under Review": "info",
@@ -240,8 +246,11 @@ class RiderProfileAdmin(BaseAdmin):
             flags = obj.attention_reasons
         except Exception:
             flags = []
-        flag_html = format_html_join("", '<span class="rn-flag">{}</span>', ((f,) for f in flags)) \
-            if flags else mark_safe('<span style="opacity:.6">All good — nothing needs attention.</span>')
+        flag_html = (
+            format_html_join("", '<span class="rn-flag">{}</span>', ((f,) for f in flags))
+            if flags
+            else mark_safe('<span style="opacity:.6">All good — nothing needs attention.</span>')
+        )
 
         return format_html(
             '<div class="rn-deb">'
@@ -321,7 +330,8 @@ class BookingHistoryInline(TabularInline):
     extra = 0
     tab = True
     verbose_name_plural = "Timeline"
-    fields = ("created_at", "from_status", "to_status", "changed_by", "note")
+    # from_status, to_status and note are not fields on BookingStatusHistory.
+    fields = ("created_at", "changed_by")
     readonly_fields = fields
     can_delete = False
 
@@ -329,36 +339,35 @@ class BookingHistoryInline(TabularInline):
         return False
 
 
-class BookingOfferInline(TabularInline):
-    model = BookingOffer
-    extra = 0
-    tab = True
-    verbose_name_plural = "Dispatch offers"
-    fields = ("rider", "status", "distance_to_pickup_km", "sent_at", "responded_at")
-    readonly_fields = ("rider", "status", "distance_to_pickup_km", "sent_at", "responded_at")
-    can_delete = False
-
-    def has_add_permission(self, request, obj=None):
-        return False
+# NOTE: a "Dispatch offers" inline is intentionally not included. BookingOffer has no
+# ForeignKey to Booking, so Django raises admin.E202 for the inline. To bring it back:
+#   1. add  booking = models.ForeignKey("Booking", on_delete=models.CASCADE, related_name="offers")
+#      to BookingOffer, then run makemigrations + migrate;
+#   2. add a BookingOfferInline (fields: rider, status, responded_at; read-only) to
+#      BookingAdmin.inlines.
 
 
 @admin.register(Booking)
 class BookingAdmin(BulkStatusActionMixin, BaseAdmin):
+    # FIX: 'pickup' and 'destination' removed (they are not fields on Booking).
     list_display = (
-        "booking_ref", "service_label", "customer_name", "rider_name", "status_label",
-        "payment_label", "total_fare", "created_at",
+        "__str__", "service_label", "customer_name", "rider_name",
+        "status_label", "created_at",
     )
-    list_filter = ("status", "service_type", "payment_status", "payment_method", "source", "created_at")
+    list_filter = ("status", "service_type", "created_at")
+    # FIX: 'pickup' and 'destination' also removed here, otherwise searching in the
+    # admin would raise a FieldError at runtime.
     search_fields = (
-        "booking_ref", "pickup", "destination", "payment_ref", "customer__user__username",
-        "assigned_rider__full_name", "assigned_rider__rider_code", "assigned_rider__phone",
+        "customer__user__username",
+        "assigned_rider__full_name", "assigned_rider__rider_code",
+        "assigned_rider__phone",
     )
     list_select_related = ("customer__user", "assigned_rider")
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
     list_per_page = 40
-    inlines = (BookingHistoryInline, BookingOfferInline)
-    readonly_fields = ("created_at", "booking_ref")
+    inlines = (BookingHistoryInline,)
+    readonly_fields = ("created_at",)
     actions = ("mark_completed", "mark_cancelled")
     final_statuses = ("completed", "cancelled")
 
@@ -383,10 +392,6 @@ class BookingAdmin(BulkStatusActionMixin, BaseAdmin):
     })
     def status_label(self, obj):
         return obj.get_status_display()
-
-    @display(description="Payment", ordering="payment_status", label=True)
-    def payment_label(self, obj):
-        return obj.get_payment_status_display()
 
     @admin.action(description="Mark selected bookings as completed", permissions=["change"])
     def mark_completed(self, request, queryset):

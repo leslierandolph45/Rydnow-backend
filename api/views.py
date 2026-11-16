@@ -8,7 +8,7 @@ Sections
     4. Rider onboarding
     5. Customer profile & customer wallet
     6. Rider location & nearby-rider search
-    7. Rider wallet, withdrawals, transaction history
+    7. Rider wallet, withdrawals, transaction history, job offers
     8. Payments (Paystack)
     9. "Who am I" profile endpoint (formerly profile_views.py)
 
@@ -16,6 +16,18 @@ Money rules
     * A wallet is NEVER credited by a client-supplied amount; only after Paystack verifies it.
     * Booking payments only mark the booking paid (escrow "held"). The rider is credited
       by Booking.complete_booking(), never here.
+
+Audit fixes in this version
+    * A full copy of booking.py had been pasted at the bottom of this file. It re-imported
+      `from datetime import time`, which replaced the `time` module and made time.time() in the OTP
+      code raise AttributeError. It has been removed (those classes live in booking.py).
+    * accept_offer used the old BookingOffer model (int id) while the dispatch engine creates
+      DispatchOffer rows. It now calls dispatch.accept_offer; decline_offer was added.
+    * paystack_webhook marked an event "processed" even when settlement failed with a retryable
+      error, so Paystack's retry was skipped as a duplicate and the payment was never settled.
+    * get_nearby_riders now uses LegacyNearbyRidersQuerySerializer (it crashed with KeyError because
+      another serializer with the same name replaced the one it expected).
+    * Removed unused imports (pricing, services, reverse, ScopedRateThrottle, BookingOffer).
 """
 import csv
 import hashlib
@@ -64,7 +76,6 @@ from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
 from .models import (
     Booking,
-    BookingOffer,
     CustomerProfile,
     CustomerWallet,
     Payment,
@@ -87,8 +98,8 @@ from .serializers import (
     AmountSerializer,
     CustomerProfileSerializer,
     InitializePaymentSerializer,
+    LegacyNearbyRidersQuerySerializer,
     LoginSerializer,
-    NearbyRidersQuerySerializer,
     PhoneSerializer,
     RegistrationSerializer,
     RiderDocumentSerializer,
@@ -103,12 +114,8 @@ from .serializers import (
 )
 from .validators import clean_phone, email_is_taken, split_name
 
-
 User = get_user_model()
 logger = logging.getLogger(__name__)
-
-
-
 
 
 # ===========================================================================
@@ -185,7 +192,7 @@ def money(value):
 
 
 def min_wallet_balance():
-    """Single source of truth, shared with RiderProfile.has_minimum_deposit."""
+    """Single source of truth, shared with RiderProfile.has_minimum_deposit and dispatch.py."""
     return SystemConfig.get_decimal("MIN_RIDER_BOOKING_BALANCE", str(LOW_BALANCE_FALLBACK))
 
 
@@ -262,11 +269,9 @@ def user_login(request):
     if not serializer.is_valid():
         return validation_fail(serializer)
 
-
     identifier = serializer.validated_data["username"].strip()
     if "@" in identifier:
         identifier = identifier.lower()
-
 
     user = authenticate(
         request=request,
@@ -276,16 +281,13 @@ def user_login(request):
     if user is None:
         return fail("Invalid credentials.", status.HTTP_401_UNAUTHORIZED)
 
-
     rider = RiderProfile.objects.filter(user=user, deleted_at__isnull=True).first()
     customer = None if rider else CustomerProfile.objects.filter(user=user).first()
     if customer is not None and customer.is_blocked:
         return fail("This account has been blocked. Contact support.", status.HTTP_403_FORBIDDEN)
 
-
     update_last_login(None, user)
     token, _ = Token.objects.get_or_create(user=user)
-
 
     profile = rider or customer
     phone = getattr(profile, "phone", "") if profile else ""
@@ -302,7 +304,6 @@ def user_login(request):
         user_payload["verification_status"] = rider.verification_status
     return ok(token=token.key, user=user_payload)
 
-        
 
 @api_view(["POST"])
 @authentication_classes([])
@@ -314,21 +315,17 @@ def customer_register(request):
     if not serializer.is_valid():
         return validation_fail(serializer)
 
-
     phone = serializer.validated_data["phone"]
     if not _phone_verification_ok(phone):
         return fail("Verify your phone number first.", status.HTTP_403_FORBIDDEN)
-
 
     try:
         user = serializer.save()
     except IntegrityError:
         return fail("An account with these details already exists.", status.HTTP_409_CONFLICT)
 
-
     _consume_phone_verification(phone)
     logger.info("Customer registered: user_id=%s", user.id)
-
 
     token, _ = Token.objects.get_or_create(user=user)
     profile = CustomerProfile.objects.filter(user=user).first()
@@ -347,9 +344,6 @@ def customer_register(request):
             "phone": str(profile.phone) if profile and profile.phone else "",
         },
     )
-
-
-
 
 
 # ===========================================================================
@@ -508,7 +502,7 @@ def rider_register(request):
 
 
 class MyRiderProfileView(generics.RetrieveUpdateAPIView):
-    """GET/PATCH the authenticated rider's own profile."""
+    """GET/PATCH the authenticated rider's own profile (not routed; /auth/me/ is the live endpoint)."""
 
     serializer_class = RiderProfileSerializer
     permission_classes = [IsAuthenticated]
@@ -742,12 +736,9 @@ def update_rider_location(request, rider):
 def get_nearby_riders(request):
     """
     Riders who can take a job right now, near the given point, for the given service.
-
-    NOTE: this used to be wrapped in @rider_required but did not accept the `rider`
-    argument it injects, so EVERY call crashed with a TypeError (HTTP 500). It is also
-    the customer-facing "riders near me" search, so any authenticated user may call it.
+    Query: ?latitude=..&longitude=..&service=okada&radius_km=5&limit=10
     """
-    query = NearbyRidersQuerySerializer(data=request.query_params)
+    query = LegacyNearbyRidersQuerySerializer(data=request.query_params)
     if not query.is_valid():
         return validation_fail(query)
     data = query.validated_data
@@ -790,7 +781,7 @@ def get_nearby_riders(request):
 
 
 # ===========================================================================
-# 7. RIDER WALLET, WITHDRAWALS, TRANSACTION HISTORY
+# 7. RIDER WALLET, JOB OFFERS, WITHDRAWALS, TRANSACTION HISTORY
 # ===========================================================================
 ZERO = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, decimal_places=2))
 MAX_EXPORT_ROWS = 5000
@@ -833,18 +824,31 @@ def get_rider_wallet(request, rider):
 @permission_classes([IsAuthenticated])
 @rider_required
 def accept_offer(request, rider, offer_id):
-    minimum = min_wallet_balance()
-    wallet = _get_wallet(rider)
+    """Accept a dispatch offer. All locking and double-assignment protection lives in dispatch.py."""
+    from . import dispatch  # lazy: a problem in dispatch must not stop the whole URLconf loading
 
-    if wallet.balance < minimum:
-        return fail(
-            f"Please deposit at least GH₵{money(minimum)} to start accepting bookings",
-            status.HTTP_403_FORBIDDEN,
-        )
+    try:
+        dispatch.accept_offer(offer_id, rider)
+    except dispatch.OfferError as exc:
+        return fail(exc.message, exc.status_code)
+    except (ValueError, DjangoValidationError):  # malformed offer id
+        return fail("Offer not found.", status.HTTP_404_NOT_FOUND)
+    return ok("Offer accepted. Head to the pickup point.")
 
-    offer = get_object_or_404(BookingOffer, pk=offer_id, rider=rider)
-    done, msg = offer.accept()
-    return ok(msg) if done else fail(msg, status.HTTP_409_CONFLICT)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@rider_required
+def decline_offer(request, rider, offer_id):
+    """Decline a dispatch offer; the engine offers the booking to the next rider."""
+    from . import dispatch
+
+    reason = str(request.data.get("reason", ""))[:60] if hasattr(request.data, "get") else ""
+    try:
+        dispatch.decline_offer(offer_id, rider, reason)
+    except (ValueError, DjangoValidationError):
+        return fail("Offer not found.", status.HTTP_404_NOT_FOUND)
+    return ok("Offer declined.")
 
 
 def _apply_filters(qs, f):
@@ -1201,15 +1205,19 @@ def _settle_reference(reference, requesting_user=None):
 
 
 def _settle_booking_payment(reference, paystack, requesting_user):
-    """Mark the booking paid (escrow). The rider is credited later by complete_booking()."""
+    """Mark the booking paid (escrow). The rider is credited later by complete_booking().
+
+    NOTE: this uses the booking fields booking_ref / total_fare / payment_ref / customer.user.
+    booking.py and serializers.py use reference / price / customer(User). See the audit notes:
+    these must be reconciled against models.py.
+    """
     verified_amount = _paystack_amount(paystack)
     not_found = PaymentError("No booking found for this payment reference.", status.HTTP_404_NOT_FOUND)
 
     with transaction.atomic():  # any PaymentError raised inside rolls everything back
         payment = Payment.objects.select_for_update().filter(reference=reference).first()
         # of=("self",): Booking.customer is nullable, and PostgreSQL refuses
-        # FOR UPDATE on the nullable side of the outer join select_related creates
-        # (that was a 500 on every booking payment).
+        # FOR UPDATE on the nullable side of the outer join select_related creates.
         booking_qs = Booking.objects.select_for_update(of=("self",)).select_related("customer")
         if payment is not None:
             booking = booking_qs.get(pk=payment.booking_id)
@@ -1295,8 +1303,7 @@ def _settle_wallet_deposit(reference, paystack, metadata, requesting_user):
         wallet = _get_wallet(rider, lock=True)  # serialises concurrent settlements
         already_recorded = WalletTransaction.objects.filter(reference=reference).exists()
         if not already_recorded:
-            # Needs RiderWallet.deposit() (added in models fixes). The unique
-            # reference makes this idempotent.
+            # The unique reference makes this idempotent.
             deposited, message = wallet.deposit(
                 amount, reference=reference, description=f"Wallet deposit - GHS {money(amount)}"
             )
@@ -1489,10 +1496,11 @@ def paystack_webhook(request):
                 _settle_reference(reference)
                 record.mark_processed()
             except PaymentError as exc:
-                record.mark_processed(error=exc.message)
                 if exc.retryable:
+                    # Do NOT mark processed: Paystack will retry, and the retry must run again.
                     logger.error("Webhook settlement failed (will retry) ref=%s: %s", reference, exc.message)
                     return Response(status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                record.mark_processed(error=exc.message)
                 logger.warning("Webhook payment not settled ref=%s: %s", reference, exc.message)
 
     return Response(status=status.HTTP_200_OK)
@@ -1528,10 +1536,10 @@ def _photo_url(request, field):
 def _rider_payload(request, rider):
     user = rider.user
     qualified = {q.service_id: q.status for q in rider.qualifications.all()}
-    services = []
+    service_rows = []
     for service in Service.objects.filter(is_active=True):
         approved = qualified.get(service.pk) == ServiceQualification.Status.APPROVED
-        services.append({"key": service.pk, "approved": approved, "active": approved})
+        service_rows.append({"key": service.pk, "approved": approved, "active": approved})
 
     status_value = RIDER_STATUS.get(str(rider.verification_status), "pending")
     return {
@@ -1552,7 +1560,7 @@ def _rider_payload(request, rider):
         "acceptance_rate": rider.acceptance_rate,
         "completion_rate": rider.completion_rate,
         "is_online": rider.is_online,
-        "services": services,
+        "services": service_rows,
     }
 
 
@@ -1650,15 +1658,12 @@ def my_profile(request):
     if customer is not None and customer.is_blocked:
         return fail("This account has been blocked. Contact support.", status.HTTP_403_FORBIDDEN)
 
-
     role = "rider" if rider else "customer"
     profile = rider or customer
     build = _rider_payload if rider else _customer_payload
 
-
     if request.method == "GET":
         return ok(**build(request, profile))
-
 
     serializer = MeUpdateSerializer(
         data=_collect_input(request),
@@ -1670,7 +1675,6 @@ def my_profile(request):
     values = serializer.validated_data
     if not values:
         return fail("Nothing to update.")
-
 
     user = profile.user
     try:
@@ -1699,11 +1703,5 @@ def my_profile(request):
     except IntegrityError:
         return fail("That phone number or email is already in use.", status.HTTP_409_CONFLICT)
 
-
     return ok("Profile updated.", **build(request, profile))
-
-
-
-
-
 
