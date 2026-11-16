@@ -1,5 +1,6 @@
 {% extends "admin/change_list.html" %}
 
+
 {% block content %}
 {% if rider_stats %}
 <style>
@@ -11,6 +12,7 @@
   .rd-lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-bottom:18px}
   .rd-lists table{width:100%}
 </style>
+
 
 <div class="rd-cards">
   <div class="rd-card"><b>{{ rider_stats.total }}</b><span>Total riders</span></div>
@@ -25,6 +27,7 @@
   <div class="rd-card"><b>{{ rider_stats.avg_acceptance }}</b><span>Avg acceptance</span></div>
   <div class="rd-card"><b>{{ rider_stats.avg_response }}</b><span>Avg response time</span></div>
 </div>
+
 
 <div class="rd-lists">
   <div>
@@ -53,4 +56,8 @@
 {% endif %}
 {{ block.super }}
 {% endblock %}
+
+
+
+
 
