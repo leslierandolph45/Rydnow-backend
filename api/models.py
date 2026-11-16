@@ -4579,7 +4579,7 @@ class WasteSubscription(models.Model):
         EXPIRED = "expired", "Expired"
 
 
-    class self.WasteType(models.TextChoices):
+    class WasteType(models.TextChoices):
         HAZARDOUS = "hazardous", "Hazardous"
         CONSTRUCTION = "construction",   "Construction"
 
