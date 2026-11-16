@@ -1,4 +1,4 @@
-/* RYDNOW admin — rider cards, debrief card, dashboard & live map */
+/* RYDNOW ADMIN — rider cards, debrief card, dashboard & live map */
 .rn-deb{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:4px 0 8px}
 .rn-deb .c{border:1px solid rgba(127,127,127,.28);border-radius:12px;padding:14px 16px;background:rgba(127,127,127,.06)}
 .rn-deb h4{margin:0 0 10px;font-size:13px;font-weight:600;opacity:.75}
