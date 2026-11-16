@@ -119,7 +119,7 @@ INSTALLED_APPS = [
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR / "templates"],  # ✅ This is the template path
+        "DIRS": [BASE_DIR / "rydnow"/"templates"],  # This is the template path
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
