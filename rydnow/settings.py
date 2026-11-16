@@ -210,13 +210,18 @@ CORS_ALLOWED_ORIGINS = env_list(
         "http://127.0.0.1:3000",
         "https://rydnow.app",
         "https://www.rydnow.app",
+        "https://rydnow-backend.onrender.com",
     ],
 )
 CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = env_list(
     "CSRF_TRUSTED_ORIGINS",
-    default=["https://rydnow-backend.onrender.com"],
+    default=[
+        "https://rydnow-backend.onrender.com",
+        "https://rydnow.app",
+        "https://www.rydnow.app",
+        ],
 )
 
 
