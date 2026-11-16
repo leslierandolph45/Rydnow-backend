@@ -1,0 +1,98 @@
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<div class="rn"><div class="rnm {% if compact %}rnm--compact{% endif %}" id="rnm" style="--h:{{ height|default:'560px' }}"
+     data-url="{{ live_data_url }}">
+  <div class="rnm-bar">
+    <span class="rnm-chip" id="c-online">0 online</span>
+    <span class="rnm-chip free" id="c-free">0 free</span>
+    <span class="rnm-chip busy" id="c-busy">0 on a job</span>
+    <span class="rnm-chip srch" id="c-bk">0 bookings</span>
+    <select id="rnm-service" aria-label="Filter by service"><option value="">All services</option></select>
+    <span class="rnm-live"><i></i><span id="rnm-time">connecting…</span></span>
+  </div>
+  <div class="rnm-map" id="rnm-map"></div>
+  <aside class="rnm-side">
+    <h4>Bookings in progress</h4><div id="rnm-bookings"></div>
+    <h4>Online riders</h4><div id="rnm-riders"></div>
+  </aside>
+</div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(function(){
+  var root=document.getElementById('rnm'), URL_=root.dataset.url;
+  var map=L.map('rnm-map',{zoomControl:true}).setView([5.6037,-0.1870],12);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,
+    attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
+  var riderM={}, bookM={}, lines=L.layerGroup().addTo(map), fitted=false, svcFilled=false;
+  var $=function(id){return document.getElementById(id)};
+  function esc(v){var d=document.createElement('div');d.textContent=v==null?'':String(v);return d.innerHTML}
+  function emoji(k){k=(k||'').toLowerCase();return k.indexOf('parcel')>-1?'📦':k.indexOf('waste')>-1?'🗑️':'🧍'}
+  function ago(iso){if(!iso)return 'never';var s=Math.max(0,(Date.now()-new Date(iso))/1000);
+    return s<60?Math.round(s)+'s ago':s<3600?Math.round(s/60)+' min ago':Math.round(s/3600)+' h ago'}
+  function rIcon(st){return L.divIcon({className:'rnm-pin',iconSize:[34,34],iconAnchor:[17,17],
+    html:'<div class="rnm-rider '+st+'">🏍</div>'})}
+  function bIcon(b){var s=['pending','searching','searching_rider'].indexOf(b.status)>-1;
+    return L.divIcon({className:'rnm-pin',iconSize:[30,30],iconAnchor:[15,30],
+    html:'<div class="rnm-bk '+(s?'srch':'')+'"><span>'+emoji(b.service)+'</span></div>'})}
+  function rPop(r){return '<b>'+esc(r.name)+'</b><br>'+esc(r.code)+' · ★ '+esc(r.rating.toFixed(1))+' · '+esc(r.trips)+' trips'+
+    '<br>'+esc(r.bike||'')+'<br>'+(r.booking_ref?'On job '+esc(r.booking_ref):(r.state==='stale'?'Location '+ago(r.seen):'Available'))+
+    '<br><a href="'+esc(r.url)+'">Open profile</a>'}
+  function bPop(b){return '<b>'+esc(b.ref)+'</b> · '+esc(b.service_label)+'<br>'+esc(b.customer)+
+    '<br>'+esc(b.pickup||'')+(b.destination?' → '+esc(b.destination):'')+'<br>Status: '+esc(b.status_label)+
+    (b.rider_name?'<br>Rider: '+esc(b.rider_name):'<br>No rider yet')+'<br>GH₵ '+esc(b.fare)+
+    '<br><a href="'+esc(b.url)+'">Open booking</a>'}
+
+  function sync(store,items,make,upd){
+    var seen={};
+    items.forEach(function(it){seen[it.id]=1;var m=store[it.id];
+      if(!m){m=store[it.id]=make(it);m.addTo(map)}else{upd(m,it)}});
+    Object.keys(store).forEach(function(k){if(!seen[k]){map.removeLayer(store[k]);delete store[k]}});
+  }
+  function listItem(title,sub,onclick){var b=document.createElement('button');b.type='button';b.className='rnm-item';
+    var t=document.createElement('b');t.textContent=title;var s=document.createElement('small');s.textContent=sub;
+    b.appendChild(t);b.appendChild(s);b.onclick=onclick;return b}
+
+  function render(d){
+    if(!svcFilled){var sel=$('rnm-service');d.services.forEach(function(s){var o=document.createElement('option');
+      o.value=s.key;o.textContent=s.label;sel.appendChild(o)});svcFilled=true}
+    $('c-online').textContent=d.counts.online+' online';$('c-free').textContent=d.counts.free+' free';
+    $('c-busy').textContent=d.counts.busy+' on a job';$('c-bk').textContent=d.counts.bookings+' bookings';
+    var rid={};d.riders.forEach(function(r){rid[r.id]=r});
+    sync(riderM,d.riders,function(r){return L.marker([r.lat,r.lng],{icon:rIcon(r.state)}).bindPopup(rPop(r))},
+      function(m,r){m.setLatLng([r.lat,r.lng]);m.setIcon(rIcon(r.state));m.setPopupContent(rPop(r))});
+    var pins=d.bookings.filter(function(b){return b.p});
+    sync(bookM,pins,function(b){return L.marker(b.p,{icon:bIcon(b)}).bindPopup(bPop(b))},
+      function(m,b){m.setLatLng(b.p);m.setIcon(bIcon(b));m.setPopupContent(bPop(b))});
+    lines.clearLayers();
+    d.bookings.forEach(function(b){
+      if(b.p&&b.d)L.polyline([b.p,b.d],{color:'#1E3FCE',weight:3,opacity:.55,dashArray:'6 8'}).addTo(lines);
+      var r=rid[b.rider_id];
+      if(r&&b.p){var tgt=(b.status==='in_progress'&&b.d)?b.d:b.p;
+        L.polyline([[r.lat,r.lng],tgt],{color:'#F5B82E',weight:4,opacity:.9}).addTo(lines)}
+    });
+    var bl=$('rnm-bookings');bl.textContent='';
+    if(!d.bookings.length){bl.innerHTML='<div class="rnm-empty">No bookings in progress.</div>'}
+    d.bookings.forEach(function(b){bl.appendChild(listItem(b.ref+' · '+b.service_label,
+      b.customer+' — '+b.status_label+(b.rider_name?' · '+b.rider_name:''),function(){
+        if(b.p){map.flyTo(b.p,16);if(bookM[b.id])bookM[b.id].openPopup()}}))});
+    var rl=$('rnm-riders');rl.textContent='';
+    if(!d.riders.length){rl.innerHTML='<div class="rnm-empty">No riders online right now.</div>'}
+    d.riders.forEach(function(r){rl.appendChild(listItem(r.name,
+      (r.state==='busy'?'On job '+r.booking_ref:r.state==='stale'?'Location '+ago(r.seen):'Available')+' · '+r.code,
+      function(){map.flyTo([r.lat,r.lng],16);if(riderM[r.id])riderM[r.id].openPopup()}))});
+    if(!fitted){var pts=d.riders.map(function(r){return [r.lat,r.lng]}).concat(pins.map(function(b){return b.p}));
+      if(pts.length){map.fitBounds(pts,{padding:[50,50],maxZoom:15});fitted=true}}
+    $('rnm-time').textContent='Updated '+new Date().toLocaleTimeString();
+  }
+  function load(){
+    if(document.hidden)return;
+    var q=$('rnm-service').value?('?service='+encodeURIComponent($('rnm-service').value)):'';
+    fetch(URL_+q,{credentials:'same-origin'}).then(function(r){if(!r.ok)throw 0;return r.json()}).then(render)
+      .catch(function(){$('rnm-time').textContent='Connection lost — retrying'});
+  }
+  $('rnm-service').addEventListener('change',function(){fitted=false;load()});
+  setTimeout(function(){map.invalidateSize()},300);
+  load();setInterval(load,8000);
+  document.addEventListener('visibilitychange',function(){if(!document.hidden)load()});
+})();
+</script>
+
