@@ -5661,18 +5661,19 @@ class Booking(models.Model):
         ]
         constraints = [
             models.CheckConstraint(
-                check=Q(total_price__gte=0),
+                condition=Q(total_price__gte=0),
                 name="booking_total_price_gte_0",
             ),
             models.CheckConstraint(
-                check=Q(discount_amount__lte=F("subtotal")),
+                condition=Q(discount_amount__lte=F("subtotal")),
                 name="booking_discount_lte_subtotal",
             ),
             models.CheckConstraint(
-                check=~Q(rider=F("customer")),
+                condition=~Q(rider=F("customer")),
                 name="booking_rider_not_customer",
             ),
         ]
+
 
 
     def __str__(self):
