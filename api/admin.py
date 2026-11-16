@@ -45,6 +45,8 @@ from unfold.admin import ModelAdmin as UnfoldModelAdmin
 from unfold.decorators import action
 from unfold.forms import AdminPasswordChangeForm, UserChangeForm, UserCreationForm
 
+
+
 from . import models as api_models
 from .models import (
     # Customer
@@ -89,8 +91,8 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 admin.site.site_header = "RYDNOW Operations"
-admin.site.site_title = "RYDNOW Admin"
-admin.site.index_title = "Dashboard"
+admin.site.site_title = "RYDNOW ADMIN"
+admin.site.index_template = "admin/index.html"
 
 
 # ══════════════════════════════════════════════════════════
