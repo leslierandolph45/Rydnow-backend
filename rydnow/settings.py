@@ -88,6 +88,12 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # AUTH_USER_MODEL = "api.User"
 
 
+UNFOLD = {
+    "DASHBOARD_CALLBACK": "api.dashboard.dashboard_callback",
+}
+
+
+
 # ─────────────────────── Applications ───────────────────────
 INSTALLED_APPS = [
     # Admin theme: MUST come before django.contrib.admin.
