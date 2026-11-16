@@ -119,8 +119,7 @@ INSTALLED_APPS = [
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        # Project-level templates/ so templates/admin/index.html overrides Unfold's dashboard.
-        "DIRS": [BASE_DIR / "templates"],
+        "DIRS": [BASE_DIR / "templates"],  # ✅ This is the template path
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -132,6 +131,7 @@ TEMPLATES = [
         },
     },
 ]
+
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
