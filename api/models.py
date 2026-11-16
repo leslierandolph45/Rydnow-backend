@@ -387,7 +387,7 @@ class BookingStatus(models.TextChoices):
     CANCELLED = "cancelled", "Cancelled"
 
 
-ACTIVE_BOOKING_STATUSES = ("accepted", "arrived", "in_transit")   # a rider is committed
+ACTIVE_BOOKING_STATUSES = ("accepted", "arrived", "in_progress")   # a rider is committed
 TERMINAL_BOOKING_STATUSES = ("completed", "cancelled")
 # Releasing a rider (accepted/arrived -> pending) is NOT here on purpose: it only happens through
 # Booking.release_rider(), so a rider cannot PATCH a job back into the pool.
@@ -678,7 +678,7 @@ class CustomerProfile(models.Model):
     def record_completed_booking(self, booking):
         CustomerProfile.objects.filter(pk=self.pk).update(
             total_bookings=F("total_bookings") + 1,
-            total_spent=F("total_spent") + booking.price,
+            total_spent=F("total_spent") + booking.total_price,
             last_booking_at=timezone.now(),
         )
         self.refresh_from_db(fields=["total_bookings", "total_spent", "last_booking_at"])
@@ -1223,7 +1223,8 @@ class RiderProfile(models.Model):
         """'offline' | 'available' | 'busy'. One query - avoid in list loops."""
         if not self.is_online:
             return "offline"
-        return "busy" if self.bookings.filter(status__in=ACTIVE_BOOKING_STATUSES).exists() else "available"
+        return "busy" if Booking.objects.filter(
+            rider_id= self.user_id, status__in=ACTIVE_BOOKING_STATUSES).exists() else "available"
 
     @property
     def is_suspended(self):
@@ -2129,12 +2130,19 @@ class RiderComplaint(models.Model):
         super().save(*args, **kwargs)
 
 
+# ==========================================
+# BookingStatusHistory Model
+# ==========================================
 class BookingStatusHistory(models.Model):
-    """Append-only audit log of every status change for a booking."""
+    """Immutable history of every status change, kept for audit."""
 
-    booking_ref = models.CharField(max_length=50)
-    old_status = models.CharField(max_length=30, blank=True, default="")
-    new_status = models.CharField(max_length=30)
+    booking = models.ForeignKey(
+        "Booking",
+        on_delete=models.CASCADE,
+        related_name="status_history",
+    )
+    status = models.CharField(max_length=20)
+    notes = models.CharField(max_length=255, blank=True)
     changed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -2142,28 +2150,32 @@ class BookingStatusHistory(models.Model):
         blank=True,
         related_name="booking_status_changes",
     )
-    notes = models.TextField(blank=True, default="")
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         db_table = "booking_status_history"
-        ordering = ["-created_at"]
+        ordering = ["booking_id", "-created_at"]
         verbose_name = "Booking Status History"
         verbose_name_plural = "Booking Status History"
         indexes = [
-            models.Index(fields=["booking_ref", "-created_at"], name="bsh_ref_created_idx"),
-            models.Index(fields=["new_status"], name="bsh_new_status_idx"),
+            models.Index(
+                fields=["booking", "-created_at"],
+                name="bsh_booking_created_idx",
+            ),
         ]
 
-    def __str__(self):
-        return f"{self.booking_ref}: {self.old_status or '—'} → {self.new_status}"
+    def __str__(self) -> str:
+        return f"Booking #{self.booking_id} → {self.status} @ {self.created_at:%Y-%m-%d %H:%M}"
 
+    # --- Immutability (audit integrity) ---
     def save(self, *args, **kwargs):
-        # Audit entries are written once and never edited.
         if not self._state.adding:
-            raise ValueError("BookingStatusHistory entries are immutable.")
+            raise ValidationError("Status history records are immutable.")
         super().save(*args, **kwargs)
 
+    # Note: queryset.update()/bulk ops bypass save(); restrict these at the
+    # manager/DB-permission level if strict immutability is required.
+    # Deletion is still allowed so booking CASCADE deletes keep working.
 
 
 class AppendOnlyModel(models.Model):
@@ -4567,8 +4579,8 @@ class WasteSubscription(models.Model):
         EXPIRED = "expired", "Expired"
 
 
-    class WasteType(models.TextChoices):
-        HAZARDOUS = "hazardous", "Hazadous"
+    class self.WasteType(models.TextChoices):
+        HAZARDOUS = "hazardous", "Hazardous"
         CONSTRUCTION = "construction",   "Construction"
 
     # Hazardous and construction pickups need a photo before they can be completed.
@@ -5032,8 +5044,6 @@ class WasteCollection(models.Model):
             c.save(update_fields=["status", "notes", "updated_at"])
         self.refresh_from_db()
         return self    
-
-
 
 promo_code_validator = RegexValidator(
     regex=r"^[A-Z0-9][A-Z0-9-]{2,29}$",
@@ -6122,55 +6132,6 @@ class BookingStop(TimeStampedModel):
         return f"Booking #{self.booking_id} — Stop {self.order}: {self.address[:20]}"
 
 
-# ==========================================
-# BookingStatusHistory Model
-# ==========================================
-class BookingStatusHistory(models.Model):
-    """Immutable history of every status change, kept for audit."""
-
-    booking = models.ForeignKey(
-        "Booking",
-        on_delete=models.CASCADE,
-        related_name="status_history",
-    )
-    status = models.CharField(max_length=20)
-    notes = models.CharField(max_length=255, blank=True)
-    changed_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="booking_status_changes",
-    )
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-
-    class Meta:
-        db_table = "booking_status_history"
-        ordering = ["booking_id", "-created_at"]
-        verbose_name = "Booking Status History"
-        verbose_name_plural = "Booking Status History"
-        indexes = [
-            models.Index(
-                fields=["booking", "-created_at"],
-                name="bsh_booking_created_idx",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        return f"Booking #{self.booking_id} → {self.status} @ {self.created_at:%Y-%m-%d %H:%M}"
-
-    # --- Immutability (audit integrity) ---
-    def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise ValidationError("Status history records are immutable.")
-        super().save(*args, **kwargs)
-
-    # Note: queryset.update()/bulk ops bypass save(); restrict these at the
-    # manager/DB-permission level if strict immutability is required.
-    # Deletion is still allowed so booking CASCADE deletes keep working.
-
-
-
 class SystemAlertQuerySet(models.QuerySet):
     """Reusable query helpers for system alerts."""
 
@@ -6327,3 +6288,309 @@ class SystemAlertDismissal(models.Model):
         return f"{self.user} dismissed {self.alert_id}"
 
 
+
+class NotificationQuerySet(models.QuerySet):
+    def unread(self):
+        return self.filter(is_read=False)
+
+    def for_user(self, user):
+        return self.filter(user=user)
+
+    def mark_all_read(self, user):
+        now = timezone.now()
+        return self.filter(user=user, is_read=False).update(is_read=True, read_at=now)
+
+
+class Notification(models.Model):
+    """In-app notification for a user (rider, customer or staff)."""
+
+    class Category(models.TextChoices):
+        SYSTEM = "system", "System"
+        BOOKING = "booking", "Booking"
+        PAYMENT = "payment", "Payment"
+        PROMO = "promo", "Promo"
+        SAFETY = "safety", "Safety"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notifications"
+    )
+    title = models.CharField(max_length=200)
+    message = models.TextField(blank=True, default="")
+    category = models.CharField(
+        max_length=20, choices=Category.choices, default=Category.SYSTEM, db_index=True
+    )
+    data = models.JSONField(default=dict, blank=True, help_text="Optional extra payload for the app.")
+    is_read = models.BooleanField(default=False, db_index=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    objects = NotificationQuerySet.as_manager()
+
+    class Meta:
+        db_table = "notifications"
+        ordering = ["-created_at", "-id"]
+        verbose_name = "Notification"
+        verbose_name_plural = "Notifications"
+        indexes = [
+            models.Index(fields=["user", "is_read", "-created_at"], name="notif_user_read_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}: {self.title}"
+
+    @classmethod
+    def notify(cls, user, title, message="", category=Category.SYSTEM, data=None):
+        """Create one notification. Returns it, or None if there is no user to notify."""
+        if user is None:
+            return None
+        return cls.objects.create(
+            user=user,
+            title=(title or "")[:200],
+            message=message or "",
+            category=category,
+            data=data or {},
+        )
+
+    def mark_read(self):
+        if not self.is_read:
+            self.is_read = True
+            self.read_at = timezone.now()
+            self.save(update_fields=["is_read", "read_at"])
+
+
+# ---------------------------------------------------------------------
+# AuditLog  (used as: AuditLog.record(actor, action, obj, changes={...}))
+# ---------------------------------------------------------------------
+class AuditLog(AppendOnlyModel):
+    """Append-only record of who did what to which object."""
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="+",
+        help_text="Empty = system / automatic action.",
+    )
+    action = models.CharField(max_length=100, db_index=True, help_text="e.g. rider.status_changed")
+    target_model = models.CharField(max_length=100, blank=True, default="")
+    target_id = models.CharField(max_length=64, blank=True, default="")
+    target_repr = models.CharField(max_length=255, blank=True, default="")
+    changes = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "audit_logs"
+        ordering = ["-created_at", "-id"]
+        verbose_name = "Audit Log"
+        verbose_name_plural = "Audit Logs"
+        indexes = [
+            models.Index(fields=["target_model", "target_id"], name="audit_target_idx"),
+            models.Index(fields=["actor", "-created_at"], name="audit_actor_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.created_at:%Y-%m-%d %H:%M} {self.action} {self.target_model}:{self.target_id}"
+
+    def delete(self, *args, **kwargs):
+        raise ValueError("Audit log entries cannot be deleted.")
+
+    @classmethod
+    def record(cls, actor, action, obj=None, changes=None):
+        """Write one audit row. `actor` may be None; `obj` may be any saved model instance."""
+        actor_user = actor if getattr(actor, "pk", None) else None
+        return cls.objects.create(
+            actor=actor_user,
+            action=action[:100],
+            target_model=obj._meta.label if obj is not None else "",
+            target_id=str(obj.pk) if obj is not None and obj.pk is not None else "",
+            target_repr=str(obj)[:255] if obj is not None else "",
+            changes=changes or {},
+        )
+
+
+# ---------------------------------------------------------------------
+# RecurringBooking  (paste right after RecurringBookingQuerySet)
+# BusinessAccount.suspend() already uses: RecurringBooking.Status.ACTIVE / PAUSED,
+# the fields `business`, `status`, `updated_at`; RecurringBookingQuerySet.due() uses
+# `next_booking_date`.
+# ---------------------------------------------------------------------
+class RecurringBooking(models.Model):
+    """A repeating booking schedule for a business account."""
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        PAUSED = "paused", "Paused"
+        CANCELLED = "cancelled", "Cancelled"
+        EXPIRED = "expired", "Expired"
+
+    business = models.ForeignKey(
+        "BusinessAccount", on_delete=models.PROTECT, related_name="recurring_bookings"
+    )
+    reference = models.CharField(
+        max_length=30, unique=True, editable=False, default=generate_recurring_reference
+    )
+
+    # What and where
+    service_type = models.CharField(max_length=50, choices=ServiceType.choices)
+    pickup_address = models.CharField(max_length=255)
+    dropoff_address = models.CharField(
+        max_length=255, blank=True, default="",
+        help_text="Leave blank for services with no destination (e.g. waste pickup).",
+    )
+    notes = models.TextField(blank=True, default="")
+
+    # Schedule
+    frequency = models.CharField(
+        max_length=20, choices=BookingFrequency.choices, default=BookingFrequency.WEEKLY
+    )
+    preferred_day = models.PositiveSmallIntegerField(choices=Weekday.choices)
+    preferred_time = models.TimeField()
+    start_date = models.DateField(default=timezone.localdate)
+    end_date = models.DateField(null=True, blank=True)
+    next_booking_date = models.DateField(db_index=True)
+
+    # Status
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.ACTIVE, db_index=True
+    )
+    paused_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancel_reason = models.CharField(max_length=255, blank=True, default="")
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="recurring_bookings_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = RecurringBookingQuerySet.as_manager()
+
+    class Meta:
+        db_table = "recurring_bookings"
+        ordering = ["next_booking_date", "-created_at"]
+        verbose_name = "Recurring Booking"
+        verbose_name_plural = "Recurring Bookings"
+        indexes = [
+            models.Index(fields=["status", "next_booking_date"], name="recur_due_idx"),
+            models.Index(fields=["business", "status"], name="recur_business_status_idx"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(end_date__isnull=True) | Q(end_date__gte=F("start_date")),
+                name="recur_end_after_start",
+            ),
+            models.CheckConstraint(
+                condition=Q(next_booking_date__gte=F("start_date")),
+                name="recur_next_after_start",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.reference} — {self.business_id} ({self.get_status_display()})"
+
+    @property
+    def is_active(self):
+        return self.status == self.Status.ACTIVE
+
+    # ---- validation -----------------------------------------------------
+    def clean(self):
+        errors = {}
+        if self.next_booking_date and self.preferred_day is not None:
+            if self.next_booking_date.weekday() != self.preferred_day:
+                errors["next_booking_date"] = (
+                    f"Next booking must be on a {self.get_preferred_day_display()}."
+                )
+        if self.start_date and self.next_booking_date and self.next_booking_date < self.start_date:
+            errors["next_booking_date"] = "First booking cannot be before the start date."
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            errors["end_date"] = "End date cannot be before the start date."
+        if self.service_type != ServiceType.WASTE_BIN and not self.dropoff_address:
+            errors["dropoff_address"] = "A drop-off address is required for this service."
+        if errors:
+            raise ValidationError(errors)
+
+    # ---- scheduling -----------------------------------------------------
+    def _lock(self):
+        return type(self).objects.select_for_update().get(pk=self.pk)
+
+    def _following_date(self, d):
+        """Next date after `d`, always on the preferred weekday."""
+        if self.frequency == BookingFrequency.WEEKLY:
+            return d + timedelta(days=7)
+        if self.frequency == BookingFrequency.BIWEEKLY:
+            return d + timedelta(days=14)
+        year, month = d.year + d.month // 12, d.month % 12 + 1
+        ordinal = min((d.day - 1) // 7 + 1, 5)
+        return nth_weekday_of_month(year, month, self.preferred_day, ordinal)
+
+    def advance(self, for_date):
+        """Move to the next date after `for_date` has been handled.
+
+        Pass the date you saw as due. If another worker already advanced it (or the
+        schedule is no longer active) this does nothing and returns False, so retries
+        and parallel workers cannot skip or repeat a date. Call it in the same
+        transaction that creates the booking for `for_date`.
+        """
+        with transaction.atomic():
+            r = self._lock()
+            if r.status != self.Status.ACTIVE or r.next_booking_date != for_date:
+                self.refresh_from_db()
+                return False
+            r.next_booking_date = r._following_date(r.next_booking_date)
+            if r.end_date and r.next_booking_date > r.end_date:
+                r.status = self.Status.EXPIRED
+            r.save(update_fields=["next_booking_date", "status", "updated_at"])
+        self.refresh_from_db()
+        return True
+
+    # ---- status changes -------------------------------------------------
+    def pause(self):
+        with transaction.atomic():
+            r = self._lock()
+            if r.status != self.Status.ACTIVE:
+                raise ValidationError(
+                    "Only active schedules can be paused.", code="invalid_transition"
+                )
+            r.status = self.Status.PAUSED
+            r.paused_at = timezone.now()
+            r.save(update_fields=["status", "paused_at", "updated_at"])
+        self.refresh_from_db()
+        return self
+
+    def resume(self):
+        """Resume, skipping dates missed while paused (no bookings are created for them)."""
+        with transaction.atomic():
+            r = self._lock()
+            if r.status != self.Status.PAUSED:
+                raise ValidationError(
+                    "Only paused schedules can be resumed.", code="invalid_transition"
+                )
+            if not BusinessAccount.objects.filter(
+                pk=r.business_id, status=BusinessAccount.Status.APPROVED
+            ).exists():
+                raise ValidationError("The business account is not active.", code="business_inactive")
+            today = timezone.localdate()
+            next_date = r.next_booking_date
+            while next_date < today:
+                next_date = r._following_date(next_date)
+            r.next_booking_date = next_date
+            ended = r.end_date is not None and next_date > r.end_date
+            r.status = self.Status.EXPIRED if ended else self.Status.ACTIVE
+            r.paused_at = None
+            r.save(update_fields=["next_booking_date", "status", "paused_at", "updated_at"])
+        self.refresh_from_db()
+        return self
+
+    def cancel(self, reason=""):
+        with transaction.atomic():
+            r = self._lock()
+            if r.status not in (self.Status.ACTIVE, self.Status.PAUSED):
+                raise ValidationError(
+                    f"A {r.get_status_display().lower()} schedule cannot be cancelled.",
+                    code="invalid_transition",
+                )
+            r.status = self.Status.CANCELLED
+            r.cancelled_at = timezone.now()
+            r.cancel_reason = (reason or "")[:255]
+            r.save(update_fields=["status", "cancelled_at", "cancel_reason", "updated_at"])
+        self.refresh_from_db()
+        return self

@@ -1,49 +1,60 @@
 """
 Django settings for the Rydnow project (rides, delivery & waste collection).
 
+
 All environment-specific values come from environment variables.
+
 
 Required in production:
     DJANGO_SECRET_KEY, DATABASE_URL
+
 
 REQUIRED for rider documents to survive deploys (Render's disk is wiped on every deploy):
     AWS_STORAGE_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
     (+ AWS_S3_ENDPOINT_URL and AWS_S3_REGION_NAME for Cloudflare R2 / Backblaze B2 / Supabase)
 
+
 Recommended in production:
     PAYSTACK_SECRET_KEY, SENTRY_DSN, REDIS_URL
+
 
 Optional:
     DEBUG, ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS,
     LOG_LEVEL, EMAIL_*, SECURE_HSTS_SECONDS, ADMIN_SESSION_HOURS,
     MEDIA_ROOT (only if you mount a persistent disk instead of using a bucket),
     AWS_S3_ADDRESSING_STYLE ("path" or "virtual"), AWS_QUERYSTRING_EXPIRE,
-    STATIC_MANIFEST (set to True to re-enable hashed static filenames)
+    STATIC_MANIFEST (set to True to re-enable hashed static filenames),
+    TEMPLATES_DIR (absolute path to your project templates folder, overrides the search below)
+
 
 Local development: set DEBUG=True in your shell or .env file.
 """
 import os
 import warnings
-from decimal import Decimal
 from pathlib import Path
+
 
 import dj_database_url
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
-from django.templatetags.static import static
-from django.urls import reverse_lazy
+
 
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
+
 
 # NOTE: the old hard-coded CLOUDINARY_STORAGE block was removed on purpose.
 # It was never wired into STORAGES / INSTALLED_APPS (so it did nothing), and it
 # exposed an API secret in source code. Rotate that secret in the Cloudinary dashboard.
 
 
+
+
 # ────────────────────────── Env helpers ──────────────────────────
 def env_bool(name: str, default: bool = False) -> bool:
     return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
 
 
 def env_int(name: str, default: int) -> int:
@@ -56,15 +67,20 @@ def env_int(name: str, default: int) -> int:
         raise ImproperlyConfigured(f"{name} must be an integer, got {raw!r}.") from exc
 
 
+
+
 def env_list(name: str, default=None) -> list:
     raw = os.environ.get(name, "")
     items = [item.strip() for item in raw.split(",") if item.strip()]
     return items or list(default or [])
 
 
+
+
 # ─────────────────────────── Core ───────────────────────────
 # Secure by default: DEBUG is OFF unless you explicitly turn it on (e.g. in a local .env).
 DEBUG = env_bool("DEBUG", False)
+
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
@@ -72,6 +88,7 @@ if not SECRET_KEY:
         SECRET_KEY = "dev-insecure-key"
     else:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DEBUG is False.")
+
 
 ALLOWED_HOSTS = env_list(
     "ALLOWED_HOSTS",
@@ -81,16 +98,29 @@ _render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 if _render_host and _render_host not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_render_host)
 
+
 ROOT_URLCONF = "rydnow.urls"
 WSGI_APPLICATION = "rydnow.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+
 # AUTH_USER_MODEL = "api.User"
 
 
+
+
+# ─────────────────────── Admin dashboard (Unfold) ───────────────────────
+# DASHBOARD_CALLBACK feeds data into the admin home page. It is only used when the home
+# page template is yours: put your file at   <templates folder>/admin/index.html
+# (see TEMPLATE_DIRS below). The callback is api/dashboard.py -> dashboard_callback(request, context).
 UNFOLD = {
+    "SITE_TITLE": "Rydnow Admin",
+    "SITE_HEADER": "Rydnow",
     "DASHBOARD_CALLBACK": "api.dashboard.dashboard_callback",
 }
+
+
+
 
 
 
@@ -116,10 +146,46 @@ INSTALLED_APPS = [
     "api",
 ]
 
+
+# ─────────────────────── Templates ───────────────────────
+# Django searches TEMPLATES["DIRS"] BEFORE any app's templates folder, so a file here named
+# admin/index.html replaces the admin home page (including Unfold's own).
+# Linux (Render) is case-sensitive: "Rydnow-backend" and "rydnow-backend" are different folders.
+# Every candidate below is checked, and only folders that really exist are used.
+def _find_template_dirs():
+    candidates = []
+    explicit = os.environ.get("TEMPLATES_DIR")
+    if explicit:
+        candidates.append(Path(explicit))
+    candidates += [
+        BASE_DIR / "templates",
+        BASE_DIR / "Rydnow-backend" / "templates",
+        BASE_DIR / "rydnow-backend" / "templates",
+        BASE_DIR / "api" / "templates",
+    ]
+    found, seen = [], set()
+    for path in candidates:
+        if path.is_dir():
+            real = path.resolve()
+            if real not in seen:  # case-insensitive systems (Windows/macOS) list the same folder twice
+                seen.add(real)
+                found.append(str(real))
+    return found
+
+
+TEMPLATE_DIRS = _find_template_dirs()
+if not TEMPLATE_DIRS:
+    warnings.warn(
+        "No project templates folder found (looked for templates/, Rydnow-backend/templates, "
+        "rydnow-backend/templates under BASE_DIR). Custom admin templates will NOT load. "
+        "Set TEMPLATES_DIR to the folder's absolute path.",
+        RuntimeWarning,
+    )
+
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR / "rydnow-backend" / "templates"],  # This is the template path
+        "DIRS": TEMPLATE_DIRS,
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -131,6 +197,8 @@ TEMPLATES = [
         },
     },
 ]
+
+
 
 
 MIDDLEWARE = [
@@ -146,6 +214,8 @@ MIDDLEWARE = [
 ]
 
 
+
+
 # ─────────────────────── Payments ───────────────────────
 # Never hard-code keys. If a real Paystack key was ever committed to git, rotate it now.
 PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
@@ -155,6 +225,8 @@ PAYSTACK_CALLBACK_URL = os.environ.get(
 WALLET_MIN_BALANCE = os.environ.get("WALLET_MIN_BALANCE", "50.00")
 if not DEBUG and not PAYSTACK_SECRET_KEY:
     warnings.warn("PAYSTACK_SECRET_KEY is not set: card/MoMo payments will fail.", RuntimeWarning)
+
+
 
 
 # ─────────────────────── Database ───────────────────────
@@ -168,6 +240,8 @@ DATABASES = {
 }
 if not DEBUG and DATABASES["default"]["ENGINE"].endswith("sqlite3"):
     raise ImproperlyConfigured("Set DATABASE_URL to a PostgreSQL database in production.")
+
+
 
 
 # ───────────────────────── Cache ─────────────────────────
@@ -187,6 +261,8 @@ else:
     }
 
 
+
+
 # ─────────────────── Auth & Passwords ───────────────────
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -198,8 +274,11 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
+
 # Admins are logged out after this many hours (default 12).
 SESSION_COOKIE_AGE = env_int("ADMIN_SESSION_HOURS", 12) * 3600
+
+
 
 
 # ────────────────────── CORS / CSRF ──────────────────────
@@ -215,14 +294,17 @@ CORS_ALLOWED_ORIGINS = env_list(
 )
 CORS_ALLOW_CREDENTIALS = True
 
+
 CSRF_TRUSTED_ORIGINS = env_list(
     "CSRF_TRUSTED_ORIGINS",
     default=[
         "https://rydnow-backend.onrender.com",
         "https://rydnow.app",
         "https://www.rydnow.app",
-        ],
+    ],
 )
+
+
 
 
 # ─────────────────── Internationalization ───────────────────
@@ -233,16 +315,20 @@ USE_TZ = True
 PHONENUMBER_DEFAULT_REGION = "GH"
 
 
+
+
 # ───────────────────── Static & Media ─────────────────────
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"] if (BASE_DIR / "static").is_dir() else []
+
 
 MEDIA_URL = "/media/"
 # Only used when NO bucket is configured (local dev, or a Render persistent disk mounted
 # at e.g. /var/data/media -> set MEDIA_ROOT=/var/data/media). Never public: rider documents
 # are streamed to staff only through the admin (see RiderDocumentAdmin.file_view).
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT") or (BASE_DIR / "media"))
+
 
 # FIX for the /admin/ 500 error:
 # CompressedManifestStaticFilesStorage makes static("css/x.css") look the file up on disk and
@@ -257,10 +343,12 @@ if env_bool("STATIC_MANIFEST", False):
 else:
     _STATICFILES_BACKEND = "whitenoise.storage.CompressedStaticFilesStorage"
 
+
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {"BACKEND": _STATICFILES_BACKEND},
 }
+
 
 if os.environ.get("AWS_STORAGE_BUCKET_NAME"):
     # Any S3-compatible bucket works: AWS S3, Cloudflare R2, Backblaze B2, Supabase Storage.
@@ -285,8 +373,11 @@ elif not DEBUG:
         stacklevel=1,
     )
 
+
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
+
+
 
 
 # ──────────────────── Django REST Framework ────────────────────
@@ -320,6 +411,8 @@ REST_FRAMEWORK = {
 }
 
 
+
+
 # ─────────────────────── Security ───────────────────────
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -331,6 +424,7 @@ if not DEBUG:
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", True)
     SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
 
+
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SAMESITE = "Lax"
@@ -338,6 +432,8 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 # "same-origin" would stop the live map's OpenStreetMap tiles loading (OSM requires a Referer).
 SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 X_FRAME_OPTIONS = "DENY"
+
+
 
 
 # ───────────────────────── Email ─────────────────────────
@@ -353,8 +449,11 @@ else:
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Rydnow <no-reply@rydnow.app>")
 
 
+
+
 # ─────────────────────── Logging ───────────────────────
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG" if DEBUG else "INFO")
+
 
 LOGGING = {
     "version": 1,
