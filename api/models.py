@@ -6109,7 +6109,7 @@ class BookingStop(TimeStampedModel):
                 name="unique_stop_order_per_booking",
             ),
             models.CheckConstraint(
-                check=(
+                condition=(
                     Q(latitude__isnull=True, longitude__isnull=True)
                     | Q(latitude__isnull=False, longitude__isnull=False)
                 ),
