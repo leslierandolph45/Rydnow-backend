@@ -21,7 +21,7 @@ from .models import (
     WithdrawalRequest,
 )
 
-log = logging.getLogger(__RYDNOW__)
+log = logging.getLogger(__name__)
 LIVE_MAP_URL_NAME = "admin:rydnow_live_map"   # change to your live-map route name
 S = Booking.Status
 COLORS = {"completed": "#22C55E", "in_progress": "#3B5BFF", "accepted": "#F5B82E",
