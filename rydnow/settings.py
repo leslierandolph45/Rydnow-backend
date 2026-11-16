@@ -1,29 +1,24 @@
 """
 Django settings for the Rydnow project (rides, delivery & waste collection).
 
-
 All environment-specific values come from environment variables.
-
 
 Required in production:
     DJANGO_SECRET_KEY, DATABASE_URL
-
 
 REQUIRED for rider documents to survive deploys (Render's disk is wiped on every deploy):
     AWS_STORAGE_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
     (+ AWS_S3_ENDPOINT_URL and AWS_S3_REGION_NAME for Cloudflare R2 / Backblaze B2 / Supabase)
 
-
 Recommended in production:
     PAYSTACK_SECRET_KEY, SENTRY_DSN, REDIS_URL
-
 
 Optional:
     DEBUG, ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS,
     LOG_LEVEL, EMAIL_*, SECURE_HSTS_SECONDS, ADMIN_SESSION_HOURS,
     MEDIA_ROOT (only if you mount a persistent disk instead of using a bucket),
-    AWS_S3_ADDRESSING_STYLE ("path" or "virtual"), AWS_QUERYSTRING_EXPIRE
-
+    AWS_S3_ADDRESSING_STYLE ("path" or "virtual"), AWS_QUERYSTRING_EXPIRE,
+    STATIC_MANIFEST (set to True to re-enable hashed static filenames)
 
 Local development: set DEBUG=True in your shell or .env file.
 """
@@ -32,30 +27,23 @@ import warnings
 from decimal import Decimal
 from pathlib import Path
 
-
 import dj_database_url
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 from django.templatetags.static import static
 from django.urls import reverse_lazy
 
-
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 
 # NOTE: the old hard-coded CLOUDINARY_STORAGE block was removed on purpose.
 # It was never wired into STORAGES / INSTALLED_APPS (so it did nothing), and it
 # exposed an API secret in source code. Rotate that secret in the Cloudinary dashboard.
 
 
-
-
 # ────────────────────────── Env helpers ──────────────────────────
 def env_bool(name: str, default: bool = False) -> bool:
     return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
-
-
 
 
 def env_int(name: str, default: int) -> int:
@@ -68,25 +56,15 @@ def env_int(name: str, default: int) -> int:
         raise ImproperlyConfigured(f"{name} must be an integer, got {raw!r}.") from exc
 
 
-
-
 def env_list(name: str, default=None) -> list:
     raw = os.environ.get(name, "")
     items = [item.strip() for item in raw.split(",") if item.strip()]
     return items or list(default or [])
 
 
-
-
-
-REST_FRAMEWORK = {
-    'EXCEPTION_HANDLER': 'rest_frameword.views.exception_handler',
-}
-
 # ─────────────────────────── Core ───────────────────────────
 # Secure by default: DEBUG is OFF unless you explicitly turn it on (e.g. in a local .env).
 DEBUG = env_bool("DEBUG", False)
-
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
@@ -94,7 +72,6 @@ if not SECRET_KEY:
         SECRET_KEY = "dev-insecure-key"
     else:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DEBUG is False.")
-
 
 ALLOWED_HOSTS = env_list(
     "ALLOWED_HOSTS",
@@ -104,15 +81,11 @@ _render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 if _render_host and _render_host not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_render_host)
 
-
 ROOT_URLCONF = "rydnow.urls"
 WSGI_APPLICATION = "rydnow.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-
 # AUTH_USER_MODEL = "api.User"
-
-
 
 
 # ─────────────────────── Applications ───────────────────────
@@ -137,7 +110,6 @@ INSTALLED_APPS = [
     "api",
 ]
 
-
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
@@ -155,7 +127,6 @@ TEMPLATES = [
     },
 ]
 
-
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
@@ -169,8 +140,6 @@ MIDDLEWARE = [
 ]
 
 
-
-
 # ─────────────────────── Payments ───────────────────────
 # Never hard-code keys. If a real Paystack key was ever committed to git, rotate it now.
 PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
@@ -180,8 +149,6 @@ PAYSTACK_CALLBACK_URL = os.environ.get(
 WALLET_MIN_BALANCE = os.environ.get("WALLET_MIN_BALANCE", "50.00")
 if not DEBUG and not PAYSTACK_SECRET_KEY:
     warnings.warn("PAYSTACK_SECRET_KEY is not set: card/MoMo payments will fail.", RuntimeWarning)
-
-
 
 
 # ─────────────────────── Database ───────────────────────
@@ -195,8 +162,6 @@ DATABASES = {
 }
 if not DEBUG and DATABASES["default"]["ENGINE"].endswith("sqlite3"):
     raise ImproperlyConfigured("Set DATABASE_URL to a PostgreSQL database in production.")
-
-
 
 
 # ───────────────────────── Cache ─────────────────────────
@@ -216,8 +181,6 @@ else:
     }
 
 
-
-
 # ─────────────────── Auth & Passwords ───────────────────
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -229,11 +192,8 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-
 # Admins are logged out after this many hours (default 12).
 SESSION_COOKIE_AGE = env_int("ADMIN_SESSION_HOURS", 12) * 3600
-
-
 
 
 # ────────────────────── CORS / CSRF ──────────────────────
@@ -248,13 +208,10 @@ CORS_ALLOWED_ORIGINS = env_list(
 )
 CORS_ALLOW_CREDENTIALS = True
 
-
 CSRF_TRUSTED_ORIGINS = env_list(
     "CSRF_TRUSTED_ORIGINS",
     default=["https://rydnow-backend.onrender.com"],
 )
-
-
 
 
 # ─────────────────── Internationalization ───────────────────
@@ -265,13 +222,10 @@ USE_TZ = True
 PHONENUMBER_DEFAULT_REGION = "GH"
 
 
-
-
 # ───────────────────── Static & Media ─────────────────────
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"] if (BASE_DIR / "static").is_dir() else []
-
 
 MEDIA_URL = "/media/"
 # Only used when NO bucket is configured (local dev, or a Render persistent disk mounted
@@ -279,14 +233,23 @@ MEDIA_URL = "/media/"
 # are streamed to staff only through the admin (see RiderDocumentAdmin.file_view).
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT") or (BASE_DIR / "media"))
 
+# FIX for the /admin/ 500 error:
+# CompressedManifestStaticFilesStorage makes static("css/x.css") look the file up on disk and
+# raise ValueError if it is missing. That ValueError is what crashed the admin page
+# (static("css/rydnow_admin.css") from the Unfold config). WHITENOISE_MANIFEST_STRICT=False does
+# NOT prevent it: the error comes from hashed_name(), not from the manifest-strict check.
+# CompressedStaticFilesStorage just builds the URL, so a missing file can no longer crash a page.
+# Set STATIC_MANIFEST=True once rydnow_admin.css is confirmed to be collected, to get hashed names.
+if env_bool("STATIC_MANIFEST", False):
+    _STATICFILES_BACKEND = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+    WHITENOISE_MANIFEST_STRICT = False
+else:
+    _STATICFILES_BACKEND = "whitenoise.storage.CompressedStaticFilesStorage"
 
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
+    "staticfiles": {"BACKEND": _STATICFILES_BACKEND},
 }
-# A missing static reference should degrade (unstyled asset), not 500 the whole admin page.
-WHITENOISE_MANIFEST_STRICT = False
-
 
 if os.environ.get("AWS_STORAGE_BUCKET_NAME"):
     # Any S3-compatible bucket works: AWS S3, Cloudflare R2, Backblaze B2, Supabase Storage.
@@ -311,11 +274,8 @@ elif not DEBUG:
         stacklevel=1,
     )
 
-
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
-
-
 
 
 # ──────────────────── Django REST Framework ────────────────────
@@ -349,8 +309,6 @@ REST_FRAMEWORK = {
 }
 
 
-
-
 # ─────────────────────── Security ───────────────────────
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -362,7 +320,6 @@ if not DEBUG:
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", True)
     SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
 
-
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SAMESITE = "Lax"
@@ -370,8 +327,6 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 # "same-origin" would stop the live map's OpenStreetMap tiles loading (OSM requires a Referer).
 SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 X_FRAME_OPTIONS = "DENY"
-
-
 
 
 # ───────────────────────── Email ─────────────────────────
@@ -387,11 +342,8 @@ else:
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Rydnow <no-reply@rydnow.app>")
 
 
-
-
 # ─────────────────────── Logging ───────────────────────
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG" if DEBUG else "INFO")
-
 
 LOGGING = {
     "version": 1,
@@ -408,107 +360,6 @@ LOGGING = {
         "django.request": {"handlers": ["console"], "level": "WARNING", "propagate": False},
         "django.security": {"handlers": ["console"], "level": "WARNING", "propagate": False},
         "api": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
-    },
-}
-
-
-
-
-# ────────────────────── Error Monitoring ──────────────────────
-_sentry_dsn = os.environ.get("SENTRY_DSN")
-if _sentry_dsn:
-    import sentry_sdk
-
-
-    sentry_sdk.init(
-        dsn=_sentry_dsn,
-        environment=os.environ.get("SENTRY_ENVIRONMENT", "development" if DEBUG else "production"),
-        release=os.environ.get("RENDER_GIT_COMMIT"),
-        traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", 0.1)),
-        send_default_pii=False,
-    )
-
-
-
-
-# ─────────────────────────────────────────────────────────────
-# DISPATCH SETTINGS
-# ─────────────────────────────────────────────────────────────
-DISPATCH = {
-    "offer_timeout_s": 45,
-    "radius_steps_km": (3.0, 5.0, 8.0),
-    "candidates_per_round": 15,
-    "max_offers_per_booking": 8,
-    "min_wallet": Decimal("50.00"),
-    "location_max_age_s": 90,
-    "w_proximity": 0.50,
-    "w_rating": 0.20,
-    "w_acceptance": 0.15,
-    "w_reliability": 0.10,
-    "w_fairness": 0.05,
-}
-
-
-
-
-# ─────────────────────────────────────────────────────────────
-# ADMIN THEME (django-unfold)
-# ─────────────────────────────────────────────────────────────
-UNFOLD = {
-    "SITE_TITLE": "RYDNOW Operations",
-    "SITE_HEADER": "RYDNOW",
-    "SITE_SYMBOL": "two_wheeler",
-    "SITE_URL": "/",
-    "BORDER_RADIUS": "12px",
-    "STYLES": [lambda request: static("css/rydnow_admin.css")],
-    "DASHBOARD_CALLBACK": "api.admin_dashboard.dashboard_callback",
-    "COLORS": {
-        "primary": {
-            "50": "oklch(97% 0.014 265)",
-            "100": "oklch(93% 0.032 265)",
-            "200": "oklch(88% 0.06 265)",
-            "300": "oklch(80% 0.10 265)",
-            "400": "oklch(70% 0.15 265)",
-            "500": "oklch(58% 0.20 265)",
-            "600": "oklch(50% 0.22 265)",
-            "700": "oklch(45% 0.21 265)",
-            "800": "oklch(38% 0.17 265)",
-            "900": "oklch(32% 0.13 265)",
-            "950": "oklch(25% 0.10 265)",
-        }
-    },
-    "SIDEBAR": {
-        "show_search": True,
-        "show_all_applications": True,
-        "navigation": [
-            {
-                "title": "Operations",
-                "separator": True,
-                "items": [
-                    {"title": "Dashboard", "icon": "dashboard", "link": reverse_lazy("admin:index")},
-                    {"title": "Live Rydnow Map", "icon": "map", "link": reverse_lazy("rn_live_map")},
-                    {"title": "Bookings", "icon": "receipt_long", "link": reverse_lazy("admin:api_booking_changelist")},
-                ],
-            },
-            {
-                "title": "People",
-                "separator": True,
-                "items": [
-                    {"title": "Riders", "icon": "two_wheeler", "link": reverse_lazy("admin:api_riderprofile_changelist")},
-                    {"title": "Rider Documents", "icon": "badge", "link": reverse_lazy("admin:api_riderdocument_changelist")},
-                    {"title": "Customers", "icon": "group", "link": reverse_lazy("admin:api_customerprofile_changelist")},
-                ],
-            },
-            {
-                "title": "Money",
-                "separator": True,
-                "items": [
-                    {"title": "Withdrawals", "icon": "payments", "link": reverse_lazy("admin:api_withdrawalrequest_changelist")},
-                    {"title": "Payments", "icon": "credit_card", "link": reverse_lazy("admin:api_payment_changelist")},
-                    {"title": "Promo Codes", "icon": "sell", "link": reverse_lazy("admin:api_promocode_changelist")},
-                ],
-            },
-        ],
     },
 }
 
