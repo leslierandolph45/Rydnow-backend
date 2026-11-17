@@ -39,6 +39,7 @@ from rest_framework.decorators import api_view, permission_classes, throttle_cla
 from rest_framework import status
 from decimal import Decimal, InvalidOperation
 from django.utils import timezone
+from rest_framework import serializers, status
 
 
 from . import booking_services as services
@@ -723,3 +724,86 @@ def promo_validate(request):
         "discount_applied": str(discount),
         "final_fare": str(ride_fare - discount),
     })
+
+
+
+
+# --------------------------------------------------------------------------
+# Serializer
+# --------------------------------------------------------------------------
+class RiderBookingListSerializer(serializers.ModelSerializer):
+    """Read-only representation of a booking for the rider's history list."""
+
+    fare = serializers.DecimalField(
+        max_digits=10, decimal_places=2, coerce_to_string=True, read_only=True
+    )
+
+    class Meta:
+        model = Booking
+        fields = ("ref", "status", "pickup", "destination", "fare", "created_at")
+        read_only_fields = fields
+
+
+# --------------------------------------------------------------------------
+# Pagination
+# --------------------------------------------------------------------------
+class BookingPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+    def get_paginated_response(self, data):
+        # Keeps the original response shape: {"results": [...], "count": n}
+        response = super().get_paginated_response(data)
+        response.data = {
+            "count": self.page.paginator.count,
+            "next": response.data["next"],
+            "previous": response.data["previous"],
+            "results": data,
+        }
+        return response
+
+
+# --------------------------------------------------------------------------
+# View
+# --------------------------------------------------------------------------
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def rider_bookings(request):
+    """
+    List bookings for the authenticated rider, newest first.
+
+    Query params:
+        status     -- optional; filter by booking status (e.g. ?status=completed)
+        page       -- page number (default 1)
+        page_size  -- items per page (default 20, max 100)
+    """
+    rider = _rider_or_none(request.user)
+    if rider is None:
+        return _error(
+            "Rider profile required",
+            "no_rider_profile",
+            status.HTTP_403_FORBIDDEN,
+        )
+
+    queryset = (
+        Booking.objects.filter(rider=rider)
+        .only("ref", "status", "pickup", "destination", "fare", "created_at")
+        .order_by("-created_at", "-id")  # "-id" gives a stable tie-breaker
+    )
+
+    status_filter = request.query_params.get("status")
+    if status_filter:
+        valid_statuses = {choice for choice, _ in Booking._meta.get_field("status").choices}
+        if valid_statuses and status_filter not in valid_statuses:
+            return _error(
+                f"Invalid status '{status_filter}'",
+                "invalid_status",
+                status.HTTP_400_BAD_REQUEST,
+            )
+        queryset = queryset.filter(status=status_filter)
+
+    paginator = BookingPagination()
+    page = paginator.paginate_queryset(queryset, request)
+    serializer = RiderBookingListSerializer(page, many=True)
+    return paginator.get_paginated_response(serializer.data)
