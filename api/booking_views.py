@@ -44,7 +44,7 @@ from rest_framework import serializers, status
 
 from . import booking_services as services
 from . import pricing
-from .booking import (
+from .booking_serializers import (
     BookingCancelSerializer, BookingCreateSerializer, BookingDetailSerializer,
     BookingListSerializer, BookingStatusUpdateSerializer, BookingWebhookSerializer,
     NearbyRiderSerializer, NearbyRidersQuerySerializer, QuoteRequestSerializer,

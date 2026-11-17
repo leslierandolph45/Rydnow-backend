@@ -3,6 +3,7 @@ Booking serializers (api/booking.py).
 
 Matched to models.Booking, BookingStop, BookingStatusHistory and Payment:
   * Booking.rider is a USER (not a RiderProfile); rider details come from user.rider_profile.
+  * Booking.customer is a USER; contact details come from user.customer_profile.
   * BookingStop uses `order` (exposed to clients as `sequence`).
   * BookingStatusHistory uses `status` / `notes` and related_name="status_history".
   * Fare breakdown, rider earnings and platform fee live on the Payment row created with the
@@ -10,6 +11,10 @@ Matched to models.Booking, BookingStop, BookingStatusHistory and Payment:
 
 Clients may send either spelling of the service ("okada"/"ride", "parcel"/"delivery",
 "waste-bin"/"waste_collection") and either coordinate naming; both are normalised here.
+
+Query tip for views (avoids N+1 on list/detail endpoints):
+    Booking.objects.select_related("customer__customer_profile", "rider__rider_profile")
+                   .prefetch_related("stops", "status_history")
 """
 import math
 from collections.abc import Mapping
@@ -21,7 +26,8 @@ from rest_framework import serializers
 from . import pricing
 from .models import Booking, BookingStatusHistory, BookingStop, Payment
 
-MONEY = {"coerce_to_string": False}  # money is rendered as JSON numbers, like the quote endpoint
+# Money / coordinates are rendered as JSON numbers, like the quote endpoint.
+JSON_NUMBER = {"coerce_to_string": False}
 
 PAYMENT_METHOD_ALIASES = {
     "mobile_money": "momo", "mobile-money": "momo", "mtn": "momo", "momo": "momo",
@@ -57,6 +63,19 @@ def _with_aliases(data, aliases):
     return data
 
 
+def _rider_status_choices():
+    """
+    Statuses a rider may move a booking to. Resolved against the Booking.Status enum so the
+    serializer keeps working whichever name the model uses for the "trip underway" state
+    (IN_PROGRESS or EN_ROUTE); unknown names are skipped rather than raising at import time.
+    """
+    names = ("ACCEPTED", "IN_PROGRESS", "EN_ROUTE", "COMPLETED", "CANCELLED")
+    return [getattr(Booking.Status, n) for n in names if hasattr(Booking.Status, n)]
+
+
+# ---------------------------------------------------------------------------
+# Fields
+# ---------------------------------------------------------------------------
 class CoordinateField(serializers.Field):
     """Latitude/longitude as a Decimal rounded to 6 places (the precision signed into quotes)."""
     default_error_messages = {
@@ -152,7 +171,7 @@ class QuoteRequestSerializer(_ServiceMixin, serializers.Serializer):
 
 
 # ---------------------------------------------------------------------------
-# Create / status / cancel
+# Create / status / cancel / webhook
 # ---------------------------------------------------------------------------
 class BookingCreateSerializer(_ServiceMixin, serializers.Serializer):
     quote_token = serializers.CharField()
@@ -194,10 +213,7 @@ class BookingCreateSerializer(_ServiceMixin, serializers.Serializer):
 
 
 class BookingStatusUpdateSerializer(serializers.Serializer):
-    status = serializers.ChoiceField(choices=[
-        Booking.Status.ACCEPTED, Booking.Status.IN_PROGRESS,
-        Booking.Status.COMPLETED, Booking.Status.CANCELLED,
-    ])
+    status = serializers.ChoiceField(choices=_rider_status_choices())
     note = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
 
 
@@ -223,6 +239,7 @@ class NearbyRidersQuerySerializer(_ServiceMixin, serializers.Serializer):
     limit = serializers.IntegerField(min_value=1, max_value=50, default=20)
 
     def validate(self, attrs):
+        # NaN slips past min/max validators because every comparison with it is False.
         for key in ("lat", "lng", "radius_km"):
             if not math.isfinite(attrs[key]):
                 raise serializers.ValidationError({key: "A finite number is required."})
@@ -230,7 +247,7 @@ class NearbyRidersQuerySerializer(_ServiceMixin, serializers.Serializer):
 
 
 class NearbyRiderSerializer(serializers.Serializer):
-    """Public-safe rider card: no phone number, no exact identity documents."""
+    """Public-safe rider card: no phone number, no identity documents."""
     id = serializers.CharField()
     name = serializers.CharField()
     rating = serializers.FloatField()
@@ -242,7 +259,7 @@ class NearbyRiderSerializer(serializers.Serializer):
 
 
 # ---------------------------------------------------------------------------
-# Booking output
+# Helpers for output serializers
 # ---------------------------------------------------------------------------
 def _payment_of(booking):
     """Latest Payment for a booking, cached on the instance (Payment links by booking_ref)."""
@@ -253,10 +270,32 @@ def _payment_of(booking):
     return booking._payment_cache
 
 
+def _fare_of(booking):
+    payment = _payment_of(booking)
+    return ((payment.metadata or {}).get("fare") or {}) if payment else {}
+
+
 def _display_name(user):
     return (user.get_full_name() or user.get_username()) if user else ""
 
 
+def _customer_name(booking):
+    profile = getattr(booking.customer, "customer_profile", None)
+    if profile is not None and profile.full_name:
+        return profile.full_name
+    return _display_name(booking.customer)
+
+
+def _customer_phone(booking):
+    profile = getattr(booking.customer, "customer_profile", None)
+    if profile is None:
+        return ""
+    return str(profile.mobile) if profile.mobile else (profile.phone or "")
+
+
+# ---------------------------------------------------------------------------
+# Booking output
+# ---------------------------------------------------------------------------
 class BookingStopSerializer(serializers.ModelSerializer):
     sequence = serializers.IntegerField(source="order", read_only=True)
 
@@ -264,7 +303,7 @@ class BookingStopSerializer(serializers.ModelSerializer):
         model = BookingStop
         fields = ["sequence", "address", "latitude", "longitude"]
         read_only_fields = fields
-        extra_kwargs = {"latitude": MONEY, "longitude": MONEY}
+        extra_kwargs = {"latitude": JSON_NUMBER, "longitude": JSON_NUMBER}
 
 
 class BookingStatusHistorySerializer(serializers.ModelSerializer):
@@ -288,7 +327,7 @@ class BookingListSerializer(serializers.ModelSerializer):
             "subtotal", "discount_amount", "total_price", "currency", "created_at",
         ]
         read_only_fields = fields
-        extra_kwargs = {f: MONEY for f in ("subtotal", "discount_amount", "total_price")}
+        extra_kwargs = {f: JSON_NUMBER for f in ("subtotal", "discount_amount", "total_price")}
 
     def get_service_key(self, obj):
         return pricing.service_key_for_booking(obj.service_type)
@@ -322,7 +361,8 @@ class BookingDetailSerializer(BookingListSerializer):
         photo = None
         if profile.profile_photo:
             request = self.context.get("request")
-            photo = request.build_absolute_uri(profile.profile_photo.url) if request else profile.profile_photo.url
+            url = profile.profile_photo.url
+            photo = request.build_absolute_uri(url) if request else url
         return {
             "id": str(profile.public_id),
             "name": profile.full_name,
@@ -359,17 +399,14 @@ class RiderBookingDetailSerializer(BookingDetailSerializer):
         read_only_fields = fields
 
     def get_customer(self, obj):
-        profile = getattr(obj.customer, "customer_profile", None)
-        name = (profile.full_name if profile and profile.full_name else _display_name(obj.customer))
-        data = {"name": name}
+        data = {"name": _customer_name(obj)}
         request = self.context.get("request")
-        if request and obj.rider_id == request.user.pk and profile:
-            data["phone"] = str(profile.mobile) if profile.mobile else (profile.phone or "")
+        if request and obj.rider_id and obj.rider_id == request.user.pk:
+            data["phone"] = _customer_phone(obj)
         return data
 
     def get_earnings(self, obj):
-        payment = _payment_of(obj)
-        fare = (payment.metadata or {}).get("fare", {}) if payment else {}
+        fare = _fare_of(obj)
         return float(fare["rider_earnings"]) if "rider_earnings" in fare else None
 
     def get_payment(self, obj):
@@ -388,14 +425,12 @@ class StaffBookingDetailSerializer(BookingDetailSerializer):
         read_only_fields = fields
 
     def get_customer(self, obj):
-        profile = getattr(obj.customer, "customer_profile", None)
         return {
             "id": obj.customer_id,
-            "name": (profile.full_name if profile and profile.full_name else _display_name(obj.customer)),
-            "phone": (str(profile.mobile) if profile and profile.mobile else (profile.phone if profile else "")),
+            "name": _customer_name(obj),
+            "phone": _customer_phone(obj),
         }
 
     def get_fare(self, obj):
-        payment = _payment_of(obj)
-        return (payment.metadata or {}).get("fare") if payment else None
+        return _fare_of(obj) or None
 

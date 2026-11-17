@@ -45,8 +45,8 @@ logger = logging.getLogger(__name__)
 
 Status = Booking.Status
 ZERO = pricing.ZERO
-RIDER_COMMITTED = (Status.ACCEPTED, Status.IN_PROGRESS)       # a rider is tied up
-OPEN_STATUSES = (Status.PENDING, Status.ACCEPTED, Status.IN_PROGRESS)
+RIDER_COMMITTED = (Status.ACCEPTED, Status.EN_ROUTE)       # a rider is tied up
+OPEN_STATUSES = (Status.PENDING, Status.ACCEPTED, Status.EN_ROUTE)
 PROVIDER_PAYMENT_TTL = timedelta(minutes=15)
 
 

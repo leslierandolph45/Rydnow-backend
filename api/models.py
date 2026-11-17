@@ -32,6 +32,11 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from math import asin, cos, radians, sin, sqrt
 from django.db import models
+import hashlib
+import hmac
+import random
+
+
 
 from django.conf import settings
 from django.core.cache import cache
@@ -48,10 +53,22 @@ from django.utils import timezone
 from phonenumber_field.modelfields import PhoneNumberField
 from django.db.models import UniqueConstraint
 from django.utils.translation import gettext_lazy as _
-
 from . import pricing
 
+
 logger = logging.getLogger(__name__)
+
+
+
+ZERO = Decimal("0.00")
+# No 0/O, 1/I/L: easier for riders and customers to read out over the phone.
+REFERENCE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+LAT_VALIDATORS = [MinValueValidator(-90), MaxValueValidator(90)]
+LNG_VALIDATORS = [MinValueValidator(-180), MaxValueValidator(180)]
+MONEY_VALIDATORS = [MinValueValidator(ZERO)]
+
+
 
 
 # =====================================================================
@@ -114,6 +131,63 @@ class TimeStampedModel(models.Model):
 
     class Meta:
         abstract = True
+
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+# Headers that must never be written to the database.
+SENSITIVE_HEADERS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "proxy-authorization",
+        "x-api-key",
+        "x-auth-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+    }
+)
+REDACTED = "[REDACTED]"
+
+
+def redact_headers(headers):
+    """Return a plain dict copy of `headers` with secrets masked."""
+    if not headers:
+        return {}
+    return {
+        key: (REDACTED if str(key).lower() in SENSITIVE_HEADERS else value)
+        for key, value in dict(headers).items()
+    }
+
+
+def verify_hmac_signature(raw_body, signature, secret, *, algorithm="sha256"):
+    """
+    Check an HMAC signature over the raw request body, in constant time.
+
+    Call this BEFORE WebhookEvent.record(), because signature_valid is
+    write-once. Paystack, for example, signs the body with HMAC-SHA512 using
+    your secret key and sends the hex digest in the x-paystack-signature header,
+    so use algorithm="sha512" for it. Check each provider's docs for its scheme.
+    """
+    if not raw_body or not signature or not secret:
+        return False
+    if isinstance(raw_body, str):
+        raw_body = raw_body.encode("utf-8")
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    try:
+        digestmod = getattr(hashlib, algorithm)
+    except AttributeError:
+        raise ValueError(f"Unsupported hash algorithm: {algorithm}")
+
+    expected = hmac.new(secret, raw_body, digestmod).hexdigest()
+    received = signature.strip().lower()
+    prefix = f"{algorithm}="
+    if received.startswith(prefix):
+        received = received[len(prefix):]
+    return hmac.compare_digest(expected, received)
+
 
 
 MONEY_STEP = Decimal("0.01")
@@ -851,7 +925,7 @@ class CustomerWalletTransaction(AppendOnlyModel):
     reference = models.CharField(max_length=60, unique=True)
     description = models.CharField(max_length=255, blank=True, default="")
     currency = models.CharField(max_length=3, default=pricing.CURRENCY)
-    related_booking = models.ForeignKey("Booking", null=True, blank=True, on_delete=models.SET_NULL,
+    related_booking = models.ForeignKey("api.Booking", null=True, blank=True, on_delete=models.SET_NULL,
                                         related_name="customer_wallet_transactions")
     status = models.CharField(max_length=20, default="completed")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -931,7 +1005,7 @@ class LoyaltyTransaction(models.Model):
     account = models.ForeignKey(LoyaltyAccount, on_delete=models.CASCADE, related_name="transactions")
     points = models.IntegerField()
     reason = models.CharField(max_length=100)
-    booking = models.ForeignKey("Booking", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    booking = models.ForeignKey("api.Booking", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     reference = models.CharField(max_length=60, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -1923,7 +1997,7 @@ class RiderLocationPing(models.Model):
     # Breadcrumb trail for trip replay and disputes. At scale keep LIVE position in Redis and
     #write a sampled ping only during active trips; prune after ~90 days.
     rider = models.ForeignKey(RiderProfile, on_delete=models.CASCADE, related_name="location_pings")
-    booking = models.ForeignKey("Booking", null=True, blank=True, on_delete=models.SET_NULL, related_name="pings")
+    booking = models.ForeignKey("api.Booking", null=True, blank=True, on_delete=models.SET_NULL, related_name="pings")
     lat = models.FloatField()
     lng = models.FloatField()
     speed_kmh = models.FloatField(null=True, blank=True)
@@ -2137,7 +2211,7 @@ class BookingStatusHistory(models.Model):
     """Immutable history of every status change, kept for audit."""
 
     booking = models.ForeignKey(
-        "Booking",
+        "api.Booking",
         on_delete=models.CASCADE,
         related_name="status_history",
     )
@@ -2654,7 +2728,7 @@ class DispatchOffer(models.Model):
         CANCELLED = "cancelled", "Cancelled"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    booking = models.ForeignKey("Booking", on_delete=models.CASCADE, related_name="dispatch_offers")
+    booking = models.ForeignKey("api.Booking", on_delete=models.CASCADE, related_name="dispatch_offers")
     rider = models.ForeignKey("RiderProfile", on_delete=models.CASCADE, related_name="dispatch_offers")
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING, db_index=True)
     round_no = models.PositiveSmallIntegerField(default=1)
@@ -5590,43 +5664,100 @@ class PromoRedemption(models.Model):
 
 
 class Booking(models.Model):
-    """A customer booking a ride, delivery or waste collection."""
+    """A customer booking for an Okada ride, parcel delivery or waste collection."""
 
+    # ------------------------------------------------------------------
+    # Choices
+    # ------------------------------------------------------------------
     class ServiceType(models.TextChoices):
-        RIDE = "ride", "Ride"
-        DELIVERY = "delivery", "Delivery"
-        WASTE_COLLECTION = "waste_collection", "Waste Collection"
+        OKADA = "okada", "Okada Ride"
+        PARCEL = "parcel", "Parcel Delivery"
+        WASTE_BIN = "waste-bin", "Waste Collection"
 
     class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
         PENDING = "pending", "Pending"
         ACCEPTED = "accepted", "Accepted"
-        IN_PROGRESS = "in_progress", "In Progress"
+        EN_ROUTE = "en-route", "En Route"
+        ARRIVED = "arrived", "Arrived"
         COMPLETED = "completed", "Completed"
         CANCELLED = "cancelled", "Cancelled"
+        FAILED = "failed", "Failed"
+
+    class PaymentStatus(models.TextChoices):
+        UNPAID = "unpaid", "Unpaid"
+        PAID = "paid", "Paid"
+        REFUNDED = "refunded", "Refunded"
+
+    class PaymentMethod(models.TextChoices):
+        CASH = "cash", "Cash"
+        MOBILE_MONEY = "momo", "Mobile Money"
+        CARD = "card", "Card"
+        WALLET = "wallet", "Wallet"
 
     class Currency(models.TextChoices):
         GHS = "GHS", "Ghana Cedi"
         GBP = "GBP", "British Pound"
 
-    # Allowed status changes. Anything not listed here is rejected.
-    ALLOWED_TRANSITIONS = {
-        Status.PENDING: {Status.ACCEPTED, Status.CANCELLED},
-        Status.ACCEPTED: {Status.IN_PROGRESS, Status.CANCELLED},
-        Status.IN_PROGRESS: {Status.COMPLETED, Status.CANCELLED},
+    # ------------------------------------------------------------------
+    # State machine configuration
+    # ------------------------------------------------------------------
+    # Anything not listed here is rejected.
+    TRANSITIONS = {
+        Status.DRAFT: {Status.PENDING, Status.CANCELLED},
+        Status.PENDING: {Status.ACCEPTED, Status.CANCELLED, Status.FAILED},
+        Status.ACCEPTED: {Status.EN_ROUTE, Status.CANCELLED, Status.FAILED},
+        Status.EN_ROUTE: {Status.ARRIVED, Status.CANCELLED, Status.FAILED},
+        Status.ARRIVED: {Status.COMPLETED, Status.CANCELLED, Status.FAILED},
         Status.COMPLETED: set(),
         Status.CANCELLED: set(),
+        Status.FAILED: set(),
+    }
+    TERMINAL_STATUSES = {Status.COMPLETED, Status.CANCELLED, Status.FAILED}
+    ACTIVE_STATUSES = {Status.PENDING, Status.ACCEPTED, Status.EN_ROUTE, Status.ARRIVED}
+
+    # Which timestamp each status stamps when entered.
+    _STATUS_TIMESTAMPS = {
+        Status.PENDING: "requested_at",
+        Status.ACCEPTED: "accepted_at",
+        Status.EN_ROUTE: "started_at",
+        Status.ARRIVED: "arrived_at",
+        Status.COMPLETED: "completed_at",
+        Status.CANCELLED: "cancelled_at",
+        Status.FAILED: "failed_at",
     }
 
-    # Identity
+    # Services that have no destination (the collector comes to the pickup).
+    SERVICES_WITHOUT_DESTINATION = {ServiceType.WASTE_BIN}
+
+    REFERENCE_PREFIX = "BK-"
+    REFERENCE_LENGTH = 8
+    REFERENCE_RETRIES = 5
+
+    # ------------------------------------------------------------------
+    # Core
+    # ------------------------------------------------------------------
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     reference = models.CharField(
         max_length=12,
         unique=True,
         editable=False,
+        blank=True,
         help_text="Customer-facing booking ID, e.g. BK-7K2M9PQX.",
     )
+    service_type = models.CharField(
+        max_length=20, choices=ServiceType.choices, db_index=True
+    )
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.DRAFT, db_index=True
+    )
+
+    # ------------------------------------------------------------------
+    # Parties
+    # ------------------------------------------------------------------
     customer = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="bookings",
     )
     rider = models.ForeignKey(
@@ -5634,91 +5765,142 @@ class Booking(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="bookings_as_rider",
-    )
-    service_type = models.CharField(
-        max_length=30, choices=ServiceType.choices, db_index=True
-    )
-    status = models.CharField(
-        max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True
+        related_name="assigned_bookings",
     )
 
+    # ------------------------------------------------------------------
     # Locations
+    # ------------------------------------------------------------------
     pickup_address = models.CharField(max_length=255)
-    pickup_latitude = models.DecimalField(
-        max_digits=9, decimal_places=6, null=True, blank=True
-    )
-    pickup_longitude = models.DecimalField(
-        max_digits=9, decimal_places=6, null=True, blank=True
-    )
-    dropoff_address = models.CharField(
+    pickup_lat = models.FloatField(null=True, blank=True, validators=LAT_VALIDATORS)
+    pickup_lng = models.FloatField(null=True, blank=True, validators=LNG_VALIDATORS)
+    destination_address = models.CharField(
         max_length=255,
         blank=True,
-        help_text="Leave blank for services with no destination (e.g. waste pickup).",
+        help_text="Required for Okada and Parcel. Leave blank for waste collection.",
     )
-    dropoff_latitude = models.DecimalField(
-        max_digits=9, decimal_places=6, null=True, blank=True
-    )
-    dropoff_longitude = models.DecimalField(
-        max_digits=9, decimal_places=6, null=True, blank=True
-    )
-    scheduled_for = models.DateTimeField(
-        null=True, blank=True, help_text="Blank = as soon as possible."
-    )
-    notes = models.TextField(blank=True)
+    destination_lat = models.FloatField(null=True, blank=True, validators=LAT_VALIDATORS)
+    destination_lng = models.FloatField(null=True, blank=True, validators=LNG_VALIDATORS)
 
-    # Pricing (total_price is always calculated, never typed in by hand)
+    # ------------------------------------------------------------------
+    # Service details
+    # ------------------------------------------------------------------
+    notes = models.TextField(blank=True, help_text="Instructions for the rider/collector")
+    scheduled_for = models.DateTimeField(
+        null=True, blank=True, help_text="Leave empty for immediate service"
+    )
+    details = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Service-specific data (parcel size/weight, bin count, passenger count...)",
+    )
+
+    # ------------------------------------------------------------------
+    # Pricing & payment
+    # ------------------------------------------------------------------
+    # When `subtotal` is set, total_fare is always recalculated as
+    # subtotal - discount_amount (never below zero). When `subtotal` is empty,
+    # total_fare is left exactly as written, so existing code that sets
+    # total_fare directly keeps working.
     subtotal = models.DecimalField(
-        max_digits=10, decimal_places=2, validators=[MinValueValidator(ZERO)]
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=MONEY_VALIDATORS,
+        help_text="Fare before any discount.",
     )
     discount_amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
         default=ZERO,
-        validators=[MinValueValidator(ZERO)],
+        validators=MONEY_VALIDATORS,
+        help_text="Promo or referral discount applied to this booking.",
     )
-    total_price = models.DecimalField(max_digits=10, decimal_places=2, editable=False)
+    total_fare = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=MONEY_VALIDATORS,
+    )
     currency = models.CharField(
         max_length=3, choices=Currency.choices, default=Currency.GHS
     )
+    payment_method = models.CharField(
+        max_length=10, choices=PaymentMethod.choices, default=PaymentMethod.CASH
+    )
+    payment_status = models.CharField(
+        max_length=10,
+        choices=PaymentStatus.choices,
+        default=PaymentStatus.UNPAID,
+        db_index=True,
+    )
 
-    # Lifecycle timestamps
-    created_at = models.DateTimeField(auto_now_add=True)
+    # ------------------------------------------------------------------
+    # Estimates
+    # ------------------------------------------------------------------
+    estimated_duration = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Minutes"
+    )
+    estimated_distance = models.FloatField(
+        null=True, blank=True, validators=[MinValueValidator(0)], help_text="Kilometers"
+    )
+
+    # ------------------------------------------------------------------
+    # Lifecycle timestamps (stamped by the state machine, never by hand)
+    # ------------------------------------------------------------------
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
     updated_at = models.DateTimeField(auto_now=True)
+    requested_at = models.DateTimeField(null=True, blank=True, editable=False)
     accepted_at = models.DateTimeField(null=True, blank=True, editable=False)
     started_at = models.DateTimeField(null=True, blank=True, editable=False)
+    arrived_at = models.DateTimeField(null=True, blank=True, editable=False)
     completed_at = models.DateTimeField(null=True, blank=True, editable=False)
     cancelled_at = models.DateTimeField(null=True, blank=True, editable=False)
+    failed_at = models.DateTimeField(null=True, blank=True, editable=False)
 
-    # Cancellation details
+    # ------------------------------------------------------------------
+    # Cancellation / failure details
+    # ------------------------------------------------------------------
     cancelled_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         editable=False,
-        related_name="bookings_cancelled",
+        related_name="cancelled_bookings",
     )
-    cancellation_reason = models.CharField(max_length=255, blank=True, editable=False)
+    cancellation_reason = models.CharField(max_length=255, blank=True)
+    failure_reason = models.CharField(max_length=255, blank=True)
 
     class Meta:
-        db_table = "bookings"
         ordering = ["-created_at"]
-        verbose_name = "Booking"
-        verbose_name_plural = "Bookings"
+        verbose_name = "booking"
+        verbose_name_plural = "bookings"
         indexes = [
-            models.Index(fields=["customer", "-created_at"]),
-            models.Index(fields=["rider", "status"]),
-            models.Index(fields=["status", "-created_at"]),
+            models.Index(fields=["customer", "-created_at"], name="booking_customer_idx"),
+            models.Index(fields=["rider", "status"], name="booking_rider_status_idx"),
+            models.Index(
+                fields=["service_type", "status"], name="booking_service_status_idx"
+            ),
+            models.Index(
+                fields=["status", "-created_at"], name="booking_status_created_idx"
+            ),
         ]
         constraints = [
             models.CheckConstraint(
-                condition=Q(total_price__gte=0),
-                name="booking_total_price_gte_0",
+                condition=Q(total_fare__isnull=True) | Q(total_fare__gte=0),
+                name="booking_fare_non_negative",
             ),
             models.CheckConstraint(
-                condition=Q(discount_amount__lte=F("subtotal")),
+                condition=Q(subtotal__isnull=True)
+                | Q(discount_amount__lte=F("subtotal")),
                 name="booking_discount_lte_subtotal",
+            ),
+            models.CheckConstraint(
+                condition=~Q(status="cancelled") | Q(cancelled_at__isnull=False),
+                name="booking_cancelled_has_timestamp",
             ),
             models.CheckConstraint(
                 condition=~Q(rider=F("customer")),
@@ -5726,437 +5908,242 @@ class Booking(models.Model):
             ),
         ]
 
-
-
     def __str__(self):
-        return f"{self.reference} — {self.get_service_type_display()} ({self.get_status_display()})"
+        return (
+            f"{self.reference or self.pk} · "
+            f"{self.get_service_type_display()} · {self.get_status_display()}"
+        )
 
     # ------------------------------------------------------------------
-    # Saving
+    # Persistence
     # ------------------------------------------------------------------
     def save(self, *args, **kwargs):
-        self.total_price = max(self.subtotal - self.discount_amount, ZERO)
+        # Partial saves (update_fields) are used by the state machine and must
+        # not touch pricing; full saves always recalculate it.
+        if kwargs.get("update_fields") is None:
+            self._apply_pricing()
 
         if self.reference:
             return super().save(*args, **kwargs)
 
         # New booking: generate a reference, retrying on the rare collision.
-        for attempt in range(5):
+        for attempt in range(self.REFERENCE_RETRIES):
             self.reference = self._generate_reference()
             try:
                 with transaction.atomic():
                     return super().save(*args, **kwargs)
             except IntegrityError:
-                if attempt == 4:
+                if attempt == self.REFERENCE_RETRIES - 1:
                     raise
                 self.reference = ""
 
-    @staticmethod
-    def _generate_reference():
-        return "BK-" + "".join(secrets.choice(REFERENCE_ALPHABET) for _ in range(8))
+    @classmethod
+    def _generate_reference(cls) -> str:
+        suffix = "".join(
+            secrets.choice(REFERENCE_ALPHABET) for _ in range(cls.REFERENCE_LENGTH)
+        )
+        return f"{cls.REFERENCE_PREFIX}{suffix}"
 
+    def _apply_pricing(self) -> None:
+        if self.subtotal is not None:
+            discount = self.discount_amount or ZERO
+            self.total_fare = max(self.subtotal - discount, ZERO)
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
     def clean(self):
+        super().clean()
         errors = {}
+
         if self.rider_id and self.rider_id == self.customer_id:
             errors["rider"] = "A rider cannot accept their own booking."
-        if self.discount_amount and self.subtotal is not None:
-            if self.discount_amount > self.subtotal:
-                errors["discount_amount"] = "Discount cannot exceed the subtotal."
-        if self.service_type != self.ServiceType.WASTE_COLLECTION and not self.dropoff_address:
-            errors["dropoff_address"] = "A drop-off address is required for this service."
+
+        if (
+            self._state.adding
+            and self.scheduled_for
+            and self.scheduled_for < timezone.now()
+        ):
+            errors["scheduled_for"] = "Scheduled time cannot be in the past."
+
+        if (
+            self.service_type
+            and self.service_type not in self.SERVICES_WITHOUT_DESTINATION
+            and not self.destination_address
+        ):
+            errors["destination_address"] = (
+                "A destination address is required for this service."
+            )
+
+        if (
+            self.subtotal is not None
+            and self.discount_amount
+            and self.discount_amount > self.subtotal
+        ):
+            errors["discount_amount"] = "Discount cannot exceed the subtotal."
+
+        for prefix in ("pickup", "destination"):
+            lat = getattr(self, f"{prefix}_lat")
+            lng = getattr(self, f"{prefix}_lng")
+            if (lat is None) != (lng is None):
+                errors[f"{prefix}_lat"] = (
+                    f"Provide both latitude and longitude for {prefix}, or neither."
+                )
+
         if errors:
             raise ValidationError(errors)
 
     # ------------------------------------------------------------------
-    # State helpers
+    # State machine
     # ------------------------------------------------------------------
-    @property
-    def is_active(self):
-        return self.status in {
-            self.Status.PENDING,
-            self.Status.ACCEPTED,
-            self.Status.IN_PROGRESS,
-        }
+    def can_transition_to(self, new_status) -> bool:
+        return new_status in self.TRANSITIONS.get(self.status, set())
 
-    @property
-    def is_finished(self):
-        return not self.is_active
-
-    def can_transition_to(self, new_status):
-        return new_status in self.ALLOWED_TRANSITIONS.get(self.status, set())
-
-    def _transition(self, new_status, timestamp_field=None, **extra):
+    def _transition(self, new_status, *, extra=None, guard=None):
         """
-        Move to `new_status` under a row lock so two people (e.g. two riders
-        tapping Accept) can never both win.
+        Move to `new_status` under a row lock, so two people (for example two
+        riders tapping Accept at the same moment) can never both win.
+
+        `extra` is a dict of additional fields to set in the same save.
+        `guard` is an optional callable(locked_booking) that may raise
+        ValidationError, evaluated against the freshly locked row.
         """
+        if new_status not in self.Status.values:
+            raise ValidationError(f"Unknown booking status '{new_status}'.")
+
         with transaction.atomic():
-            locked = type(self).objects.select_for_update().get(pk=self.pk)
+            locked = type(self)._default_manager.select_for_update().get(pk=self.pk)
+
             if not locked.can_transition_to(new_status):
                 raise ValidationError(
                     f"Cannot change a {locked.get_status_display().lower()} booking "
                     f"to {self.Status(new_status).label.lower()}."
                 )
+            if guard is not None:
+                guard(locked)
 
             locked.status = new_status
-            update_fields = ["status", "updated_at"]
-            if timestamp_field:
-                setattr(locked, timestamp_field, timezone.now())
-                update_fields.append(timestamp_field)
-            for field, value in extra.items():
-                setattr(locked, field, value)
-                update_fields.append(field)
-            locked.save(update_fields=update_fields)
+            update_fields = {"status", "updated_at"}
 
-            # Sync the caller's instance with what was saved.
+            stamp_field = self._STATUS_TIMESTAMPS.get(new_status)
+            if stamp_field:
+                setattr(locked, stamp_field, timezone.now())
+                update_fields.add(stamp_field)
+
+            for field, value in (extra or {}).items():
+                setattr(locked, field, value)
+                update_fields.add(field)
+
+            locked.save(update_fields=sorted(update_fields))
+
+            # Keep the caller's instance in sync with what was saved.
             for field in update_fields:
                 setattr(self, field, getattr(locked, field))
         return self
 
+    @staticmethod
+    def _ensure_can_cancel(locked, by_user):
+        """Only the customer, the assigned rider or staff may cancel."""
+        if by_user is None or getattr(by_user, "is_staff", False):
+            return
+        if by_user.pk not in {locked.customer_id, locked.rider_id}:
+            raise ValidationError(
+                "Only the customer, the assigned rider or staff can cancel this booking."
+            )
+
     # ------------------------------------------------------------------
     # Lifecycle actions
     # ------------------------------------------------------------------
+    def submit(self):
+        """Customer confirms the draft; it becomes visible to dispatch."""
+        return self._transition(self.Status.PENDING)
+
     def accept(self, rider):
         if rider.pk == self.customer_id:
             raise ValidationError("A rider cannot accept their own booking.")
-        return self._transition(
-            self.Status.ACCEPTED, "accepted_at", rider=rider
-        )
+        return self._transition(self.Status.ACCEPTED, extra={"rider": rider})
 
     def start(self):
-        return self._transition(self.Status.IN_PROGRESS, "started_at")
+        """Rider is on the way to the pickup."""
+        return self._transition(self.Status.EN_ROUTE)
+
+    def arrive(self):
+        return self._transition(self.Status.ARRIVED)
 
     def complete(self):
-        return self._transition(self.Status.COMPLETED, "completed_at")
+        return self._transition(self.Status.COMPLETED)
 
-    def cancel(self, by_user, reason=""):
+    def cancel(self, by_user=None, reason=""):
         return self._transition(
             self.Status.CANCELLED,
-            "cancelled_at",
-            cancelled_by=by_user,
-            cancellation_reason=reason[:255],
+            extra={"cancelled_by": by_user, "cancellation_reason": reason[:255]},
+            guard=lambda locked: self._ensure_can_cancel(locked, by_user),
         )
 
-
-
-# Headers that must never be written to the database.
-SENSITIVE_HEADERS = {
-    "authorization",
-    "cookie",
-    "set-cookie",
-    "proxy-authorization",
-    "x-api-key",
-    "x-auth-token",
-}
-REDACTED = "[REDACTED]"
-
-
-def redact_headers(headers):
-    """Return a copy of `headers` with secrets masked."""
-    if not headers:
-        return {}
-    return {
-        key: (REDACTED if str(key).lower() in SENSITIVE_HEADERS else value)
-        for key, value in dict(headers).items()
-    }
-
-
-class WebhookEvent(models.Model):
-    """
-    Audit log of every incoming or outgoing webhook.
-
-    The raw data (payload, headers, raw_body, ...) is write-once: it can't be
-    changed after creation. Only processing state can be updated.
-    """
-
-    MAX_ATTEMPTS = 5
-    RETRY_BASE_SECONDS = 30
-    RETRY_MAX_SECONDS = 3600
-
-    class Direction(models.TextChoices):
-        INBOUND = "inbound", "Inbound"
-        OUTBOUND = "outbound", "Outbound"
-
-    class Status(models.TextChoices):
-        PENDING = "pending", "Pending"
-        PROCESSING = "processing", "Processing"
-        PROCESSED = "processed", "Processed"
-        FAILED = "failed", "Failed"
-        SKIPPED = "skipped", "Skipped"
-
-    # Fields that may be updated after creation; everything else is locked.
-    MUTABLE_FIELDS = frozenset(
-        {
-            "status",
-            "attempts",
-            "last_attempt_at",
-            "next_retry_at",
-            "error_message",
-            "result_note",
-            "processed_at",
-        }
-    )
-
-    # What happened
-    direction = models.CharField(
-        max_length=10, choices=Direction.choices, default=Direction.INBOUND
-    )
-    event_type = models.CharField(
-        max_length=100,
-        db_index=True,
-        help_text="e.g. payment.completed, booking.updated",
-    )
-    source = models.CharField(
-        max_length=50,
-        blank=True,
-        help_text="Which service sent/receives this: momo, stripe, paystack, etc.",
-    )
-    external_id = models.CharField(
-        max_length=255,
-        blank=True,
-        help_text="The provider's own event ID. Used to ignore duplicate deliveries.",
-    )
-
-    # Data, stored exactly as received
-    payload = models.JSONField(default=dict)
-    headers = models.JSONField(default=dict, blank=True)
-    raw_body = models.TextField(
-        blank=True,
-        help_text="Unparsed request body, needed to re-verify signatures.",
-    )
-    ip_address = models.GenericIPAddressField(null=True, blank=True)
-    signature_valid = models.BooleanField(
-        null=True,
-        blank=True,
-        help_text="None = not checked, True = verified, False = failed verification.",
-    )
-
-    # Processing state
-    status = models.CharField(
-        max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True
-    )
-    attempts = models.PositiveSmallIntegerField(default=0)
-    last_attempt_at = models.DateTimeField(null=True, blank=True)
-    next_retry_at = models.DateTimeField(null=True, blank=True)
-    error_message = models.TextField(blank=True)
-    result_note = models.TextField(blank=True, help_text="What we did with this event.")
-
-    # Timestamps
-    received_at = models.DateTimeField(default=timezone.now, db_index=True)
-    processed_at = models.DateTimeField(null=True, blank=True)
-
-    
-
-    class Meta:
-        db_table = "webhook_events"
-        ordering = ["-received_at"]
-        verbose_name = "Webhook Event"
-        verbose_name_plural = "Webhook Events"
-        indexes = [
-            models.Index(fields=["event_type", "status"]),
-            models.Index(fields=["source", "-received_at"]),
-            models.Index(fields=["status", "next_retry_at"]),
-        ]
-        constraints = [
-            # The same provider event can only be logged once per direction.
-            models.UniqueConstraint(
-                fields=["source", "external_id", "direction"],
-                condition=~Q(external_id=""),
-                name="unique_webhook_external_id",
-            ),
-        ]
-
-    def __str__(self):
-        return f"{self.event_type} — {self.status} @ {self.received_at:%Y-%m-%d %H:%M}"
-
-    # ------------------------------------------------------------------
-    # Write-once protection
-    # ------------------------------------------------------------------
-    def save(self, *args, **kwargs):
-        if not self._state.adding:
-            update_fields = kwargs.get("update_fields")
-            if update_fields is None:
-                raise ValueError(
-                    "WebhookEvent rows are immutable. Pass update_fields "
-                    "limited to processing fields."
-                )
-            locked = set(update_fields) - self.MUTABLE_FIELDS
-            if locked:
-                raise ValueError(
-                    f"Cannot modify immutable webhook fields: {sorted(locked)}"
-                )
-        super().save(*args, **kwargs)
-
-    # ------------------------------------------------------------------
-    # Creating events
-    # ------------------------------------------------------------------
-    @classmethod
-    def record(
-        cls,
-        event_type,
-        payload,
-        *,
-        source="",
-        headers=None,
-        external_id="",
-        direction=Direction.INBOUND,
-        raw_body="",
-        ip_address=None,
-        signature_valid=None,
-    ):
-        """
-        Log a webhook. Returns (event, created).
-
-        If the provider re-sends an event with the same external_id, the
-        original row is returned with created=False, so you can reply 200
-        without processing it twice.
-        """
-        try:
-            with transaction.atomic():
-                event = cls.objects.create(
-                    direction=direction,
-                    event_type=event_type,
-                    source=source,
-                    external_id=external_id,
-                    payload=payload,
-                    headers=redact_headers(headers),
-                    raw_body=raw_body,
-                    ip_address=ip_address,
-                    signature_valid=signature_valid,
-                )
-            return event, True
-        except IntegrityError:
-            if not external_id:
-                raise
-            existing = cls.objects.get(
-                source=source, external_id=external_id, direction=direction
-            )
-            return existing, False
-
-    # ------------------------------------------------------------------
-    # Processing
-    # ------------------------------------------------------------------
-    def claim(self):
-        """
-        Atomically take this event for processing. Returns False if another
-        worker already has it or it's finished, so no event runs twice.
-        """
-        with transaction.atomic():
-            locked = type(self).objects.select_for_update().get(pk=self.pk)
-            if locked.status not in {self.Status.PENDING, self.Status.FAILED}:
-                return False
-            if locked.attempts >= self.MAX_ATTEMPTS:
-                return False
-
-            locked.status = self.Status.PROCESSING
-            locked.attempts += 1
-            locked.last_attempt_at = timezone.now()
-            locked.next_retry_at = None
-            locked.save(
-                update_fields=["status", "attempts", "last_attempt_at", "next_retry_at"]
-            )
-            self._sync_from(locked, ["status", "attempts", "last_attempt_at", "next_retry_at"])
-        return True
-
-    def process(self, handler):
-        """
-        Run `handler(event)` safely: claim, call, then record the outcome.
-        The handler may return a short note describing what it did.
-        Returns True on success.
-        """
-        if not self.claim():
-            return False
-        try:
-            note = handler(self)
-        except Exception as exc:
-            logger.exception("Webhook %s failed (attempt %s)", self.pk, self.attempts)
-            self.mark_failed(f"{type(exc).__name__}: {exc}")
-            return False
-        self.mark_processed(note or "")
-        return True
-
-    def mark_processed(self, note=""):
-        self.status = self.Status.PROCESSED
-        self.processed_at = timezone.now()
-        self.result_note = note
-        self.error_message = ""
-        self.next_retry_at = None
-        self.save(
-            update_fields=[
-                "status",
-                "processed_at",
-                "result_note",
-                "error_message",
-                "next_retry_at",
-            ]
+    def fail(self, reason=""):
+        return self._transition(
+            self.Status.FAILED, extra={"failure_reason": reason[:255]}
         )
 
-    def mark_failed(self, error_message=""):
-        """Record the failure and schedule a retry with exponential backoff."""
-        self.status = self.Status.FAILED
-        self.error_message = error_message
-        if self.attempts < self.MAX_ATTEMPTS:
-            delay = min(
-                self.RETRY_BASE_SECONDS * 2 ** max(self.attempts - 1, 0),
-                self.RETRY_MAX_SECONDS,
-            )
-            self.next_retry_at = timezone.now() + timedelta(seconds=delay)
-            self.processed_at = None
-        else:
-            self.next_retry_at = None  # out of attempts
-            self.processed_at = timezone.now()
-        self.save(
-            update_fields=["status", "error_message", "next_retry_at", "processed_at"]
-        )
+    def transition_to(self, new_status, *, reason="", by_user=None):
+        """Generic entry point, routed through the same locked transition."""
+        if new_status == self.Status.CANCELLED:
+            return self.cancel(by_user=by_user, reason=reason)
+        if new_status == self.Status.FAILED:
+            return self.fail(reason=reason)
+        return self._transition(new_status)
 
-    def mark_skipped(self, note=""):
-        """For events we deliberately ignore (unknown type, test ping, etc.)."""
-        self.status = self.Status.SKIPPED
-        self.processed_at = timezone.now()
-        self.result_note = note
-        self.save(update_fields=["status", "processed_at", "result_note"])
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    @property
+    def is_active(self) -> bool:
+        return self.status in self.ACTIVE_STATUSES
 
     @property
-    def can_retry(self):
-        return self.status == self.Status.FAILED and self.attempts < self.MAX_ATTEMPTS
+    def is_terminal(self) -> bool:
+        return self.status in self.TERMINAL_STATUSES
 
-    def _sync_from(self, other, fields):
-        for field in fields:
-            setattr(self, field, getattr(other, field))
+    @property
+    def is_scheduled(self) -> bool:
+        return self.scheduled_for is not None
+
+    @property
+    def is_paid(self) -> bool:
+        return self.payment_status == self.PaymentStatus.PAID
+
+    @property
+    def requires_destination(self) -> bool:
+        return self.service_type not in self.SERVICES_WITHOUT_DESTINATION
+
+    @property
+    def has_pickup_coords(self) -> bool:
+        return self.pickup_lat is not None and self.pickup_lng is not None
+
+    @property
+    def has_destination_coords(self) -> bool:
+        return self.destination_lat is not None and self.destination_lng is not None
 
 
-
-
-class BookingStop(TimeStampedModel):
-    """Intermediate stops for multi-drop deliveries/rides."""
+class BookingStop(models.Model):
+    """An intermediate stop on a multi-drop delivery or ride."""
 
     booking = models.ForeignKey(
-        "Booking",
+        Booking,
         on_delete=models.CASCADE,
         related_name="stops",
     )
     address = models.CharField(max_length=255)
-    latitude = models.DecimalField(
-        max_digits=9,
-        decimal_places=6,
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(Decimal("-90")), MaxValueValidator(Decimal("90"))],
-    )
-    longitude = models.DecimalField(
-        max_digits=9,
-        decimal_places=6,
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(Decimal("-180")), MaxValueValidator(Decimal("180"))],
-    )
+    latitude = models.FloatField(null=True, blank=True, validators=LAT_VALIDATORS)
+    longitude = models.FloatField(null=True, blank=True, validators=LNG_VALIDATORS)
     order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "booking_stops"
         ordering = ["booking_id", "order"]
         constraints = [
-            UniqueConstraint(
+            models.UniqueConstraint(
                 fields=["booking", "order"],
                 name="unique_stop_order_per_booking",
             ),
@@ -6171,8 +6158,7 @@ class BookingStop(TimeStampedModel):
 
     def __str__(self) -> str:
         # Uses booking_id to avoid an extra query per row.
-        return f"Booking #{self.booking_id} — Stop {self.order}: {self.address[:20]}"
-
+        return f"Booking {self.booking_id} · Stop {self.order}: {self.address[:20]}"
 
 class SystemAlertQuerySet(models.QuerySet):
     """Reusable query helpers for system alerts."""
@@ -6636,3 +6622,395 @@ class RecurringBooking(models.Model):
             r.save(update_fields=["status", "cancelled_at", "cancel_reason", "updated_at"])
         self.refresh_from_db()
         return self
+
+
+
+
+# ----------------------------------------------------------------------
+# QuerySet
+# ----------------------------------------------------------------------
+class WebhookEventQuerySet(models.QuerySet):
+    """Queries for workers and monitoring, plus write-once protection."""
+
+    def due(self, now=None):
+        """
+        Events a worker should pick up now: new ones, failed ones whose
+        backoff has elapsed, and ones stuck in 'processing' because a worker
+        died. Typical use in a Celery beat task:
+
+            for event in WebhookEvent.objects.due()[:100]:
+                process_webhook_event.delay(event.pk)
+        """
+        now = now or timezone.now()
+        model = self.model
+        stale_cutoff = now - timedelta(seconds=model.STALE_PROCESSING_SECONDS)
+        return self.filter(attempts__lt=model.MAX_ATTEMPTS).filter(
+            Q(status=model.Status.PENDING)
+            | Q(status=model.Status.FAILED, next_retry_at__lte=now)
+            | Q(status=model.Status.PROCESSING, last_attempt_at__lte=stale_cutoff)
+        )
+
+    def exhausted(self):
+        """Failed events that ran out of attempts and need a human."""
+        return self.filter(
+            status=self.model.Status.FAILED, attempts__gte=self.model.MAX_ATTEMPTS
+        )
+
+    def purge_finished(self, *, older_than_days=90):
+        """Delete processed/skipped events older than the retention window."""
+        cutoff = timezone.now() - timedelta(days=older_than_days)
+        finished = [self.model.Status.PROCESSED, self.model.Status.SKIPPED]
+        deleted, _ = self.filter(status__in=finished, processed_at__lt=cutoff).delete()
+        return deleted
+
+    # Bulk operations bypass save(), so they get the same write-once guard.
+    def update(self, **kwargs):
+        locked = set(kwargs) - self.model.MUTABLE_FIELDS
+        if locked:
+            raise ValueError(f"Cannot modify immutable webhook fields: {sorted(locked)}")
+        return super().update(**kwargs)
+
+    def bulk_update(self, objs, fields, *args, **kwargs):
+        locked = set(fields) - self.model.MUTABLE_FIELDS
+        if locked:
+            raise ValueError(f"Cannot modify immutable webhook fields: {sorted(locked)}")
+        return super().bulk_update(objs, fields, *args, **kwargs)
+
+
+# ----------------------------------------------------------------------
+# Model
+# ----------------------------------------------------------------------
+class WebhookEvent(models.Model):
+    """
+    Audit log of every incoming or outgoing webhook.
+
+    The raw data (payload, headers, raw_body, ...) is write-once: it can't be
+    changed after creation. Only processing state can be updated.
+    """
+
+    MAX_ATTEMPTS = 5
+    RETRY_BASE_SECONDS = 30
+    RETRY_MAX_SECONDS = 3600
+    RETRY_JITTER = 0.1  # up to +10% so retries don't all land at once
+    STALE_PROCESSING_SECONDS = 600  # a 'processing' event older than this is orphaned
+    ERROR_MESSAGE_MAX_CHARS = 5000
+
+    class Direction(models.TextChoices):
+        INBOUND = "inbound", "Inbound"
+        OUTBOUND = "outbound", "Outbound"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        PROCESSED = "processed", "Processed"
+        FAILED = "failed", "Failed"
+        SKIPPED = "skipped", "Skipped"
+
+    # Fields that may be updated after creation; everything else is locked.
+    MUTABLE_FIELDS = frozenset(
+        {
+            "status",
+            "attempts",
+            "last_attempt_at",
+            "next_retry_at",
+            "error_message",
+            "result_note",
+            "processed_at",
+        }
+    )
+
+    # What happened
+    direction = models.CharField(
+        max_length=10, choices=Direction.choices, default=Direction.INBOUND
+    )
+    event_type = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="e.g. payment.completed, booking.updated",
+    )
+    source = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text="Which service sent/receives this: momo, hubtel, paystack, etc.",
+    )
+    external_id = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="The provider's own event ID. Used to ignore duplicate deliveries.",
+    )
+
+    # Data, stored exactly as received
+    payload = models.JSONField(default=dict)
+    headers = models.JSONField(default=dict, blank=True)
+    raw_body = models.TextField(
+        blank=True,
+        help_text="Unparsed request body, needed to re-verify signatures.",
+    )
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    signature_valid = models.BooleanField(
+        null=True,
+        blank=True,
+        help_text="None = not checked, True = verified, False = failed verification.",
+    )
+
+    # Processing state
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    attempts = models.PositiveSmallIntegerField(default=0)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    next_retry_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True)
+    result_note = models.TextField(blank=True, help_text="What we did with this event.")
+
+    # Timestamps
+    received_at = models.DateTimeField(default=timezone.now, db_index=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    objects = WebhookEventQuerySet.as_manager()
+
+    class Meta:
+        db_table = "webhook_events"
+        ordering = ["-received_at"]
+        verbose_name = "Webhook Event"
+        verbose_name_plural = "Webhook Events"
+        indexes = [
+            models.Index(fields=["event_type", "status"]),
+            models.Index(fields=["source", "-received_at"]),
+            models.Index(fields=["status", "next_retry_at"]),
+        ]
+        constraints = [
+            # The same provider event can only be logged once per direction.
+            models.UniqueConstraint(
+                fields=["source", "external_id", "direction"],
+                condition=~Q(external_id=""),
+                name="unique_webhook_external_id",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.event_type} — {self.status} @ {self.received_at:%Y-%m-%d %H:%M}"
+
+    # ------------------------------------------------------------------
+    # Write-once protection
+    # ------------------------------------------------------------------
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            update_fields = kwargs.get("update_fields")
+            if update_fields is None:
+                raise ValueError(
+                    "WebhookEvent rows are immutable. Pass update_fields "
+                    "limited to processing fields."
+                )
+            locked = set(update_fields) - self.MUTABLE_FIELDS
+            if locked:
+                raise ValueError(
+                    f"Cannot modify immutable webhook fields: {sorted(locked)}"
+                )
+        super().save(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Creating events
+    # ------------------------------------------------------------------
+    @classmethod
+    def record(
+        cls,
+        event_type,
+        payload,
+        *,
+        source="",
+        headers=None,
+        external_id="",
+        direction=Direction.INBOUND,
+        raw_body="",
+        ip_address=None,
+        signature_valid=None,
+    ):
+        """
+        Log a webhook. Returns (event, created).
+
+        If the provider re-sends an event with the same external_id, the
+        original row is returned with created=False, so you can reply 200
+        without processing it twice.
+        """
+        try:
+            with transaction.atomic():
+                event = cls.objects.create(
+                    direction=direction,
+                    event_type=event_type,
+                    source=source,
+                    external_id=external_id,
+                    payload=payload,
+                    headers=redact_headers(headers),
+                    raw_body=raw_body,
+                    ip_address=ip_address,
+                    signature_valid=signature_valid,
+                )
+            return event, True
+        except IntegrityError:
+            if not external_id:
+                raise
+            try:
+                existing = cls.objects.get(
+                    source=source, external_id=external_id, direction=direction
+                )
+            except cls.DoesNotExist:
+                # The error was not a duplicate, so don't hide the real cause.
+                raise
+            return existing, False
+
+    # ------------------------------------------------------------------
+    # Processing
+    # ------------------------------------------------------------------
+    def _is_stale(self, now):
+        cutoff = now - timedelta(seconds=self.STALE_PROCESSING_SECONDS)
+        return (
+            self.status == self.Status.PROCESSING
+            and self.last_attempt_at is not None
+            and self.last_attempt_at <= cutoff
+        )
+
+    def _is_claimable(self, now):
+        if self.attempts >= self.MAX_ATTEMPTS:
+            return False
+        if self.status == self.Status.PENDING:
+            return True
+        if self.status == self.Status.FAILED:
+            # Respect the backoff schedule.
+            return self.next_retry_at is None or self.next_retry_at <= now
+        if self.status == self.Status.PROCESSING:
+            # Recover an event whose worker died mid-processing.
+            return self._is_stale(now)
+        return False
+
+    def claim(self):
+        """
+        Atomically take this event for processing. Returns False if another
+        worker has it, it's finished, its retry time hasn't come yet, or it is
+        out of attempts, so no event runs twice.
+        """
+        now = timezone.now()
+        with transaction.atomic():
+            locked = type(self)._default_manager.select_for_update().get(pk=self.pk)
+
+            # An orphaned event with no attempts left would otherwise sit in
+            # 'processing' forever, so close it out as failed.
+            if locked._is_stale(now) and locked.attempts >= self.MAX_ATTEMPTS:
+                locked.status = self.Status.FAILED
+                locked.error_message = "Worker stopped responding and no attempts remain."
+                locked.next_retry_at = None
+                locked.processed_at = now
+                fields = ["status", "error_message", "next_retry_at", "processed_at"]
+                locked.save(update_fields=fields)
+                self._sync_from(locked, fields)
+                return False
+
+            if not locked._is_claimable(now):
+                return False
+
+            locked.status = self.Status.PROCESSING
+            locked.attempts += 1
+            locked.last_attempt_at = now
+            locked.next_retry_at = None
+            fields = ["status", "attempts", "last_attempt_at", "next_retry_at"]
+            locked.save(update_fields=fields)
+            self._sync_from(locked, fields)
+        return True
+
+    def process(self, handler):
+        """
+        Run `handler(event)` safely: claim, call, then record the outcome.
+        The handler may return a short note describing what it did.
+        Returns True on success.
+        """
+        if not self.claim():
+            return False
+        try:
+            note = handler(self)
+        except Exception as exc:
+            logger.exception("Webhook %s failed (attempt %s)", self.pk, self.attempts)
+            self.mark_failed(f"{type(exc).__name__}: {exc}")
+            return False
+        self.mark_processed(note or "")
+        return True
+
+    def mark_processed(self, note=""):
+        self.status = self.Status.PROCESSED
+        self.processed_at = timezone.now()
+        self.result_note = note
+        self.error_message = ""
+        self.next_retry_at = None
+        self.save(
+            update_fields=[
+                "status",
+                "processed_at",
+                "result_note",
+                "error_message",
+                "next_retry_at",
+            ]
+        )
+
+    def mark_failed(self, error_message=""):
+        """Record the failure and schedule a retry with exponential backoff."""
+        self.status = self.Status.FAILED
+        self.error_message = error_message[: self.ERROR_MESSAGE_MAX_CHARS]
+        if self.attempts < self.MAX_ATTEMPTS:
+            delay = min(
+                self.RETRY_BASE_SECONDS * 2 ** max(self.attempts - 1, 0),
+                self.RETRY_MAX_SECONDS,
+            )
+            delay += random.uniform(0, delay * self.RETRY_JITTER)
+            self.next_retry_at = timezone.now() + timedelta(seconds=delay)
+            self.processed_at = None
+        else:
+            self.next_retry_at = None  # out of attempts
+            self.processed_at = timezone.now()
+        self.save(
+            update_fields=[
+                "status",
+                "error_message",
+                "attempts",
+                "next_retry_at",
+                "processed_at",
+            ]
+        )
+
+    def mark_skipped(self, note=""):
+        """For events we deliberately ignore (unknown type, test ping, etc.)."""
+        self.status = self.Status.SKIPPED
+        self.processed_at = timezone.now()
+        self.result_note = note
+        self.save(update_fields=["status", "processed_at", "result_note"])
+
+    def requeue(self, *, reset_attempts=False):
+        """
+        Manual retry, for example from an admin action on an exhausted event.
+        Pass reset_attempts=True to give it a fresh set of attempts.
+        """
+        if self.status not in {self.Status.FAILED, self.Status.SKIPPED}:
+            raise ValueError(
+                f"Only failed or skipped events can be requeued, not {self.status}."
+            )
+        self.status = self.Status.PENDING
+        self.next_retry_at = None
+        self.processed_at = None
+        fields = ["status", "next_retry_at", "processed_at"]
+        if reset_attempts:
+            self.attempts = 0
+            fields.append("attempts")
+        self.save(update_fields=fields)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    @property
+    def can_retry(self):
+        return self.status == self.Status.FAILED and self.attempts < self.MAX_ATTEMPTS
+
+    @property
+    def is_finished(self):
+        return self.status in {self.Status.PROCESSED, self.Status.SKIPPED}
+
+    def _sync_from(self, other, fields):
+        for field in fields:
+            setattr(self, field, getattr(other, field))
