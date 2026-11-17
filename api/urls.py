@@ -119,6 +119,8 @@ urlpatterns = [
     path("admin/live-map/", admin.site.admin_view(admin_dashboard.live_map_page), name="rn_live_map"),
     path("admin/live-map/data/", admin.site.admin_view(admin_dashboard.live_map_data), name="rn_live_map_data"),
     path("admin/", admin.site.urls),
+    path("bookings/", include ("api.booking_urls")),
+    path("quote/", booking_views.quote, name= "booking-quote"),
 
     # Pricing, booking, webhook, revenue, nearby riders
     path("", include("api.booking_urls")),

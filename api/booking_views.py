@@ -51,6 +51,7 @@ from .booking import (
     RiderBookingDetailSerializer, StaffBookingDetailSerializer,
 )
 from .models import Booking, WebhookEvent, DispatchOffer, RiderProfile
+from .pricing import calculate_fare
 
 logger = logging.getLogger(__name__)
 
