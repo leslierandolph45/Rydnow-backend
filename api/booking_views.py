@@ -33,6 +33,13 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from rest_framework.throttling import AnonRateThrottle
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
+from rest_framework import status
+from decimal import Decimal, InvalidOperation
+from django.utils import timezone
+
 
 from . import booking_services as services
 from . import pricing
@@ -42,7 +49,7 @@ from .booking import (
     NearbyRiderSerializer, NearbyRidersQuerySerializer, QuoteRequestSerializer,
     RiderBookingDetailSerializer, StaffBookingDetailSerializer,
 )
-from .models import Booking, WebhookEvent
+from .models import Booking, WebhookEvent, DispatchOffer, RiderProfile
 
 logger = logging.getLogger(__name__)
 
@@ -420,3 +427,299 @@ class RevenueReportView(APIView):
             **services.revenue_summary(start=start, end=end),
         })
 
+
+
+# ─────────────────────────────────────────────
+# Lifecycle definition
+# ─────────────────────────────────────────────
+
+OPEN_STATUSES = {"pending", "searching", "searching_rider"}
+ACTIVE_STATUSES = {"accepted", "arrived", "in_progress"}
+MAX_PROMO_FARE = Decimal("1000000")
+
+# action -> (required current status, new status, timestamp field)
+TRANSITIONS = {
+    "arrive": ({"accepted"}, "arrived", "arrived_at"),
+    "start": ({"arrived"}, "in_progress", "started_at"),
+    "complete": ({"in_progress"}, "completed", "completed_at"),
+}
+
+
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+
+def _error(detail, code, http_status):
+    return Response({"detail": detail, "code": code}, status=http_status)
+
+
+def _booking_ref(request):
+    ref = request.data.get("booking_ref") or request.data.get("ref")
+    ref = str(ref).strip() if ref else ""
+    return ref or None
+
+
+def _rider_or_none(user):
+    try:
+        return user.riderprofile
+    except RiderProfile.DoesNotExist:
+        return None
+
+
+def _parse_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("Invalid boolean")
+
+
+def _snapshot(booking, **extra):
+    return Response({"ref": booking.ref, "status": booking.status, **extra})
+
+
+def _transition(request, action):
+    """Move a booking owned by the calling rider through one lifecycle step."""
+    rider = _rider_or_none(request.user)
+    if rider is None:
+        return _error("Rider profile required", "no_rider_profile", status.HTTP_403_FORBIDDEN)
+
+    ref = _booking_ref(request)
+    if not ref:
+        return _error("booking_ref is required", "missing_ref", status.HTTP_400_BAD_REQUEST)
+
+    allowed_from, new_status, stamp_field = TRANSITIONS[action]
+
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().filter(ref=ref, rider=rider).first()
+        if booking is None:
+            return _error("Booking not found", "not_found", status.HTTP_404_NOT_FOUND)
+
+        if booking.status not in allowed_from:
+            return _error(
+                f"Cannot {action} a booking that is '{booking.status}'",
+                "invalid_state",
+                status.HTTP_409_CONFLICT,
+            )
+
+        booking.status = new_status
+        setattr(booking, stamp_field, timezone.now())
+        booking.save(update_fields=["status", stamp_field])
+
+    logger.info("booking %s: rider %s -> %s", ref, rider.pk, new_status)
+    extra = {"fare": str(booking.fare)} if action == "complete" else {}
+    return _snapshot(booking, **extra)
+
+
+# ─────────────────────────────────────────────
+# Rider booking actions
+# ─────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def accept_booking(request):
+    """Rider accepts an open booking. First rider to commit wins."""
+    rider = _rider_or_none(request.user)
+    if rider is None:
+        return _error("Rider profile required", "no_rider_profile", status.HTTP_403_FORBIDDEN)
+
+    ref = _booking_ref(request)
+    if not ref:
+        return _error("booking_ref is required", "missing_ref", status.HTTP_400_BAD_REQUEST)
+
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().filter(ref=ref).first()
+        if booking is None:
+            return _error("Booking not found", "not_found", status.HTTP_404_NOT_FOUND)
+
+        if booking.status not in OPEN_STATUSES or booking.rider_id:
+            return _error("Booking no longer available", "unavailable", status.HTTP_409_CONFLICT)
+
+        if Booking.objects.filter(rider=rider, status__in=ACTIVE_STATUSES).exists():
+            return _error("Finish your current ride first", "rider_busy", status.HTTP_409_CONFLICT)
+
+        booking.rider = rider
+        booking.status = "accepted"
+        booking.accepted_at = timezone.now()
+        booking.save(update_fields=["rider", "status", "accepted_at"])
+
+        # Close the dispatch round for everyone else.
+        DispatchOffer.objects.filter(booking=booking, rider=rider).update(status="accepted")
+        DispatchOffer.objects.filter(booking=booking).exclude(rider=rider).update(status="expired")
+
+    logger.info("booking %s accepted by rider %s", ref, rider.pk)
+    return _snapshot(booking)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def decline_booking(request):
+    """
+    Rider declines an offer. Only this rider's offer is closed; the booking
+    itself stays open for other riders.
+    """
+    rider = _rider_or_none(request.user)
+    if rider is None:
+        return _error("Rider profile required", "no_rider_profile", status.HTTP_403_FORBIDDEN)
+
+    ref = _booking_ref(request)
+    if not ref:
+        return _error("booking_ref is required", "missing_ref", status.HTTP_400_BAD_REQUEST)
+
+    reason = str(request.data.get("reason", ""))[:255]
+
+    booking = Booking.objects.filter(ref=ref).first()
+    if booking is None:
+        return _error("Booking not found", "not_found", status.HTTP_404_NOT_FOUND)
+
+    if booking.rider_id == rider.pk or booking.status in ACTIVE_STATUSES | {"completed"}:
+        return _error("Cannot decline — already accepted", "invalid_state", status.HTTP_409_CONFLICT)
+
+    DispatchOffer.objects.filter(booking=booking, rider=rider).update(status="declined")
+    logger.info("booking %s declined by rider %s (%s)", ref, rider.pk, reason or "no reason")
+    return Response({"ref": booking.ref, "status": "declined"})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def arrive_ride(request):
+    """Rider has arrived at pickup."""
+    return _transition(request, "arrive")
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def start_ride(request):
+    """Rider starts the trip."""
+    return _transition(request, "start")
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def complete_ride(request):
+    """Rider completes the trip."""
+    return _transition(request, "complete")
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def release_booking(request):
+    """
+    Rider gives up an accepted booking before the trip starts.
+    The booking returns to the dispatch pool.
+    """
+    rider = _rider_or_none(request.user)
+    if rider is None:
+        return _error("Rider profile required", "no_rider_profile", status.HTTP_403_FORBIDDEN)
+
+    ref = _booking_ref(request)
+    if not ref:
+        return _error("booking_ref is required", "missing_ref", status.HTTP_400_BAD_REQUEST)
+
+    reason = str(request.data.get("reason", "rider_cancelled"))[:255]
+
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().filter(ref=ref, rider=rider).first()
+        if booking is None:
+            return _error("Booking not found", "not_found", status.HTTP_404_NOT_FOUND)
+
+        if booking.status not in {"accepted", "arrived"}:
+            return _error(
+                "Only accepted or arrived bookings can be released",
+                "invalid_state",
+                status.HTTP_409_CONFLICT,
+            )
+
+        booking.rider = None
+        booking.status = "searching"
+        booking.accepted_at = None
+        booking.arrived_at = None
+        booking.save(update_fields=["rider", "status", "accepted_at", "arrived_at"])
+
+        # This rider should not be re-offered the same booking.
+        DispatchOffer.objects.filter(booking=booking, rider=rider).update(status="declined")
+
+    logger.info("booking %s released by rider %s (%s)", ref, rider.pk, reason)
+    return _snapshot(booking)
+
+
+# ─────────────────────────────────────────────
+# Rider presence
+# ─────────────────────────────────────────────
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def rider_presence(request):
+    """Read or update the rider's online state."""
+    rider = _rider_or_none(request.user)
+    if rider is None:
+        return _error("Rider profile required", "no_rider_profile", status.HTTP_403_FORBIDDEN)
+
+    if request.method == "POST":
+        try:
+            is_online = _parse_bool(request.data.get("is_online"), default=True)
+        except ValueError:
+            return _error("is_online must be a boolean", "invalid_value", status.HTTP_400_BAD_REQUEST)
+
+        if not is_online and rider.booking_set.filter(status__in=ACTIVE_STATUSES).exists():
+            return _error("Finish your active ride before going offline", "rider_busy",
+                          status.HTTP_409_CONFLICT)
+
+        rider.is_online = is_online
+        rider.last_seen = timezone.now()
+        rider.save(update_fields=["is_online", "last_seen"])
+
+    return Response({"is_online": rider.is_online, "last_seen": rider.last_seen})
+
+
+# ─────────────────────────────────────────────
+# Promo validation
+# ─────────────────────────────────────────────
+
+class PromoValidateThrottle(AnonRateThrottle):
+    """Public endpoint: throttle to stop promo-code guessing.
+    Add 'promo_validate': '20/min' to REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']."""
+    scope = "promo_validate"
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@throttle_classes([PromoValidateThrottle])
+def promo_validate(request):
+    """Validate a promo code against a fare and preview the discount."""
+    from .pricing import PromoTerms, _promo_discount
+
+    code = str(request.data.get("code", "")).strip().upper()
+    if not code or len(code) > 64:
+        return _error("A valid code is required", "invalid_code", status.HTTP_400_BAD_REQUEST)
+
+    try:
+        ride_fare = Decimal(str(request.data.get("ride_fare", "0")))
+    except InvalidOperation:
+        return _error("ride_fare must be a number", "invalid_fare", status.HTTP_400_BAD_REQUEST)
+
+    if not ride_fare.is_finite() or ride_fare <= 0 or ride_fare > MAX_PROMO_FARE:
+        return _error("ride_fare out of range", "invalid_fare", status.HTTP_400_BAD_REQUEST)
+
+    promo = PromoTerms.objects.filter(code__iexact=code, is_active=True).first()
+    if promo is None:
+        # Same response for unknown/inactive codes so codes can't be probed.
+        return Response({"valid": False, "message": "Promo code not valid"})
+
+    discount = min(_promo_discount(promo, ride_fare, ride_fare), ride_fare)
+    discount = max(discount, Decimal("0"))
+
+    return Response({
+        "valid": True,
+        "code": promo.code,
+        "percent_off": str(promo.percent_off),
+        "flat_off": str(promo.flat_off),
+        "max_discount": str(promo.max_discount) if promo.max_discount else None,
+        "discount_applied": str(discount),
+        "final_fare": str(ride_fare - discount),
+    })
