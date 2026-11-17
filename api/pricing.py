@@ -36,7 +36,7 @@ from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.core import signing
 from django.core.cache import cache
-from .pricing import calculate_fare
+
 
 logger = logging.getLogger(__name__)
 
