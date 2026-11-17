@@ -49,7 +49,7 @@ from phonenumber_field.modelfields import PhoneNumberField
 from django.db.models import UniqueConstraint
 from django.utils.translation import gettext_lazy as _
 
-
+from . import pricing
 
 logger = logging.getLogger(__name__)
 
