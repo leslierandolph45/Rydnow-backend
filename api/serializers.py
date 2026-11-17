@@ -1,73 +1,149 @@
 """
-Rydnow serializers (account, rider, wallet, payment, booking, pricing).
+RYDNOW api/serializers.py
 
-Audit fixes in this version
-  * The two pasted serializer files are merged into ONE module with one import block.
-  * NearbyRidersQuerySerializer was defined twice (latitude/longitude/service vs lat/lng/service_type);
-    the second silently replaced the first, so views.get_nearby_riders crashed with KeyError.
-    Now:  NearbyRidersQuerySerializer        -> lat / lng / service_type  (booking.NearbyRidersView)
-          LegacyNearbyRidersQuerySerializer  -> latitude / longitude / service  (views.get_nearby_riders)
-  * RiderPublicSerializer and NearbyRiderSerializer pointed at RiderProfile fields that do not exist
-    (phone_number, plate_number, rating, latitude, longitude, last_location_at). They now map onto the
-    real fields (phone, motorbike_plate_number, rating_average, current_lat, current_lng,
-    location_updated_at) while keeping the same JSON keys for the frontend.
+Aligned field-for-field with api/models.py and pricing.py.
+
+Conventions
+  * Read serializers never expose secrets (delivery PIN only to the parcel owner, no commission
+    or platform revenue to customers, no signing data).
+  * Money is Decimal everywhere. Clients never send a price: bookings are created from a signed
+    quote token (pricing.issue_quote) and the server stores the snapshot in Booking.details.
+  * Model-level ValidationErrors raised by save()/clean() are converted to DRF 400 responses by
+    CleanErrorsMixin, so they can never surface as HTTP 500.
+  * Service keys: input accepts any alias (okada | ride | parcel | delivery | waste | waste-bin ...)
+    and is normalised to the pricing key (okada | parcel | waste-bin), which is also the value
+    stored in Booking.service_type.
+
+Sections
+  0  Helpers and base classes        7  Rider wallet, withdrawals, deposits
+  1  Authentication / account        8  Payments and refunds
+  2  Platform (service, zone)        9  Pricing quote and bookings
+  3  Customers                      10  Dispatch offers
+  4  Customer wallet and loyalty    11  Parcel
+  5  Riders                          12  Growth (promo, referral, business, waste, recurring)
+  6  Rider public / nearby search   13  Reviews, complaints, incidents, notifications, webhook
 """
 from decimal import ROUND_HALF_UP, Decimal
 from math import isfinite
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import serializers
 
+from . import pricing
 from .models import (
-    TRANSACTION_TYPES,
     Booking,
+    BookingOffer,
     BookingStatusHistory,
     BookingStop,
+    BusinessAccount,
     CustomerProfile,
+    CustomerRiderPreference,
+    CustomerWallet,
+    CustomerWalletTransaction,
+    DispatchOffer,
+    LoyaltyAccount,
+    LoyaltyTransaction,
+    Notification,
+    ParcelDetail,
+    ParcelFeedback,
+    ParcelProof,
+    ParcelTrackingEvent,
+    Payment,
+    PromoCode,
+    RecurringBooking,
+    Referral,
+    ReferralCode,
+    Refund,
+    Review,
+    RiderComplaint,
     RiderDocument,
+    RiderEmergencyContact,
+    RiderIncident,
+    RiderPayoutAccount,
     RiderProfile,
+    RiderStatusHistory,
     RiderWallet,
+    SavedAddress,
     Service,
-    ServiceType,
+    ServiceQualification,
+    SystemAlert,
     WalletDeposit,
     WalletTransaction,
+    WasteCollection,
+    WasteSubscription,
+    WithdrawalRequest,
+    Zone,
 )
 from .pricing import COORD, MAX_WAIT_INPUT_MINUTES, RATES
-from .validators import (
-    check_password_strength,
-    clean_phone,
-    email_is_taken,
-    split_name,
-)
+from .validators import check_password_strength, clean_phone, email_is_taken, split_name
 
 User = get_user_model()
 
 REFERENCE_RE = r"^[A-Za-z0-9_.\-]{6,100}$"
 MAX_DOCUMENT_SIZE_MB = 10
+MAX_PHOTO_SIZE_MB = 5
 ALLOWED_DOCUMENT_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "pdf")
-WALLET_TX_STATUSES = ("pending", "completed", "failed", "reversed")
+PAYMENT_METHOD_ALIASES = {
+    "cash": "cash", "momo": "momo", "mobile_money": "momo", "mobile-money": "momo",
+    "card": "card", "visa": "card", "debit": "card", "wallet": "wallet",
+}
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# =====================================================================
+# 0. HELPERS AND BASE CLASSES
+# =====================================================================
 def _create_auth_user(*, email, password, full_name=""):
-    """Single place where auth Users are created (all arguments by keyword)."""
+    """Single place where auth Users are created."""
     first, last = split_name(full_name) if full_name else ("", "")
     return User.objects.create_user(
-        username=email,
-        email=email,
-        password=password,
-        first_name=first,
-        last_name=last,
+        username=email, email=email, password=password, first_name=first, last_name=last
     )
 
 
-# ---------------------------------------------------------------------------
-# Safe numeric inputs
-# ---------------------------------------------------------------------------
+def _django_error_payload(exc):
+    if getattr(exc, "error_dict", None):
+        return exc.message_dict
+    return {"detail": exc.messages}
+
+
+class CleanErrorsMixin:
+    """Turn Django model ValidationErrors / IntegrityErrors into DRF 400s instead of 500s."""
+
+    def create(self, validated_data):
+        try:
+            return super().create(validated_data)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(_django_error_payload(exc)) from None
+        except IntegrityError:
+            raise serializers.ValidationError(
+                {"detail": "This record conflicts with an existing one."}
+            ) from None
+
+    def update(self, instance, validated_data):
+        try:
+            return super().update(instance, validated_data)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(_django_error_payload(exc)) from None
+        except IntegrityError:
+            raise serializers.ValidationError(
+                {"detail": "This record conflicts with an existing one."}
+            ) from None
+
+
+class ReadOnlyModelSerializer(serializers.ModelSerializer):
+    """Every declared field is read-only. Use for anything the API only displays."""
+
+    def get_fields(self):
+        fields = super().get_fields()
+        for field in fields.values():
+            field.read_only = True
+            field.required = False
+        return fields
+
+
 class Coord(serializers.FloatField):
     """Latitude/longitude -> Decimal rounded to 6 dp. Rejects NaN/inf."""
 
@@ -103,11 +179,41 @@ def Lng(**kw):
     return Coord(-180, 180, **kw)
 
 
-# ---------------------------------------------------------------------------
-# Authentication
-# ---------------------------------------------------------------------------
+class ServiceKeyField(serializers.CharField):
+    """Accepts any spelling (delivery, ride, waste ...) and returns the pricing key."""
+
+    default_error_messages = {"unknown": "Unknown service type."}
+
+    def to_internal_value(self, data):
+        value = super().to_internal_value(data)
+        try:
+            return pricing.normalize_service_type(value)
+        except ValueError:
+            self.fail("unknown")
+
+
+class PaymentMethodField(serializers.CharField):
+    default_error_messages = {"unknown": "Unsupported payment method."}
+
+    def to_internal_value(self, data):
+        value = super().to_internal_value(data).strip().lower()
+        if value not in PAYMENT_METHOD_ALIASES:
+            self.fail("unknown")
+        return PAYMENT_METHOD_ALIASES[value]
+
+
+def _validate_image(f, max_mb=MAX_PHOTO_SIZE_MB):
+    if f.size > max_mb * 1024 * 1024:
+        raise serializers.ValidationError(f"File too large. Maximum size is {max_mb} MB.")
+    return f
+
+
+# =====================================================================
+# 1. AUTHENTICATION AND ACCOUNT
+# =====================================================================
 class LoginSerializer(serializers.Serializer):
     """`username` accepts either the username or the email address."""
+
     username = serializers.CharField(max_length=254)
     password = serializers.CharField(write_only=True, trim_whitespace=False)
 
@@ -139,28 +245,21 @@ class _SignupBase(serializers.Serializer):
         if confirm is not None and confirm != attrs["password"]:
             raise serializers.ValidationError({"password_confirm": "Passwords do not match."})
         probe = User(
-            username=attrs["email"],
-            email=attrs["email"],
+            username=attrs["email"], email=attrs["email"],
             first_name=split_name(attrs["full_name"])[0],
         )
         check_password_strength(attrs["password"], user=probe)
         return attrs
 
-    def _create_user(self, validated_data):
-        return _create_auth_user(
-            email=validated_data["email"],
-            password=validated_data["password"],
-            full_name=validated_data["full_name"],
-        )
-
 
 class RegistrationSerializer(serializers.Serializer):
-    """Customer sign-up: creates the User and its CustomerProfile together. save() returns the User."""
+    """Customer sign-up: User + CustomerProfile together. save() returns the User."""
 
     email = serializers.EmailField(max_length=254)
     password = serializers.CharField(write_only=True, min_length=8, trim_whitespace=False)
     full_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
     phone = serializers.CharField(max_length=30, required=False, allow_blank=True, default="")
+    referral_code = serializers.CharField(max_length=20, required=False, allow_blank=True, default="")
 
     def validate_email(self, value):
         email = value.strip().lower()
@@ -177,23 +276,31 @@ class RegistrationSerializer(serializers.Serializer):
         try:
             phone = clean_phone(value)
         except Exception:
-            raise serializers.ValidationError("Enter a valid phone number.")
+            raise serializers.ValidationError("Enter a valid phone number.") from None
         if not phone:
             raise serializers.ValidationError("Enter a valid phone number.")
         if CustomerProfile.objects.filter(phone=phone).exists():
             raise serializers.ValidationError("This phone number is already registered.")
         return phone
 
+    def validate_referral_code(self, value):
+        value = (value or "").strip().upper()
+        if value and not CustomerProfile.objects.filter(referral_code=value).exists():
+            raise serializers.ValidationError("This referral code is not valid.")
+        return value
+
     def validate(self, attrs):
         probe = User(
-            username=attrs["email"],
-            email=attrs["email"],
+            username=attrs["email"], email=attrs["email"],
             first_name=split_name(attrs["full_name"])[0] if attrs.get("full_name") else "",
         )
         check_password_strength(attrs["password"], user=probe)
         return attrs
 
     def create(self, validated_data):
+        referrer = None
+        if validated_data.get("referral_code"):
+            referrer = CustomerProfile.objects.filter(referral_code=validated_data["referral_code"]).first()
         try:
             with transaction.atomic():
                 user = _create_auth_user(
@@ -205,17 +312,23 @@ class RegistrationSerializer(serializers.Serializer):
                     user=user,
                     full_name=validated_data.get("full_name", ""),
                     email=validated_data["email"],
-                    phone=validated_data.get("phone", ""),
+                    phone=validated_data.get("phone") or None,
+                    referred_by=referrer,
+                    acquisition_source=(
+                        CustomerProfile.Source.REFERRAL if referrer else CustomerProfile.Source.ORGANIC
+                    ),
                 )
         except IntegrityError:
             raise serializers.ValidationError(
                 {"detail": "An account with this email or phone already exists."}
-            )
+            ) from None
         return user
 
 
 class RiderRegistrationSerializer(_SignupBase):
-    """Rider sign-up: creates User -> RiderProfile -> RiderWallet. save() returns the RiderProfile."""
+    """Rider sign-up: User -> RiderProfile -> RiderWallet. save() returns the RiderProfile."""
+
+    referral_code = serializers.CharField(max_length=16, required=False, allow_blank=True, default="")
 
     def validate_phone(self, value):
         phone = clean_phone(value)
@@ -223,31 +336,43 @@ class RiderRegistrationSerializer(_SignupBase):
             raise serializers.ValidationError("This phone number is already registered.")
         return phone
 
+    def validate_referral_code(self, value):
+        value = (value or "").strip().upper()
+        if value and not RiderProfile.objects.filter(rider_code=value).exists():
+            raise serializers.ValidationError("This rider code is not valid.")
+        return value
+
     def create(self, validated_data):
+        referrer = None
+        if validated_data.get("referral_code"):
+            referrer = RiderProfile.objects.filter(rider_code=validated_data["referral_code"]).first()
         try:
             with transaction.atomic():
-                user = self._create_user(validated_data)
+                user = _create_auth_user(
+                    email=validated_data["email"],
+                    password=validated_data["password"],
+                    full_name=validated_data["full_name"],
+                )
                 rider = RiderProfile.objects.create(
                     user=user,
                     full_name=validated_data["full_name"],
                     phone=validated_data["phone"],
+                    referred_by=referrer,
                 )
                 RiderWallet.objects.create(rider=rider)
+        except ValueError as exc:  # normalize_gh_phone
+            raise serializers.ValidationError({"phone": str(exc)}) from None
         except IntegrityError:
             raise serializers.ValidationError(
                 {"detail": "An account with this email or phone already exists."}
-            )
+            ) from None
         return rider
 
 
-# ---------------------------------------------------------------------------
-# Account
-# ---------------------------------------------------------------------------
-class AccountSerializer(serializers.ModelSerializer):
+class AccountSerializer(ReadOnlyModelSerializer):
     class Meta:
         model = User
         fields = ["id", "username", "email", "first_name", "last_name", "is_active", "is_staff"]
-        read_only_fields = fields
 
 
 class AccountUpdateSerializer(serializers.ModelSerializer):
@@ -281,9 +406,6 @@ class ChangePasswordSerializer(serializers.Serializer):
         return attrs
 
 
-# ---------------------------------------------------------------------------
-# Phone verification (OTP)
-# ---------------------------------------------------------------------------
 class PhoneSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=30)
 
@@ -295,37 +417,65 @@ class VerifyCodeSerializer(PhoneSerializer):
     code = serializers.RegexField(r"^\d{6}$", error_messages={"invalid": "Enter the 6-digit code."})
 
 
-# ---------------------------------------------------------------------------
-# Customers
-# ---------------------------------------------------------------------------
-class CustomerSerializer(serializers.ModelSerializer):
+# =====================================================================
+# 2. PLATFORM
+# =====================================================================
+class ServiceSerializer(ReadOnlyModelSerializer):
+    class Meta:
+        model = Service
+        fields = ["key", "name", "description", "is_active"]
+
+
+class ZoneSerializer(ReadOnlyModelSerializer):
+    services = serializers.SlugRelatedField(many=True, read_only=True, slug_field="key")
+
+    class Meta:
+        model = Zone
+        fields = ["id", "name", "city", "center_lat", "center_lng", "radius_km", "services", "is_active"]
+
+
+class SystemAlertSerializer(ReadOnlyModelSerializer):
+    class Meta:
+        model = SystemAlert
+        fields = ["id", "title", "message", "level", "is_dismissible", "starts_at", "expires_at"]
+
+
+# =====================================================================
+# 3. CUSTOMERS
+# =====================================================================
+class CustomerSerializer(ReadOnlyModelSerializer):
     """Compact public view of a customer (shown to riders)."""
+
     class Meta:
         model = CustomerProfile
         fields = ["id", "full_name", "rating_average"]
-        read_only_fields = fields
 
 
-class CustomerProfileSerializer(serializers.ModelSerializer):
-    """Only full_name and phone are writable; everything else is read-only."""
+class CustomerProfileSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    """Customers may edit phone and preferences only. The name is staff-controlled."""
+
     phone = serializers.CharField(max_length=30, required=False)
     can_book = serializers.BooleanField(read_only=True)
     loyalty_tier = serializers.CharField(read_only=True)
+    phone_verified = serializers.SerializerMethodField()
+
+    WRITABLE = ("phone", "preferred_language", "marketing_opt_in", "profile_photo")
 
     class Meta:
         model = CustomerProfile
         fields = [
-            "id", "full_name", "email", "phone", "profile_photo", "preferred_language",
-            "segment", "total_bookings", "rating_average", "referral_code",
-            "can_book", "loyalty_tier", "created_at",
+            "id", "full_name", "email", "phone", "phone_verified", "profile_photo",
+            "preferred_language", "marketing_opt_in", "segment", "total_bookings",
+            "rating_average", "outstanding_fees", "referral_code", "can_book",
+            "loyalty_tier", "created_at",
         ]
-        read_only_fields = [f for f in fields if f not in ("full_name", "phone")]
+        read_only_fields = [
+            f for f in fields
+            if f not in ("phone", "preferred_language", "marketing_opt_in", "profile_photo")
+        ]
 
-    def validate_full_name(self, value):
-        value = " ".join(value.split())
-        if len(value) < 2:
-            raise serializers.ValidationError("Enter your full name.")
-        return value
+    def get_phone_verified(self, obj) -> bool:
+        return bool(getattr(obj, "phone_verified", False))
 
     def validate_phone(self, value):
         phone = clean_phone(value)
@@ -336,15 +486,82 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("This phone number is already registered.")
         return phone
 
+    def validate_profile_photo(self, f):
+        return _validate_image(f)
 
-# ---------------------------------------------------------------------------
-# Riders
-# ---------------------------------------------------------------------------
-class RiderProfileSerializer(serializers.ModelSerializer):
+
+class CustomerPreferenceSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    class Meta:
+        model = CustomerRiderPreference
+        fields = [
+            "preferred_service", "preferred_language", "dark_mode",
+            "notification_enabled", "location_sharing", "updated_at",
+        ]
+        read_only_fields = ["updated_at"]
+
+
+class SavedAddressSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    class Meta:
+        model = SavedAddress
+        fields = [
+            "id", "label", "name", "address", "lat", "lng",
+            "landmark_note", "is_default", "created_at",
+        ]
+        read_only_fields = ["id", "created_at"]
+
+
+# =====================================================================
+# 4. CUSTOMER WALLET AND LOYALTY
+# =====================================================================
+class CustomerWalletSerializer(ReadOnlyModelSerializer):
+    class Meta:
+        model = CustomerWallet
+        fields = ["id", "balance", "withdrawable_balance", "bonus_credit", "currency", "updated_at"]
+
+
+class CustomerWalletTransactionSerializer(ReadOnlyModelSerializer):
+    type_display = serializers.CharField(source="get_transaction_type_display")
+    direction = serializers.SerializerMethodField()
+    booking_reference = serializers.CharField(source="related_booking.reference", default="")
+
+    class Meta:
+        model = CustomerWalletTransaction
+        fields = [
+            "id", "reference", "transaction_type", "type_display", "direction", "status",
+            "amount", "balance_after", "currency", "description", "booking_reference", "created_at",
+        ]
+
+    def get_direction(self, obj) -> str:
+        return "credit" if obj.amount >= 0 else "debit"
+
+
+class LoyaltyAccountSerializer(ReadOnlyModelSerializer):
+    multiplier = serializers.DecimalField(max_digits=4, decimal_places=2, source="multiplier")
+
+    class Meta:
+        model = LoyaltyAccount
+        fields = ["points_balance", "lifetime_points", "tier", "multiplier", "updated_at"]
+
+
+class LoyaltyTransactionSerializer(ReadOnlyModelSerializer):
+    class Meta:
+        model = LoyaltyTransaction
+        fields = ["id", "points", "reason", "reference", "created_at"]
+
+
+class LoyaltyRedeemSerializer(serializers.Serializer):
+    points = serializers.IntegerField(min_value=1)
+
+
+# =====================================================================
+# 5. RIDERS
+# =====================================================================
+class RiderProfileSerializer(CleanErrorsMixin, serializers.ModelSerializer):
     email = serializers.EmailField(source="user.email", read_only=True)
     is_verified = serializers.BooleanField(read_only=True)
     profile_completion = serializers.IntegerField(read_only=True)
     documents_uploaded = serializers.BooleanField(read_only=True)
+    performance_grade = serializers.CharField(read_only=True)
 
     LOCKED_AFTER_VERIFICATION = ("ghana_card_number", "license_number")
 
@@ -357,7 +574,7 @@ class RiderProfileSerializer(serializers.ModelSerializer):
             "license_number", "license_expiry_date",
             "verification_status", "is_verified", "rejection_reason", "documents_uploaded",
             "profile_completion", "is_online", "tier", "rating_average", "rating_count",
-            "completed_trips", "created_at",
+            "completed_trips", "performance_grade", "created_at",
         ]
         read_only_fields = [
             "id", "public_id", "rider_code", "verification_status", "rejection_reason",
@@ -390,6 +607,9 @@ class RiderProfileSerializer(serializers.ModelSerializer):
     def validate_license_number(self, value):
         return self._unique_or_blank("license_number", value.upper())
 
+    def validate_profile_photo(self, f):
+        return _validate_image(f)
+
     def validate(self, attrs):
         if self.instance is not None and self.instance.is_verified:
             locked = {
@@ -403,15 +623,19 @@ class RiderProfileSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
-        instance = super().update(instance, validated_data)
+        try:
+            instance = super().update(instance, validated_data)
+        except ValueError as exc:  # normalize_gh_phone
+            raise serializers.ValidationError({"phone": str(exc)}) from None
         if "full_name" in validated_data:
             first, last = split_name(instance.full_name)
             User.objects.filter(pk=instance.user_id).update(first_name=first, last_name=last)
         return instance
 
 
-class RiderDocumentSerializer(serializers.Serializer):
-    """Upload payload. The uploaded file maps to RiderDocument.file."""
+class RiderDocumentUploadSerializer(serializers.Serializer):
+    """Upload payload. `document_file` maps to RiderDocument.file."""
+
     document_type = serializers.ChoiceField(choices=RiderDocument.DocumentType.choices)
     document_file = serializers.FileField(write_only=True)
     expiry_date = serializers.DateField(required=False, allow_null=True)
@@ -422,9 +646,7 @@ class RiderDocumentSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 f"Unsupported file type. Allowed: {', '.join(ALLOWED_DOCUMENT_EXTENSIONS)}."
             )
-        if f.size > MAX_DOCUMENT_SIZE_MB * 1024 * 1024:
-            raise serializers.ValidationError(f"File too large. Maximum size is {MAX_DOCUMENT_SIZE_MB} MB.")
-        return f
+        return _validate_image(f, MAX_DOCUMENT_SIZE_MB)
 
     def validate_expiry_date(self, value):
         if value and value < timezone.localdate():
@@ -432,9 +654,113 @@ class RiderDocumentSerializer(serializers.Serializer):
         return value
 
 
+# Name used by views.py
+RiderDocumentSerializer = RiderDocumentUploadSerializer
+
+
+class RiderDocumentReadSerializer(ReadOnlyModelSerializer):
+    type_display = serializers.CharField(source="get_document_type_display")
+    is_expired = serializers.BooleanField()
+
+    class Meta:
+        model = RiderDocument
+        fields = [
+            "id", "document_type", "type_display", "file", "status", "expiry_date",
+            "is_expired", "uploaded_at", "reviewed_at", "notes",
+        ]
+
+
+class RiderDocumentReviewSerializer(serializers.Serializer):
+    """Staff decision on one document."""
+
+    approve = serializers.BooleanField()
+    notes = serializers.CharField(required=False, allow_blank=True, max_length=1000, default="")
+
+    def validate(self, attrs):
+        if not attrs["approve"] and not attrs["notes"].strip():
+            raise serializers.ValidationError({"notes": "Add a short reason before rejecting a document."})
+        return attrs
+
+
+class RiderRejectSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=1000)
+
+
+class RiderSuspendSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=1000)
+    until = serializers.DateTimeField(required=False, allow_null=True)
+
+    def validate_until(self, value):
+        if value and value <= timezone.now():
+            raise serializers.ValidationError("Must be in the future.")
+        return value
+
+
+class RiderStatusHistorySerializer(ReadOnlyModelSerializer):
+    class Meta:
+        model = RiderStatusHistory
+        fields = ["id", "from_status", "to_status", "reason", "created_at"]
+
+
+class ServiceQualificationSerializer(ReadOnlyModelSerializer):
+    service_name = serializers.CharField(source="service.name")
+
+    class Meta:
+        model = ServiceQualification
+        fields = ["id", "service", "service_name", "status", "approved_at", "status_reason"]
+
+
+class RiderPayoutAccountSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    masked_number = serializers.CharField(read_only=True)
+    network_display = serializers.CharField(source="get_network_display", read_only=True)
+
+    class Meta:
+        model = RiderPayoutAccount
+        fields = [
+            "id", "network", "network_display", "momo_number", "masked_number",
+            "account_name", "is_verified", "is_primary", "created_at",
+        ]
+        read_only_fields = ["id", "is_verified", "created_at"]
+        extra_kwargs = {"momo_number": {"write_only": True}}
+
+    def validate_momo_number(self, value):
+        try:
+            return clean_phone(value)
+        except Exception:
+            raise serializers.ValidationError("Enter a valid Mobile Money number.") from None
+
+
+class RiderEmergencyContactSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    masked_phone = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = RiderEmergencyContact
+        fields = [
+            "id", "full_name", "relationship", "relationship_note", "phone_number", "masked_phone",
+            "alternative_phone", "address", "preferred_language", "is_primary",
+            "notify_on_emergency", "is_verified", "created_at",
+        ]
+        read_only_fields = ["id", "is_verified", "created_at"]
+
+    def validate(self, attrs):
+        relationship = attrs.get("relationship", getattr(self.instance, "relationship", None))
+        note = attrs.get("relationship_note", getattr(self.instance, "relationship_note", ""))
+        if relationship == RiderEmergencyContact.Relationship.OTHER and not note:
+            raise serializers.ValidationError({"relationship_note": "Please describe the relationship."})
+        return attrs
+
+    def validate_phone_number(self, value):
+        try:
+            return RiderEmergencyContact.normalize_phone(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from None
+
+
 class RiderLocationSerializer(serializers.Serializer):
     latitude = serializers.FloatField(min_value=-90, max_value=90)
     longitude = serializers.FloatField(min_value=-180, max_value=180)
+    speed_kmh = serializers.FloatField(required=False, allow_null=True, min_value=0, max_value=250)
+    heading = serializers.FloatField(required=False, allow_null=True, min_value=0, max_value=360)
 
     def validate(self, attrs):
         if attrs["latitude"] == 0 and attrs["longitude"] == 0:
@@ -442,47 +768,55 @@ class RiderLocationSerializer(serializers.Serializer):
         return attrs
 
 
-class LegacyNearbyRidersQuerySerializer(serializers.Serializer):
-    """Used by views.get_nearby_riders  (GET /riders/nearby/?latitude=&longitude=&service=)."""
-    latitude = serializers.FloatField(min_value=-90, max_value=90)
-    longitude = serializers.FloatField(min_value=-180, max_value=180)
-    service = serializers.CharField(max_length=30, help_text='Service key, e.g. "okada".')
-    radius_km = serializers.FloatField(required=False, default=5.0, min_value=0.5, max_value=25)
-    limit = serializers.IntegerField(required=False, default=10, min_value=1, max_value=50)
-
-    def validate_service(self, value):
-        value = value.strip().lower()
-        if not Service.objects.filter(pk=value, is_active=True).exists():
-            raise serializers.ValidationError("Unknown or inactive service.")
-        return value
-
-
-class RiderPublicSerializer(serializers.ModelSerializer):
-    """Shown to a customer only for their own active booking.
-    JSON keys are unchanged; they are now mapped onto real RiderProfile fields."""
-
-    name = serializers.SerializerMethodField()
-    phone_number = serializers.CharField(source="phone", read_only=True)
-    plate_number = serializers.CharField(source="motorbike_plate_number", read_only=True)
-    rating = serializers.FloatField(source="rating_average", read_only=True)
-    latitude = serializers.FloatField(source="current_lat", read_only=True)
-    longitude = serializers.FloatField(source="current_lng", read_only=True)
-    last_location_at = serializers.DateTimeField(source="location_updated_at", read_only=True)
+class RiderPerformanceSerializer(ReadOnlyModelSerializer):
+    performance_score = serializers.FloatField()
+    performance_grade = serializers.CharField()
+    acceptance_rate = serializers.FloatField()
+    cancellation_rate = serializers.FloatField()
+    completion_rate = serializers.FloatField()
+    avg_response_seconds = serializers.FloatField()
+    avg_arrival_minutes = serializers.FloatField()
+    total_online_hours = serializers.FloatField()
+    needs_attention = serializers.BooleanField()
+    attention_reasons = serializers.ListField(child=serializers.CharField())
 
     class Meta:
         model = RiderProfile
         fields = [
-            "id", "name", "phone_number", "plate_number",
-            "rating", "latitude", "longitude", "last_location_at",
+            "tier", "rating_average", "rating_count", "completed_trips", "cancelled_trips",
+            "strike_count", "performance_score", "performance_grade", "acceptance_rate",
+            "cancellation_rate", "completion_rate", "avg_response_seconds",
+            "avg_arrival_minutes", "total_online_hours", "needs_attention", "attention_reasons",
         ]
-        read_only_fields = fields
+
+
+# =====================================================================
+# 6. RIDER PUBLIC / NEARBY SEARCH
+# =====================================================================
+class RiderPublicSerializer(ReadOnlyModelSerializer):
+    """Shown to a customer only for their own active booking."""
+
+    name = serializers.SerializerMethodField()
+    phone_number = serializers.CharField(source="phone")
+    plate_number = serializers.CharField(source="motorbike_plate_number")
+    rating = serializers.FloatField(source="rating_average")
+    latitude = serializers.FloatField(source="current_lat")
+    longitude = serializers.FloatField(source="current_lng")
+    last_location_at = serializers.DateTimeField(source="location_updated_at")
+
+    class Meta:
+        model = RiderProfile
+        fields = [
+            "id", "name", "phone_number", "plate_number", "motorbike_model", "motorbike_color",
+            "profile_photo", "rating", "latitude", "longitude", "last_location_at",
+        ]
 
     def get_name(self, obj) -> str:
         return obj.full_name or obj.user.get_full_name() or obj.user.get_username()
 
 
 class NearbyRiderSerializer(serializers.Serializer):
-    """Deliberately minimal: no phone number, coarse location (~100 m). Reachable by every customer."""
+    """Deliberately minimal: no phone number, coarse location (~100 m)."""
 
     id = serializers.UUIDField()
     name = serializers.SerializerMethodField()
@@ -494,7 +828,7 @@ class NearbyRiderSerializer(serializers.Serializer):
 
     def get_name(self, obj) -> str:
         first = (getattr(obj, "full_name", "") or "").split(" ")[0]
-        return first or getattr(obj.user, "first_name", "") or "Rider"
+        return first or "Rider"
 
     def get_service_type(self, obj):
         return getattr(obj, "service_type", None)
@@ -514,68 +848,86 @@ class NearbyRiderSerializer(serializers.Serializer):
 
 
 class NearbyRidersQuerySerializer(serializers.Serializer):
-    """Used by booking.NearbyRidersView  (GET /dispatch/rider/nearby/?lat=&lng=&service_type=)."""
+    """GET /dispatch/rider/nearby/?lat=&lng=&service_type="""
+
     lat = Lat()
     lng = Lng()
     radius_km = serializers.FloatField(min_value=0.1, max_value=50, default=5)
-    service_type = serializers.ChoiceField(choices=ServiceType.choices, required=False)
+    service_type = ServiceKeyField(required=False)
     limit = serializers.IntegerField(min_value=1, max_value=50, default=20)
 
 
-# ---------------------------------------------------------------------------
-# Money
-# ---------------------------------------------------------------------------
+class LegacyNearbyRidersQuerySerializer(serializers.Serializer):
+    """GET /riders/nearby/?latitude=&longitude=&service="""
+
+    latitude = serializers.FloatField(min_value=-90, max_value=90)
+    longitude = serializers.FloatField(min_value=-180, max_value=180)
+    service = serializers.CharField(max_length=30, help_text='Service key, e.g. "okada".')
+    radius_km = serializers.FloatField(required=False, default=5.0, min_value=0.5, max_value=25)
+    limit = serializers.IntegerField(required=False, default=10, min_value=1, max_value=50)
+
+    def validate_service(self, value):
+        try:
+            key = pricing.normalize_service_type(value)
+        except ValueError:
+            raise serializers.ValidationError("Unknown or inactive service.") from None
+        if not Service.objects.filter(pk=key, is_active=True).exists():
+            raise serializers.ValidationError("Unknown or inactive service.")
+        return key
+
+
+# =====================================================================
+# 7. RIDER WALLET, WITHDRAWALS, DEPOSITS
+# =====================================================================
 class AmountSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
 
 
-class WithdrawalRequestSerializer(AmountSerializer):
-    payout_account_id = serializers.IntegerField(required=False, min_value=1)
+class RiderWalletSerializer(ReadOnlyModelSerializer):
+    total_funds = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        model = RiderWallet
+        fields = [
+            "balance", "held_balance", "total_funds", "currency", "total_earned",
+            "total_withdrawn", "min_withdrawal", "daily_withdrawal_limit",
+            "is_active", "is_frozen", "frozen_reason", "updated_at",
+        ]
 
 
-class InitializePaymentSerializer(serializers.Serializer):
-    PURPOSES = ("booking", "wallet_deposit")
+class TransactionSerializer(ReadOnlyModelSerializer):
+    """Rider ledger line (WalletTransaction). Keeps the keys the app already uses."""
 
-    purpose = serializers.ChoiceField(choices=PURPOSES, default="booking")
-    booking_ref = serializers.CharField(required=False, max_length=32)
-    amount = serializers.DecimalField(required=False, max_digits=12, decimal_places=2,
-                                      min_value=Decimal("0.01"))
-
-    def validate(self, attrs):
-        if attrs["purpose"] == "booking" and not attrs.get("booking_ref"):
-            raise serializers.ValidationError({"booking_ref": "This field is required for booking payments."})
-        if attrs["purpose"] == "wallet_deposit" and attrs.get("amount") is None:
-            raise serializers.ValidationError({"amount": "This field is required for wallet deposits."})
-        return attrs
-
-
-class VerifyPaymentSerializer(serializers.Serializer):
-    reference = serializers.RegexField(REFERENCE_RE, error_messages={"invalid": "Invalid reference format."})
-
-
-class TransactionSerializer(serializers.ModelSerializer):
-    type_display = serializers.CharField(source="get_transaction_type_display", read_only=True)
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
-    direction = serializers.SerializerMethodField()
+    transaction_type = serializers.CharField(source="tx_type")
+    type_display = serializers.CharField(source="get_tx_type_display")
+    signed_amount = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    status_display = serializers.SerializerMethodField()
+    currency = serializers.CharField(source="wallet.currency")
 
     class Meta:
         model = WalletTransaction
         fields = [
             "id", "reference", "transaction_type", "type_display", "direction", "status",
-            "status_display", "amount", "balance_after", "currency", "description", "created_at",
+            "status_display", "amount", "signed_amount", "balance_before", "balance_after",
+            "currency", "description", "booking_ref", "created_at",
         ]
-        read_only_fields = fields
 
-    def get_direction(self, obj):
-        return "credit" if obj.amount >= 0 else "debit"
+    def get_signed_amount(self, obj):
+        return -obj.amount if obj.direction == WalletTransaction.Direction.DEBIT else obj.amount
+
+    def get_status(self, obj) -> str:
+        return "completed"  # ledger entries are only written once the movement happened
+
+    def get_status_display(self, obj) -> str:
+        return "Completed"
 
 
 class TransactionQuerySerializer(serializers.Serializer):
     ORDERING = ("-created_at", "created_at", "-amount", "amount")
 
-    type = serializers.ChoiceField(choices=[c for c, _ in TRANSACTION_TYPES], required=False)
-    status = serializers.ChoiceField(choices=WALLET_TX_STATUSES, required=False)
-    direction = serializers.ChoiceField(choices=("credit", "debit"), required=False)
+    type = serializers.ChoiceField(choices=WalletTransaction.Type.choices, required=False)
+    direction = serializers.ChoiceField(choices=WalletTransaction.Direction.choices, required=False)
     date_from = serializers.DateField(required=False)
     date_to = serializers.DateField(required=False)
     min_amount = serializers.DecimalField(required=False, max_digits=12, decimal_places=2, min_value=Decimal("0"))
@@ -592,29 +944,133 @@ class TransactionQuerySerializer(serializers.Serializer):
         return attrs
 
 
-class WalletDepositSerializer(serializers.ModelSerializer):
-    """Read-only view of a WalletDeposit (credited only through WalletDeposit.mark_completed())."""
-    rider_name = serializers.CharField(source="wallet.rider.full_name", read_only=True)
-    method_display = serializers.CharField(source="get_method_display", read_only=True)
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
-    net_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
-    is_expired = serializers.BooleanField(read_only=True)
+class WithdrawalRequestSerializer(AmountSerializer):
+    """Input. The payout account is resolved server-side and must belong to the rider."""
+
+    payout_account_id = serializers.IntegerField(required=False, min_value=1)
+
+
+class WithdrawalSerializer(ReadOnlyModelSerializer):
+    net_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    masked_account = serializers.CharField()
+    status_display = serializers.CharField(source="get_status_display")
+
+    class Meta:
+        model = WithdrawalRequest
+        fields = [
+            "id", "reference", "amount", "fee", "net_amount", "status", "status_display",
+            "method", "provider", "account_name", "masked_account", "failure_reason",
+            "requested_at", "processed_at",
+        ]
+
+
+class WalletDepositSerializer(ReadOnlyModelSerializer):
+    rider_name = serializers.CharField(source="wallet.rider.full_name")
+    currency = serializers.CharField(source="wallet.currency")
+    source_display = serializers.CharField(source="get_source_display")
 
     class Meta:
         model = WalletDeposit
         fields = [
-            "id", "rider_name", "amount", "fee", "net_amount", "currency",
-            "method", "method_display", "status", "status_display",
-            "provider", "provider_reference", "failure_reason",
-            "balance_before", "balance_after",
-            "created_at", "expires_at", "processed_at", "is_expired",
+            "id", "reference", "rider_name", "amount", "currency", "source",
+            "source_display", "source_reference", "notes", "created_at",
         ]
-        read_only_fields = fields
 
 
-# ---------------------------------------------------------------------------
-# Pricing quote
-# ---------------------------------------------------------------------------
+class StaffDepositSerializer(serializers.Serializer):
+    """Staff records a cash/bonus/bank deposit for a rider."""
+
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    source = serializers.ChoiceField(choices=WalletDeposit.SourceType.choices)
+    source_reference = serializers.CharField(required=False, allow_blank=True, max_length=255, default="")
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        source = attrs["source"]
+        if source in WalletDeposit.REFERENCE_REQUIRED_SOURCES and not attrs["source_reference"].strip():
+            raise serializers.ValidationError(
+                {"source_reference": "A provider transaction reference is required for this deposit type."}
+            )
+        return attrs
+
+
+# =====================================================================
+# 8. PAYMENTS AND REFUNDS
+# =====================================================================
+class InitializePaymentSerializer(serializers.Serializer):
+    PURPOSES = ("booking", "wallet_deposit")
+
+    purpose = serializers.ChoiceField(choices=PURPOSES, default="booking")
+    booking_ref = serializers.CharField(required=False, max_length=32)
+    amount = serializers.DecimalField(required=False, max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+
+    def validate(self, attrs):
+        if attrs["purpose"] == "booking" and not attrs.get("booking_ref"):
+            raise serializers.ValidationError({"booking_ref": "This field is required for booking payments."})
+        if attrs["purpose"] == "wallet_deposit" and attrs.get("amount") is None:
+            raise serializers.ValidationError({"amount": "This field is required for wallet deposits."})
+        return attrs
+
+
+class VerifyPaymentSerializer(serializers.Serializer):
+    reference = serializers.RegexField(REFERENCE_RE, error_messages={"invalid": "Invalid reference format."})
+
+
+class PaymentSerializer(ReadOnlyModelSerializer):
+    method_display = serializers.CharField(source="get_method_display")
+    status_display = serializers.CharField(source="get_status_display")
+    refundable_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+    class Meta:
+        model = Payment
+        fields = [
+            "id", "reference", "booking_ref", "amount", "currency", "refunded_amount",
+            "refundable_amount", "method", "method_display", "status", "status_display",
+            "failure_reason", "recorded_at", "created_at",
+        ]
+
+
+class RefundSerializer(ReadOnlyModelSerializer):
+    status_display = serializers.CharField(source="get_status_display")
+    reason_display = serializers.CharField(source="get_reason_display")
+    currency = serializers.CharField()
+    payment_reference = serializers.CharField(source="payment.reference")
+
+    class Meta:
+        model = Refund
+        fields = [
+            "id", "reference", "payment_reference", "amount", "currency", "reason",
+            "reason_display", "reason_details", "status", "status_display",
+            "rejection_reason", "failure_reason", "reviewed_at", "processed_at", "created_at",
+        ]
+
+
+class RefundRequestSerializer(serializers.Serializer):
+    payment_reference = serializers.CharField(max_length=30)
+    reason = serializers.ChoiceField(choices=Refund.Reason.choices)
+    amount = serializers.DecimalField(required=False, max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
+    reason_details = serializers.CharField(required=False, allow_blank=True, default="")
+    idempotency_key = serializers.CharField(required=False, allow_blank=True, max_length=100, default="")
+
+    def validate(self, attrs):
+        if attrs["reason"] == Refund.Reason.OTHER and not attrs["reason_details"].strip():
+            raise serializers.ValidationError({"reason_details": "Please describe the reason."})
+        return attrs
+
+
+class RefundDecisionSerializer(serializers.Serializer):
+    approve = serializers.BooleanField()
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=255, default="")
+
+    def validate(self, attrs):
+        if not attrs["approve"] and not attrs["reason"].strip():
+            raise serializers.ValidationError({"reason": "A reason is required to reject a refund."})
+        return attrs
+
+
+# =====================================================================
+# 9. PRICING QUOTE AND BOOKINGS
+# =====================================================================
 class QuoteStopSerializer(serializers.Serializer):
     lat = Lat()
     lng = Lng()
@@ -626,9 +1082,12 @@ class QuoteRequestSerializer(serializers.Serializer):
     pickup_lng = Lng()
     destination_lat = Lat()
     destination_lng = Lng()
-    service_type = serializers.ChoiceField(choices=ServiceType.choices, default=ServiceType.OKADA)
+    service_type = ServiceKeyField(default="okada")
     stops = QuoteStopSerializer(many=True, required=False, default=list)
-    promo_code = serializers.CharField(max_length=32, required=False, allow_blank=True, default="")
+    promo_code = serializers.CharField(max_length=32, required=False, allow_blank=True, allow_null=True, default="")
+
+    def validate_promo_code(self, value):
+        return (value or "").strip()
 
     def validate(self, attrs):
         limit = RATES[attrs["service_type"]].max_stops
@@ -639,14 +1098,22 @@ class QuoteRequestSerializer(serializers.Serializer):
         return attrs
 
 
-# ---------------------------------------------------------------------------
-# Bookings
-# ---------------------------------------------------------------------------
-class BookingStatusHistorySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = BookingStatusHistory
-        fields = ["from_status", "to_status", "source", "note", "created_at"]
-        read_only_fields = fields
+class QuoteResponseSerializer(serializers.Serializer):
+    """Shape the quote endpoint returns (documentation and response validation)."""
+
+    quote_token = serializers.CharField()
+    quote_id = serializers.CharField()
+    service_type = serializers.CharField()
+    service_name = serializers.CharField()
+    original_price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    discount_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    total_price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    currency = serializers.CharField()
+    distance_km = serializers.DecimalField(max_digits=8, decimal_places=2)
+    duration_min = serializers.IntegerField()
+    surge_multiplier = serializers.DecimalField(max_digits=3, decimal_places=1)
+    expires_at = serializers.DateTimeField()
 
 
 class BookingStopInputSerializer(serializers.Serializer):
@@ -656,51 +1123,186 @@ class BookingStopInputSerializer(serializers.Serializer):
 
 
 class BookingCreateSerializer(serializers.Serializer):
-    """No price field exists on purpose: the amount comes from quote_token only."""
+    """
+    No price field exists on purpose: the amount comes from quote_token only.
+
+    save(customer=request.user) creates a DRAFT booking priced from the signed quote and stores
+    the full fare snapshot in Booking.details["fare_snapshot"]. The view then calls
+    booking.submit() (cash/wallet) or starts the online payment first.
+    """
 
     quote_token = serializers.CharField(max_length=4096)
-    service_type = serializers.ChoiceField(choices=ServiceType.choices)
+    service_type = ServiceKeyField()
     pickup_address = serializers.CharField(max_length=255)
-    pickup_latitude = Lat()
-    pickup_longitude = Lng()
-    dropoff_address = serializers.CharField(max_length=255)
-    dropoff_latitude = Lat()
-    dropoff_longitude = Lng()
+    pickup_lat = Lat()
+    pickup_lng = Lng()
+    destination_address = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+    destination_lat = Lat()
+    destination_lng = Lng()
     stops = BookingStopInputSerializer(many=True, required=False, default=list)
-    notes = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+    notes = serializers.CharField(required=False, allow_blank=True, max_length=1000, default="")
+    scheduled_for = serializers.DateTimeField(required=False, allow_null=True)
+    payment_method = PaymentMethodField(default="cash")
+    details = serializers.DictField(required=False, default=dict)
+
+    def validate_scheduled_for(self, value):
+        if value and value < timezone.now():
+            raise serializers.ValidationError("Scheduled time cannot be in the past.")
+        return value
 
     def validate(self, attrs):
+        service = attrs["service_type"]
+        waste = service == "waste-bin"
+        if not waste and not attrs["destination_address"].strip():
+            raise serializers.ValidationError({"destination_address": "A destination is required."})
         if (
-            attrs["pickup_latitude"] == attrs["dropoff_latitude"]
-            and attrs["pickup_longitude"] == attrs["dropoff_longitude"]
+            not waste
+            and attrs["pickup_lat"] == attrs["destination_lat"]
+            and attrs["pickup_lng"] == attrs["destination_lng"]
         ):
-            raise serializers.ValidationError("Pickup and drop-off cannot be the same location.")
-        limit = RATES[attrs["service_type"]].max_stops
+            raise serializers.ValidationError("Pickup and destination cannot be the same location.")
+        limit = RATES[service].max_stops
         if len(attrs["stops"]) > limit:
+            raise serializers.ValidationError({"stops": f"{service} allows at most {limit} added stop(s)."})
+
+        customer = self.context.get("customer") or getattr(self.context.get("request"), "user", None)
+        profile = CustomerProfile.objects.filter(user=customer).first() if customer else None
+        if profile is not None and not profile.can_book:
             raise serializers.ValidationError(
-                {"stops": f"{attrs['service_type']} allows at most {limit} added stop(s)."}
+                "This account cannot place bookings right now. Clear outstanding fees or contact support."
             )
         return attrs
 
+    def _read_quote(self, attrs, user):
+        try:
+            data = pricing.read_quote(attrs["quote_token"], user_id=user.pk)
+        except pricing.QuoteError as exc:
+            raise serializers.ValidationError({"quote_token": exc.message}) from None
+        route = pricing.build_route(
+            (attrs["pickup_lat"], attrs["pickup_lng"]),
+            [{"lat": s["lat"], "lng": s["lng"]} for s in attrs["stops"]],
+            (attrs["destination_lat"], attrs["destination_lng"]),
+        )
+        if not pricing.quote_matches_trip(data, service_type=attrs["service_type"], route=route):
+            raise serializers.ValidationError(
+                {"quote_token": "This price was issued for a different trip. Please request a new quote."}
+            )
+        return data
 
-class BookingListSerializer(serializers.ModelSerializer):
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    def create(self, validated_data):
+        user = validated_data.pop("customer", None) or self.context.get("customer") or self.context["request"].user
+        quote = self._read_quote(validated_data, user)
+        fare = quote["fare"]
+        total = Decimal(fare["total"])
+        discount = Decimal(fare["discount"])
+        stops = validated_data["stops"]
+
+        details = dict(validated_data.get("details") or {})
+        details["quote_id"] = quote["qid"]
+        details["fare_snapshot"] = fare          # includes commission and rider earnings (staff/rider only)
+        details["waits"] = quote.get("waits", [])
+
+        with transaction.atomic():
+            booking = Booking.objects.create(
+                customer=user,
+                service_type=validated_data["service_type"],
+                pickup_address=validated_data["pickup_address"],
+                pickup_lat=float(validated_data["pickup_lat"]),
+                pickup_lng=float(validated_data["pickup_lng"]),
+                destination_address=validated_data["destination_address"],
+                destination_lat=float(validated_data["destination_lat"]),
+                destination_lng=float(validated_data["destination_lng"]),
+                notes=validated_data["notes"],
+                scheduled_for=validated_data.get("scheduled_for"),
+                details=details,
+                subtotal=total + discount,       # gross; Booking._apply_pricing() subtracts the discount
+                discount_amount=discount,
+                currency=pricing.CURRENCY,
+                payment_method=validated_data["payment_method"],
+                estimated_distance=float(Decimal(quote.get("dist", "0"))),
+            )
+            for index, stop in enumerate(stops, start=1):
+                BookingStop.objects.create(
+                    booking=booking, order=index, address=stop["address"],
+                    latitude=float(stop["lat"]), longitude=float(stop["lng"]),
+                )
+            code = fare.get("promo_code")
+            if code and discount > 0:
+                promo = PromoCode.find(code)
+                if promo is None:
+                    raise serializers.ValidationError({"promo_code": "This promo code is no longer valid."})
+                try:
+                    promo.redeem(
+                        user, booking.reference, total + discount, validated_data["service_type"],
+                        currency=pricing.CURRENCY,
+                    )
+                except DjangoValidationError as exc:
+                    raise serializers.ValidationError({"promo_code": exc.messages[0]}) from None
+            if booking.total_fare != total:
+                raise serializers.ValidationError("Price mismatch. Please request a new quote.")
+        return booking
+
+
+class BookingStatusHistorySerializer(ReadOnlyModelSerializer):
+    changed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BookingStatusHistory
+        fields = ["id", "status", "notes", "changed_by_name", "created_at"]
+
+    def get_changed_by_name(self, obj):
+        user = obj.changed_by
+        return (user.get_full_name() or user.get_username()) if user else None
+
+
+class BookingStopSerializer(ReadOnlyModelSerializer):
+    class Meta:
+        model = BookingStop
+        fields = ["id", "order", "address", "latitude", "longitude"]
+
+
+class BookingListSerializer(ReadOnlyModelSerializer):
+    """List view. Also exposes the short keys the customer app reads (pickup, destination, price)."""
+
+    status_display = serializers.CharField(source="get_status_display")
+    pickup = serializers.CharField(source="pickup_address")
+    destination = serializers.CharField(source="destination_address")
+    price = serializers.DecimalField(source="total_fare", max_digits=10, decimal_places=2)
+    rider_name = serializers.SerializerMethodField()
+    rider_phone = serializers.SerializerMethodField()
+    rider_lat = serializers.SerializerMethodField()
+    rider_lon = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
         fields = [
             "id", "reference", "status", "status_display", "service_type",
-            "pickup_address", "dropoff_address", "price", "currency",
-            "payment_status", "created_at",
+            "pickup_address", "destination_address", "pickup", "destination",
+            "total_fare", "price", "currency", "payment_method", "payment_status",
+            "scheduled_for", "created_at", "rider_name", "rider_phone", "rider_lat", "rider_lon",
         ]
-        read_only_fields = fields
 
+    def _profile(self, obj):
+        return getattr(obj.rider, "rider_profile", None) if obj.rider_id else None
 
-class BookingStopSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = BookingStop
-        fields = ["sequence", "address", "latitude", "longitude", "arrived_at", "departed_at"]
-        read_only_fields = fields
+    def _live(self, obj):
+        return obj.status in (Booking.Status.ACCEPTED, Booking.Status.EN_ROUTE, Booking.Status.ARRIVED)
+
+    def get_rider_name(self, obj):
+        p = self._profile(obj)
+        return p.full_name if p else None
+
+    def get_rider_phone(self, obj):
+        p = self._profile(obj)
+        return p.phone if p and self._live(obj) else None
+
+    def get_rider_lat(self, obj):
+        p = self._profile(obj)
+        return p.current_lat if p and self._live(obj) else None
+
+    def get_rider_lon(self, obj):
+        p = self._profile(obj)
+        return p.current_lng if p and self._live(obj) else None
 
 
 RECEIPT_KEYS = (
@@ -708,85 +1310,501 @@ RECEIPT_KEYS = (
     "waiting_charge", "booking_fee", "discount", "total",
 )
 
-_DETAIL_FIELDS = [
-    "id", "reference", "status", "status_display", "payment_status",
-    "customer_name", "rider", "service_type", "notes",
-    "pickup_address", "pickup_latitude", "pickup_longitude",
-    "dropoff_address", "dropoff_latitude", "dropoff_longitude",
-    "stops", "distance_km", "quoted_price", "price", "currency",
-    "surge_multiplier", "promo_code", "discount_amount", "cancellation_fee", "receipt",
-    "accepted_at", "arrived_at", "picked_up_at", "completed_at",
-    "cancelled_at", "cancellation_reason",
-    "allowed_next_statuses", "history", "created_at", "updated_at",
+_BOOKING_DETAIL_FIELDS = [
+    "id", "reference", "status", "status_display", "service_type", "payment_method",
+    "payment_status", "customer_name", "rider", "notes", "scheduled_for",
+    "pickup_address", "pickup_lat", "pickup_lng",
+    "destination_address", "destination_lat", "destination_lng", "stops",
+    "estimated_distance", "estimated_duration", "subtotal", "discount_amount", "total_fare",
+    "currency", "receipt", "requested_at", "accepted_at", "started_at", "arrived_at",
+    "completed_at", "cancelled_at", "cancellation_reason", "allowed_next_statuses",
+    "history", "created_at", "updated_at",
 ]
 
 
-class BookingDetailSerializer(serializers.ModelSerializer):
+class BookingDetailSerializer(ReadOnlyModelSerializer):
     """Customer-safe view: no commission, no rider earnings, no signing data."""
 
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    status_display = serializers.CharField(source="get_status_display")
     customer_name = serializers.SerializerMethodField()
     rider = serializers.SerializerMethodField()
-    history = BookingStatusHistorySerializer(many=True, read_only=True)
-    stops = BookingStopSerializer(many=True, read_only=True)
+    history = BookingStatusHistorySerializer(source="status_history", many=True)
+    stops = BookingStopSerializer(many=True)
     receipt = serializers.SerializerMethodField()
     allowed_next_statuses = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
-        fields = _DETAIL_FIELDS
-        read_only_fields = _DETAIL_FIELDS
+        fields = _BOOKING_DETAIL_FIELDS
 
     def get_customer_name(self, obj) -> str:
         return obj.customer.get_full_name() or obj.customer.get_username()
 
     def get_rider(self, obj):
-        if obj.rider is None:
+        profile = getattr(obj.rider, "rider_profile", None) if obj.rider_id else None
+        if profile is None:
             return None
-        data = RiderPublicSerializer(obj.rider).data
+        data = RiderPublicSerializer(profile).data
         if obj.is_terminal:  # no phone number or live location once the trip is over
             for key in ("phone_number", "latitude", "longitude", "last_location_at"):
                 data.pop(key, None)
         return data
 
     def get_receipt(self, obj):
-        source = obj.final_breakdown or obj.price_breakdown or {}
-        return {k: source[k] for k in RECEIPT_KEYS if k in source}
+        snapshot = (obj.details or {}).get("fare_snapshot", {})
+        return {k: snapshot[k] for k in RECEIPT_KEYS if k in snapshot}
 
-    def get_allowed_next_statuses(self, obj) -> list[str]:
-        return sorted(obj.ALLOWED_TRANSITIONS.get(obj.status, set()))
+    def get_allowed_next_statuses(self, obj) -> list:
+        return sorted(str(s) for s in obj.TRANSITIONS.get(obj.status, set()))
 
 
 class RiderBookingDetailSerializer(BookingDetailSerializer):
+    rider_earnings = serializers.SerializerMethodField()
+
     class Meta(BookingDetailSerializer.Meta):
-        fields = _DETAIL_FIELDS + ["rider_earnings"]
-        read_only_fields = fields
+        fields = _BOOKING_DETAIL_FIELDS + ["rider_earnings"]
+
+    def get_rider_earnings(self, obj):
+        return (obj.details or {}).get("fare_snapshot", {}).get("rider_earnings")
 
 
-class StaffBookingDetailSerializer(BookingDetailSerializer):
-    class Meta(BookingDetailSerializer.Meta):
-        fields = _DETAIL_FIELDS + [
-            "rider_earnings", "platform_fee", "quote_id", "price_breakdown", "final_breakdown",
+class StaffBookingDetailSerializer(RiderBookingDetailSerializer):
+    platform_commission = serializers.SerializerMethodField()
+    platform_revenue = serializers.SerializerMethodField()
+    fare_snapshot = serializers.SerializerMethodField()
+
+    class Meta(RiderBookingDetailSerializer.Meta):
+        fields = RiderBookingDetailSerializer.Meta.fields + [
+            "platform_commission", "platform_revenue", "fare_snapshot", "details",
+            "cancelled_by", "failure_reason", "failed_at",
         ]
-        read_only_fields = fields
+
+    def get_platform_commission(self, obj):
+        return (obj.details or {}).get("fare_snapshot", {}).get("platform_commission")
+
+    def get_platform_revenue(self, obj):
+        return (obj.details or {}).get("fare_snapshot", {}).get("platform_revenue")
+
+    def get_fare_snapshot(self, obj):
+        return (obj.details or {}).get("fare_snapshot", {})
 
 
 class BookingStatusUpdateSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=Booking.Status.choices)
-    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255, default="")
 
 
 class BookingCancelSerializer(serializers.Serializer):
-    reason = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=255, default="")
 
 
-class BookingStopEventSerializer(serializers.Serializer):
-    event = serializers.ChoiceField(choices=["arrived", "departed"])
+# =====================================================================
+# 10. DISPATCH OFFERS
+# =====================================================================
+class DispatchOfferSerializer(ReadOnlyModelSerializer):
+    booking_reference = serializers.CharField(source="booking.reference")
+    service_type = serializers.CharField(source="booking.service_type")
+    pickup_address = serializers.CharField(source="booking.pickup_address")
+    destination_address = serializers.CharField(source="booking.destination_address")
+    estimated_distance = serializers.FloatField(source="booking.estimated_distance")
+    rider_earnings = serializers.SerializerMethodField()
+    seconds_remaining = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DispatchOffer
+        fields = [
+            "id", "booking_reference", "service_type", "pickup_address", "destination_address",
+            "estimated_distance", "rider_earnings", "status", "round_no", "distance_km",
+            "offered_at", "expires_at", "seconds_remaining",
+        ]
+
+    def get_rider_earnings(self, obj):
+        return (obj.booking.details or {}).get("fare_snapshot", {}).get("rider_earnings")
+
+    def get_seconds_remaining(self, obj) -> int:
+        return max(int((obj.expires_at - timezone.now()).total_seconds()), 0)
 
 
-# ---------------------------------------------------------------------------
-# Webhook
-# ---------------------------------------------------------------------------
+class DeclineOfferSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=60, default="")
+
+
+class BookingOfferSerializer(ReadOnlyModelSerializer):
+    """Legacy price-offer model (BookingOffer)."""
+
+    is_actionable = serializers.BooleanField()
+
+    class Meta:
+        model = BookingOffer
+        fields = [
+            "id", "booking_ref", "rider", "offered_price", "message", "status",
+            "expires_at", "responded_at", "is_actionable", "created_at",
+        ]
+
+
+# =====================================================================
+# 11. PARCEL
+# =====================================================================
+class ParcelTrackingEventSerializer(ReadOnlyModelSerializer):
+    status_display = serializers.CharField(source="get_status_display")
+
+    class Meta:
+        model = ParcelTrackingEvent
+        fields = [
+            "id", "status", "status_display", "note", "location_label",
+            "latitude", "longitude", "created_at",
+        ]
+
+
+class ParcelProofSerializer(ReadOnlyModelSerializer):
+    class Meta:
+        model = ParcelProof
+        fields = [
+            "id", "proof_type", "image", "signed_by", "notes",
+            "latitude", "longitude", "created_at",
+        ]
+
+
+class ParcelProofCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ParcelProof
+        fields = ["proof_type", "image", "signed_by", "notes", "latitude", "longitude"]
+
+    def validate_image(self, f):
+        return _validate_image(f) if f else f
+
+    def validate(self, attrs):
+        if attrs["proof_type"] != ParcelProof.ProofType.PIN_VERIFIED and not attrs.get("image"):
+            raise serializers.ValidationError({"image": "An image is required for this proof type."})
+        return attrs
+
+
+class ParcelDetailSerializer(ReadOnlyModelSerializer):
+    """Customer/rider view. The delivery PIN is NOT included."""
+
+    status_display = serializers.CharField(source="get_status_display")
+    events = ParcelTrackingEventSerializer(many=True)
+    proofs = ParcelProofSerializer(many=True)
+    is_final = serializers.BooleanField()
+
+    class Meta:
+        model = ParcelDetail
+        fields = [
+            "id", "booking_ref", "tracking_code", "status", "status_display", "recipient_name",
+            "recipient_phone", "item_description", "item_value", "package_size", "weight_kg",
+            "is_fragile", "requires_signature", "special_instructions", "delivery_attempts",
+            "received_by", "picked_up_at", "delivered_at", "is_final", "events", "proofs",
+            "created_at",
+        ]
+
+
+class ParcelOwnerSerializer(ParcelDetailSerializer):
+    """Sender only: includes the handover PIN to give the recipient."""
+
+    class Meta(ParcelDetailSerializer.Meta):
+        fields = ParcelDetailSerializer.Meta.fields + ["delivery_pin"]
+
+
+class ParcelPublicTrackingSerializer(ReadOnlyModelSerializer):
+    """Recipient tracking page: no phone numbers, no PIN."""
+
+    status_display = serializers.CharField(source="get_status_display")
+    events = ParcelTrackingEventSerializer(many=True)
+
+    class Meta:
+        model = ParcelDetail
+        fields = ["tracking_code", "status", "status_display", "delivered_at", "events"]
+
+
+class ParcelCreateSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    recipient_phone = serializers.CharField(max_length=20)
+
+    class Meta:
+        model = ParcelDetail
+        fields = [
+            "booking_ref", "recipient_name", "recipient_phone", "recipient_email", "notify_recipient",
+            "item_description", "item_value", "package_size", "weight_kg", "is_fragile",
+            "requires_signature", "special_instructions",
+        ]
+
+    def validate_recipient_phone(self, value):
+        return clean_phone(value)
+
+    def validate_booking_ref(self, value):
+        user = self.context["request"].user
+        if not Booking.objects.filter(reference=value, customer=user).exists():
+            raise serializers.ValidationError("Booking not found.")
+        return value
+
+
+class ParcelStatusUpdateSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=ParcelDetail.Status.choices)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255, default="")
+    latitude = Lat(required=False, allow_null=True)
+    longitude = Lng(required=False, allow_null=True)
+    location_label = serializers.CharField(required=False, allow_blank=True, max_length=150, default="")
+    delivery_pin = serializers.RegexField(r"^\d{4}$", required=False)
+
+    def validate(self, attrs):
+        if attrs["status"] == ParcelDetail.Status.DELIVERED and "delivery_pin" not in attrs:
+            raise serializers.ValidationError({"delivery_pin": "The recipient's 4-digit PIN is required."})
+        return attrs
+
+
+class ParcelFeedbackSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    class Meta:
+        model = ParcelFeedback
+        fields = ["id", "rating", "comment", "created_at"]
+        read_only_fields = ["id", "created_at"]
+
+
+# =====================================================================
+# 12. GROWTH: PROMO, REFERRAL, BUSINESS, WASTE, RECURRING
+# =====================================================================
+class PromoCodePublicSerializer(ReadOnlyModelSerializer):
+    discount_display = serializers.CharField(source="get_discount_display")
+    weekday_label = serializers.CharField()
+
+    class Meta:
+        model = PromoCode
+        fields = [
+            "code", "name", "description", "discount_type", "discount_value", "discount_display",
+            "currency", "minimum_order_value", "maximum_discount", "valid_until",
+            "weekday_label", "valid_from_time", "valid_until_time", "for_service_types",
+            "first_time_customers_only",
+        ]
+
+
+class PromoValidateSerializer(serializers.Serializer):
+    """Server-side promo check. The discount is recalculated inside the next quote."""
+
+    code = serializers.CharField(max_length=50)
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
+    service_type = ServiceKeyField()
+
+    def validate_code(self, value):
+        return value.strip()
+
+
+class ReferralSerializer(ReadOnlyModelSerializer):
+    status_display = serializers.CharField(source="get_status_display")
+
+    class Meta:
+        model = Referral
+        fields = [
+            "id", "code", "status", "status_display", "currency", "reward_amount",
+            "referee_reward_amount", "signed_up_at", "completed_at", "rewarded_at",
+            "expires_at", "created_at",
+        ]
+
+
+class ReferralCodeSerializer(ReadOnlyModelSerializer):
+    class Meta:
+        model = ReferralCode
+        fields = [
+            "code", "status", "referrer_reward_value", "referee_reward_value", "currency",
+            "max_uses", "times_used", "valid_until",
+        ]
+
+
+class RedeemReferralSerializer(serializers.Serializer):
+    code = serializers.CharField(max_length=20)
+
+    def validate_code(self, value):
+        return Referral.normalize_code(value)
+
+
+class BusinessAccountApplicationSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+
+    class Meta:
+        model = BusinessAccount
+        fields = [
+            "id", "business_name", "contact_person", "email", "phone_number", "address", "industry",
+            "registration_number", "service_type", "preferred_frequency", "preferred_day",
+            "preferred_time", "estimated_volume", "discount_requested", "discount_approved",
+            "status", "status_display", "review_notes", "created_at",
+        ]
+        read_only_fields = ["id", "discount_approved", "status", "review_notes", "created_at"]
+
+    def validate_email(self, value):
+        value = value.strip().lower()
+        qs = BusinessAccount.objects.filter(email__iexact=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A business with this email already exists.")
+        return value
+
+
+class BusinessReviewSerializer(serializers.Serializer):
+    """Staff review: approve (optional discount) or reject (reason required)."""
+
+    approve = serializers.BooleanField()
+    discount_approved = serializers.DecimalField(
+        required=False, max_digits=5, decimal_places=2, min_value=Decimal("0"), max_value=Decimal("100")
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        if not attrs["approve"] and not attrs["notes"].strip():
+            raise serializers.ValidationError({"notes": "A reason is required to reject an application."})
+        return attrs
+
+
+class RecurringBookingSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+
+    class Meta:
+        model = RecurringBooking
+        fields = [
+            "id", "reference", "business", "service_type", "pickup_address", "dropoff_address",
+            "notes", "frequency", "preferred_day", "preferred_time", "start_date", "end_date",
+            "next_booking_date", "status", "status_display", "created_at",
+        ]
+        read_only_fields = ["id", "reference", "status", "created_at"]
+
+    def validate(self, attrs):
+        get = lambda k: attrs.get(k, getattr(self.instance, k, None))  # noqa: E731
+        nxt, day, start, end = get("next_booking_date"), get("preferred_day"), get("start_date"), get("end_date")
+        errors = {}
+        if nxt and day is not None and nxt.weekday() != day:
+            errors["next_booking_date"] = "Next booking must fall on the preferred weekday."
+        if start and nxt and nxt < start:
+            errors["next_booking_date"] = "First booking cannot be before the start date."
+        if start and end and end < start:
+            errors["end_date"] = "End date cannot be before the start date."
+        if get("service_type") != "waste-bin" and not (get("dropoff_address") or "").strip():
+            errors["dropoff_address"] = "A drop-off address is required for this service."
+        business = get("business")
+        if business is not None and not business.is_active:
+            errors["business"] = "Only active businesses can schedule recurring bookings."
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+
+class WasteCollectionSerializer(ReadOnlyModelSerializer):
+    status_display = serializers.CharField(source="get_status_display")
+
+    class Meta:
+        model = WasteCollection
+        fields = [
+            "id", "reference", "subscription", "scheduled_date", "scheduled_time", "status",
+            "status_display", "assigned_rider", "price", "bins_collected", "weight_kg",
+            "proof_photo", "notes", "completed_at",
+        ]
+
+
+class WasteCollectionCompleteSerializer(serializers.Serializer):
+    bins_collected = serializers.IntegerField(required=False, min_value=0)
+    weight_kg = serializers.DecimalField(required=False, max_digits=7, decimal_places=2, min_value=Decimal("0"))
+    proof_photo = serializers.ImageField(required=False)
+    notes = serializers.CharField(required=False, allow_blank=True, max_length=255, default="")
+
+    def validate_proof_photo(self, f):
+        return _validate_image(f)
+
+
+class WasteSubscriptionSerializer(ReadOnlyModelSerializer):
+    status_display = serializers.CharField(source="get_status_display")
+    estimated_monthly_cost = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+    class Meta:
+        model = WasteSubscription
+        fields = [
+            "id", "reference", "waste_type", "quantity", "pickup_address", "latitude", "longitude",
+            "contact_phone", "special_instructions", "frequency", "preferred_day", "preferred_time",
+            "start_date", "end_date", "next_collection_date", "price_per_collection",
+            "discount_percent", "total_price", "estimated_monthly_cost", "status",
+            "status_display", "business", "created_at",
+        ]
+
+
+class WasteSubscriptionCreateSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    """
+    The price is NEVER accepted from the client: it is fixed server-side from pricing.RATES
+    when the subscription is created. save(customer=request.user) sets the owner.
+    """
+
+    class Meta:
+        model = WasteSubscription
+        fields = [
+            "waste_type", "quantity", "pickup_address", "latitude", "longitude", "contact_phone",
+            "special_instructions", "frequency", "preferred_day", "preferred_time", "start_date",
+            "end_date", "next_collection_date", "business",
+        ]
+
+    def validate(self, attrs):
+        errors = {}
+        day, nxt = attrs.get("preferred_day"), attrs.get("next_collection_date")
+        start, end = attrs.get("start_date") or timezone.localdate(), attrs.get("end_date")
+        if nxt and day is not None and nxt.weekday() != day:
+            errors["next_collection_date"] = "Next collection must fall on the preferred weekday."
+        if nxt and nxt < start:
+            errors["next_collection_date"] = "First collection cannot be before the start date."
+        if end and end < start:
+            errors["end_date"] = "End date cannot be before the start date."
+        if (
+            attrs.get("waste_type") == WasteSubscription.WasteType.HAZARDOUS
+            and not (attrs.get("special_instructions") or "").strip()
+        ):
+            errors["special_instructions"] = "Describe the hazardous waste and how it is stored."
+        business = attrs.get("business")
+        if business is not None and not business.is_active:
+            errors["business"] = "Subscriptions can only be created for active businesses."
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.setdefault("price_per_collection", RATES["waste-bin"].minimum)
+        return super().create(validated_data)
+
+
+# =====================================================================
+# 13. REVIEWS, COMPLAINTS, INCIDENTS, NOTIFICATIONS, WEBHOOK
+# =====================================================================
+class ReviewSerializer(ReadOnlyModelSerializer):
+    class Meta:
+        model = Review
+        fields = ["id", "booking_ref", "subject_type", "rating", "comment", "created_at"]
+
+
+class ReviewCreateSerializer(serializers.Serializer):
+    booking_ref = serializers.CharField(max_length=50)
+    rating = serializers.IntegerField(min_value=1, max_value=5)
+    comment = serializers.CharField(required=False, allow_blank=True, max_length=1000, default="")
+
+
+class RiderComplaintSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+
+    class Meta:
+        model = RiderComplaint
+        fields = [
+            "id", "reference", "complaint_type", "subject", "description", "rider",
+            "booking_ref", "status", "status_display", "created_at", "resolved_at",
+        ]
+        read_only_fields = ["id", "reference", "status", "created_at", "resolved_at"]
+
+
+class RiderIncidentSerializer(CleanErrorsMixin, serializers.ModelSerializer):
+    class Meta:
+        model = RiderIncident
+        fields = [
+            "id", "booking_ref", "title", "description", "severity", "status",
+            "created_at", "resolved_at",
+        ]
+        read_only_fields = ["id", "status", "created_at", "resolved_at"]
+
+
+class NotificationSerializer(ReadOnlyModelSerializer):
+    class Meta:
+        model = Notification
+        fields = ["id", "title", "message", "category", "data", "is_read", "read_at", "created_at"]
+
+
 class BookingWebhookSerializer(serializers.Serializer):
     event_id = serializers.CharField(max_length=100)
     event_type = serializers.ChoiceField(
