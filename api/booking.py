@@ -1,427 +1,401 @@
 """
-Booking + pricing API. Replaces the booking classes that lived in views.py
-(BookingViewSet, NearbyRidersView, BookingWebhookView, StandardPagination) and
-the calculate_price view that lived in booking_views.py.
+Booking serializers (api/booking.py).
+
+Matched to models.Booking, BookingStop, BookingStatusHistory and Payment:
+  * Booking.rider is a USER (not a RiderProfile); rider details come from user.rider_profile.
+  * BookingStop uses `order` (exposed to clients as `sequence`).
+  * BookingStatusHistory uses `status` / `notes` and related_name="status_history".
+  * Fare breakdown, rider earnings and platform fee live on the Payment row created with the
+    booking (Payment.metadata["fare"]); Booking itself stores subtotal / discount / total.
+
+Clients may send either spelling of the service ("okada"/"ride", "parcel"/"delivery",
+"waste-bin"/"waste_collection") and either coordinate naming; both are normalised here.
 """
-import hashlib
-import hmac
-import logging
-from datetime import datetime, time, timedelta
+import math
+from collections.abc import Mapping
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from django.conf import settings
-from django.db import transaction
-from django.db.models import Q
-from django.urls import reverse
-from django.utils.dateparse import parse_date
-from rest_framework import mixins, permissions, status, viewsets
-from rest_framework.decorators import action
-from rest_framework.exceptions import APIException
-from rest_framework.pagination import PageNumberPagination
-from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
-from rest_framework.views import APIView
+from django.utils import timezone
+from rest_framework import serializers
 
-from . import pricing, services
-from .models import Booking, WebhookEvent
-from .serializers import (
-    BookingCancelSerializer,
-    BookingCreateSerializer,
-    BookingDetailSerializer,
-    BookingListSerializer,
-    BookingStatusUpdateSerializer,
-    BookingStopEventSerializer,
-    BookingWebhookSerializer,
-    NearbyRiderSerializer,
-    NearbyRidersQuerySerializer,
-    QuoteRequestSerializer,
-    RiderBookingDetailSerializer,
-    StaffBookingDetailSerializer,
-)
+from . import pricing
+from .models import Booking, BookingStatusHistory, BookingStop, Payment
 
-logger = logging.getLogger(__name__)
+MONEY = {"coerce_to_string": False}  # money is rendered as JSON numbers, like the quote endpoint
+
+PAYMENT_METHOD_ALIASES = {
+    "mobile_money": "momo", "mobile-money": "momo", "mtn": "momo", "momo": "momo",
+    "visa": "card", "visa_card": "card", "debit": "card", "debit_card": "card",
+    "credit_card": "card", "card": "card",
+    "cash": "cash", "wallet": "wallet",
+}
+BOOKING_PAYMENT_METHODS = ("cash", "momo", "card", "wallet")
+
+QUOTE_ALIASES = {
+    "pickup_latitude": "pickup_lat", "pickup_longitude": "pickup_lng",
+    "dropoff_latitude": "destination_lat", "dropoff_longitude": "destination_lng",
+    "dropoff_lat": "destination_lat", "dropoff_lng": "destination_lng",
+    "destination_latitude": "destination_lat", "destination_longitude": "destination_lng",
+}
+CREATE_ALIASES = {
+    "pickup_lat": "pickup_latitude", "pickup_lng": "pickup_longitude",
+    "destination_lat": "dropoff_latitude", "destination_lng": "dropoff_longitude",
+    "dropoff_lat": "dropoff_latitude", "dropoff_lng": "dropoff_longitude",
+    "destination_address": "dropoff_address",
+    "quote": "quote_token",
+}
 
 
-class StandardPagination(PageNumberPagination):
-    page_size = 20
-    page_size_query_param = "page_size"
-    max_page_size = 100
+def _with_aliases(data, aliases):
+    """Copy incoming data, filling canonical names from their aliases."""
+    if not isinstance(data, Mapping):
+        return data
+    data = data.dict() if hasattr(data, "dict") else dict(data)
+    for alias, canonical in aliases.items():
+        if canonical not in data and alias in data:
+            data[canonical] = data[alias]
+    return data
 
 
-# ---------------------------------------------------------------------------
-# Pricing quote  (same URL and response keys as the old calculate_price view)
-# ---------------------------------------------------------------------------
-class QuoteView(APIView):
-    """POST /booking/calculate-price/ - price a trip. Logged-in users also get a
-    signed `quote_token`, which is the only thing booking creation accepts."""
+class CoordinateField(serializers.Field):
+    """Latitude/longitude as a Decimal rounded to 6 places (the precision signed into quotes)."""
+    default_error_messages = {
+        "invalid": "A valid coordinate is required.",
+        "range": "Coordinate is out of range.",
+    }
 
-    permission_classes = [permissions.AllowAny]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = "quote"
+    def __init__(self, *, limit, **kwargs):
+        self.limit = Decimal(limit)
+        super().__init__(**kwargs)
 
-    def post(self, request):
-        serializer = QuoteRequestSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(
-                {"error": "Invalid request", "details": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        d = serializer.validated_data
-        service_type = d["service_type"]
-        rate = pricing.RATES[service_type]
-        stops = d["stops"]
-
-        route = pricing.build_route(
-            (d["pickup_lat"], d["pickup_lng"]), stops, (d["destination_lat"], d["destination_lng"])
-        )
-        user = request.user if request.user and request.user.is_authenticated else None
+    def to_internal_value(self, data):
+        if isinstance(data, bool):
+            self.fail("invalid")
         try:
-            q = services.quote_trip(
-                user=user, service_type=service_type, route=route,
-                wait_minutes=[s["wait_minutes"] for s in stops],
-                promo_code=d.get("promo_code", ""),
-            )
-        except services.TripTooLong as exc:
-            return Response({"error": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
+            value = Decimal(str(data)).quantize(pricing.COORD, rounding=ROUND_HALF_UP)
+        except (InvalidOperation, ValueError, TypeError):
+            self.fail("invalid")
+        if not value.is_finite() or abs(value) > self.limit:
+            self.fail("range")
+        return value
 
-        fare, surge, waiting = q["fare"], q["surge"], q["fare"]["waiting"]
-        logger.info(
-            "price_quote service=%s distance_km=%s stops=%d surge=%s reason=%s total=%s user=%s",
-            service_type, q["distance"], len(stops), surge.multiplier, surge.reason,
-            fare["total"], getattr(user, "pk", None),
+    def to_representation(self, value):
+        return float(value)
+
+
+def LatField(**kwargs):
+    return CoordinateField(limit=90, **kwargs)
+
+
+def LngField(**kwargs):
+    return CoordinateField(limit=180, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Quote
+# ---------------------------------------------------------------------------
+class TripStopSerializer(serializers.Serializer):
+    address = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+    lat = LatField()
+    lng = LngField()
+    wait_minutes = serializers.FloatField(
+        min_value=0, max_value=pricing.MAX_WAIT_INPUT_MINUTES, required=False, default=0
+    )
+
+    def to_internal_value(self, data):
+        data = _with_aliases(
+            data,
+            {"latitude": "lat", "longitude": "lng", "expected_wait_minutes": "wait_minutes"},
         )
-        payload = {
-            "service_type": service_type,
-            "currency": pricing.CURRENCY,
-            "distance_km": float(q["distance"]),
-            "price_per_km": float(rate.per_km),
-            "breakdown": {
-                "base_fare": float(fare["base_fare"]),
-                "distance_fare": float(fare["distance_fare"]),
-                "subtotal": float(fare["subtotal"]),
-                "surge_amount": float(fare["surge_amount"]),
-                "minimum_fare": float(fare["minimum_fare"]),
-                "minimum_applied": fare["minimum_applied"],
-                "ride_fare": float(fare["ride_fare"]),
-                "stop_fees": float(fare["stop_fees"]),
-                "waiting_charge": float(waiting["charge"]),
-                "booking_fee": float(fare["booking_fee"]),
-                "discount": float(fare["discount"]),
-                "promo_code": fare["promo_code"],
+        return super().to_internal_value(data)
+
+    def validate_wait_minutes(self, value):
+        if not math.isfinite(value):
+            raise serializers.ValidationError("A valid number of minutes is required.")
+        return Decimal(str(round(value, 2)))
+
+
+class _ServiceMixin:
+    def validate_service_type(self, value):
+        try:
+            return pricing.normalize_service_type(value)
+        except ValueError:
+            raise serializers.ValidationError("Unknown service type.")
+
+    @staticmethod
+    def _check_stops(attrs):
+        rate = pricing.RATES[attrs["service_type"]]
+        if len(attrs.get("stops", [])) > rate.max_stops:
+            raise serializers.ValidationError(
+                {"stops": f"This service allows at most {rate.max_stops} stops."}
+            )
+
+
+class QuoteRequestSerializer(_ServiceMixin, serializers.Serializer):
+    service_type = serializers.CharField()
+    pickup_lat = LatField()
+    pickup_lng = LngField()
+    destination_lat = LatField()
+    destination_lng = LngField()
+    stops = TripStopSerializer(many=True, required=False, default=list)
+    promo_code = serializers.CharField(max_length=50, required=False, allow_blank=True, default="")
+
+    def to_internal_value(self, data):
+        return super().to_internal_value(_with_aliases(data, QUOTE_ALIASES))
+
+    def validate_promo_code(self, value):
+        return value.strip()
+
+    def validate(self, attrs):
+        self._check_stops(attrs)
+        return attrs
+
+
+# ---------------------------------------------------------------------------
+# Create / status / cancel
+# ---------------------------------------------------------------------------
+class BookingCreateSerializer(_ServiceMixin, serializers.Serializer):
+    quote_token = serializers.CharField()
+    service_type = serializers.CharField()
+    pickup_address = serializers.CharField(max_length=255)
+    pickup_latitude = LatField()
+    pickup_longitude = LngField()
+    dropoff_address = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+    dropoff_latitude = LatField()
+    dropoff_longitude = LngField()
+    stops = TripStopSerializer(many=True, required=False, default=list)
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+    payment_method = serializers.CharField(required=False, default="cash")
+    scheduled_for = serializers.DateTimeField(required=False, allow_null=True, default=None)
+
+    def to_internal_value(self, data):
+        return super().to_internal_value(_with_aliases(data, CREATE_ALIASES))
+
+    def validate_payment_method(self, value):
+        method = PAYMENT_METHOD_ALIASES.get(str(value).strip().lower())
+        if method not in BOOKING_PAYMENT_METHODS:
+            raise serializers.ValidationError(
+                f"Choose one of: {', '.join(BOOKING_PAYMENT_METHODS)}."
+            )
+        return method
+
+    def validate_scheduled_for(self, value):
+        if value is not None and value <= timezone.now():
+            raise serializers.ValidationError("Scheduled time must be in the future.")
+        return value
+
+    def validate(self, attrs):
+        self._check_stops(attrs)
+        if attrs["service_type"] != "waste-bin" and not attrs.get("dropoff_address", "").strip():
+            raise serializers.ValidationError(
+                {"dropoff_address": "A drop-off address is required for this service."}
+            )
+        return attrs
+
+
+class BookingStatusUpdateSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=[
+        Booking.Status.ACCEPTED, Booking.Status.IN_PROGRESS,
+        Booking.Status.COMPLETED, Booking.Status.CANCELLED,
+    ])
+    note = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+
+class BookingCancelSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+
+class BookingWebhookSerializer(serializers.Serializer):
+    event_id = serializers.CharField(max_length=255)
+    event_type = serializers.CharField(max_length=100)
+    source = serializers.CharField(max_length=50, required=False, default="booking")
+    data = serializers.DictField()
+
+
+# ---------------------------------------------------------------------------
+# Nearby riders
+# ---------------------------------------------------------------------------
+class NearbyRidersQuerySerializer(_ServiceMixin, serializers.Serializer):
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lng = serializers.FloatField(min_value=-180, max_value=180)
+    radius_km = serializers.FloatField(min_value=0.5, max_value=25, default=5)
+    service_type = serializers.CharField(required=False)
+    limit = serializers.IntegerField(min_value=1, max_value=50, default=20)
+
+    def validate(self, attrs):
+        for key in ("lat", "lng", "radius_km"):
+            if not math.isfinite(attrs[key]):
+                raise serializers.ValidationError({key: "A finite number is required."})
+        return attrs
+
+
+class NearbyRiderSerializer(serializers.Serializer):
+    """Public-safe rider card: no phone number, no exact identity documents."""
+    id = serializers.CharField()
+    name = serializers.CharField()
+    rating = serializers.FloatField()
+    tier = serializers.CharField()
+    distance_km = serializers.FloatField()
+    latitude = serializers.FloatField()
+    longitude = serializers.FloatField()
+    vehicle = serializers.DictField()
+
+
+# ---------------------------------------------------------------------------
+# Booking output
+# ---------------------------------------------------------------------------
+def _payment_of(booking):
+    """Latest Payment for a booking, cached on the instance (Payment links by booking_ref)."""
+    if not hasattr(booking, "_payment_cache"):
+        booking._payment_cache = (
+            Payment.objects.filter(booking_ref=booking.reference).order_by("-created_at").first()
+        )
+    return booking._payment_cache
+
+
+def _display_name(user):
+    return (user.get_full_name() or user.get_username()) if user else ""
+
+
+class BookingStopSerializer(serializers.ModelSerializer):
+    sequence = serializers.IntegerField(source="order", read_only=True)
+
+    class Meta:
+        model = BookingStop
+        fields = ["sequence", "address", "latitude", "longitude"]
+        read_only_fields = fields
+        extra_kwargs = {"latitude": MONEY, "longitude": MONEY}
+
+
+class BookingStatusHistorySerializer(serializers.ModelSerializer):
+    at = serializers.DateTimeField(source="created_at", read_only=True)
+
+    class Meta:
+        model = BookingStatusHistory
+        fields = ["status", "notes", "at"]
+        read_only_fields = fields
+
+
+class BookingListSerializer(serializers.ModelSerializer):
+    service_key = serializers.SerializerMethodField()
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+
+    class Meta:
+        model = Booking
+        fields = [
+            "reference", "service_type", "service_key", "status", "status_label",
+            "pickup_address", "dropoff_address", "scheduled_for",
+            "subtotal", "discount_amount", "total_price", "currency", "created_at",
+        ]
+        read_only_fields = fields
+        extra_kwargs = {f: MONEY for f in ("subtotal", "discount_amount", "total_price")}
+
+    def get_service_key(self, obj):
+        return pricing.service_key_for_booking(obj.service_type)
+
+
+class BookingDetailSerializer(BookingListSerializer):
+    """What the booking's customer sees."""
+    pickup_latitude = serializers.FloatField(read_only=True)
+    pickup_longitude = serializers.FloatField(read_only=True)
+    dropoff_latitude = serializers.FloatField(read_only=True)
+    dropoff_longitude = serializers.FloatField(read_only=True)
+    stops = BookingStopSerializer(many=True, read_only=True)
+    history = BookingStatusHistorySerializer(source="status_history", many=True, read_only=True)
+    rider = serializers.SerializerMethodField()
+    payment = serializers.SerializerMethodField()
+
+    class Meta(BookingListSerializer.Meta):
+        fields = BookingListSerializer.Meta.fields + [
+            "pickup_latitude", "pickup_longitude", "dropoff_latitude", "dropoff_longitude",
+            "notes", "accepted_at", "started_at", "completed_at", "cancelled_at",
+            "cancellation_reason", "stops", "history", "rider", "payment",
+        ]
+        read_only_fields = fields
+
+    def get_rider(self, obj):
+        if not obj.rider_id:
+            return None
+        profile = getattr(obj.rider, "rider_profile", None)
+        if profile is None:
+            return {"name": _display_name(obj.rider)}
+        photo = None
+        if profile.profile_photo:
+            request = self.context.get("request")
+            photo = request.build_absolute_uri(profile.profile_photo.url) if request else profile.profile_photo.url
+        return {
+            "id": str(profile.public_id),
+            "name": profile.full_name,
+            "phone": profile.phone,
+            "rating": profile.rating_average,
+            "completed_trips": profile.completed_trips,
+            "photo": photo,
+            "vehicle": {
+                "model": profile.motorbike_model,
+                "plate": profile.motorbike_plate_number,
+                "color": profile.motorbike_color,
             },
-            "stops": {
-                "count": len(stops),
-                "max_allowed": rate.max_stops,
-                "fee_per_stop": float(rate.stop_fee),
-            },
-            "waiting": {
-                "rate_per_minute": float(rate.wait_per_min),
-                "free_minutes_per_stop": rate.free_wait_minutes,
-                "max_billable_minutes_per_stop": pricing.max_billable_wait_minutes(service_type),
-                "billable_minutes": waiting["billable_minutes"],
-                "charge": float(waiting["charge"]),
-                "per_stop": [
-                    {
-                        "stop": s["stop"],
-                        "wait_minutes": float(s["wait_minutes"]),
-                        "billable_minutes": s["billable_minutes"],
-                        "charge": float(s["charge"]),
-                    }
-                    for s in waiting["stops"]
-                ],
-            },
-            "surge": {
-                "active": surge.active,
-                "multiplier": float(surge.multiplier),
-                "reason": surge.reason,
-            },
-            "total_price": float(fare["total"]),
-            "quote_token": q["token"],  # null for anonymous estimates
-            "quoted_at": q["now"].isoformat(),
-            "valid_until": q["valid_until"].isoformat(),
-            "expires_in_seconds": int(pricing.QUOTE_VALIDITY.total_seconds()),
         }
-        return self.respond(payload)
 
-    def respond(self, payload):
-        response = Response(payload)
-        # Quotes are personalised and carry a signed token: never cache them.
-        response["Cache-Control"] = "no-store"
-        return response
-
-
-class LegacyQuoteView(QuoteView):
-    """POST /bookings/quote/ - old endpoint, kept so existing app versions keep working.
-
-    Same logic as QuoteView (so prices can never drift apart). The response is a
-    superset of the old one: every old key is present (`surge_multiplier` is
-    added back at the top level). Adds Deprecation/Link headers, plus Sunset when
-    settings.LEGACY_QUOTE_SUNSET is set to an HTTP-date, and logs each call so you
-    can see when old clients have gone and delete this view.
-    """
-
-    def respond(self, payload):
-        payload["surge_multiplier"] = payload["surge"]["multiplier"]
-        response = super().respond(payload)
-        response["Deprecation"] = "true"
-        response["Link"] = f'<{reverse("calculate-price")}>; rel="successor-version"'
-        sunset = getattr(settings, "LEGACY_QUOTE_SUNSET", "")
-        if sunset:
-            response["Sunset"] = sunset
-        logger.info(
-            "legacy_quote_called user=%s agent=%s",
-            getattr(self.request.user, "pk", None),
-            self.request.headers.get("User-Agent", "")[:120],
-        )
-        return response
+    def get_payment(self, obj):
+        payment = _payment_of(obj)
+        if payment is None:
+            return None
+        return {
+            "reference": payment.reference,
+            "method": payment.method,
+            "status": payment.status,
+            "amount": float(payment.amount),
+        }
 
 
-# ---------------------------------------------------------------------------
-# Bookings
-# ---------------------------------------------------------------------------
-class BookingViewSet(
-    mixins.CreateModelMixin,
-    mixins.RetrieveModelMixin,
-    mixins.ListModelMixin,
-    viewsets.GenericViewSet,
-):
-    """
-    POST   booking/create/                         create_booking (needs quote_token)
-    GET    booking/<ref>/                          booking details
-    PATCH  booking/<ref>/status/                   update_booking_status
-    POST   booking/<ref>/cancel/                   cancel_booking
-    POST   booking/<ref>/stops/<sequence>/         rider records arrived/departed at a stop
-    """
+class RiderBookingDetailSerializer(BookingDetailSerializer):
+    """What a rider sees: own earnings, and the customer's contact only once assigned."""
+    customer = serializers.SerializerMethodField()
+    earnings = serializers.SerializerMethodField()
 
-    permission_classes = [permissions.IsAuthenticated]
-    pagination_class = StandardPagination
-    throttle_classes = [ScopedRateThrottle]
-    lookup_field = "reference"
-    lookup_url_kwarg = "booking_ref"
+    class Meta(BookingDetailSerializer.Meta):
+        fields = BookingDetailSerializer.Meta.fields + ["customer", "earnings"]
+        read_only_fields = fields
 
-    @property
-    def throttle_scope(self):
-        return "booking_create" if getattr(self, "action", None) == "create" else "booking"
+    def get_customer(self, obj):
+        profile = getattr(obj.customer, "customer_profile", None)
+        name = (profile.full_name if profile and profile.full_name else _display_name(obj.customer))
+        data = {"name": name}
+        request = self.context.get("request")
+        if request and obj.rider_id == request.user.pk and profile:
+            data["phone"] = str(profile.mobile) if profile.mobile else (profile.phone or "")
+        return data
 
-    def get_queryset(self):
-        user = self.request.user
-        qs = Booking.objects.select_related("customer", "rider__user").prefetch_related(
-            "history", "stops"
-        )
-        if user.is_staff:
-            pass
-        elif hasattr(user, "rider_profile"):
-            # Riders see their own jobs plus open jobs for their service type.
-            rider = user.rider_profile
-            qs = qs.filter(
-                Q(rider=rider)
-                | Q(status=Booking.Status.PENDING, service_type=rider.service_type)
-            )
-        else:
-            qs = qs.filter(customer=user)
+    def get_earnings(self, obj):
+        payment = _payment_of(obj)
+        fare = (payment.metadata or {}).get("fare", {}) if payment else {}
+        return float(fare["rider_earnings"]) if "rider_earnings" in fare else None
 
-        status_param = self.request.query_params.get("status")
-        if status_param:
-            qs = qs.filter(status__in=status_param.split(","))
-        return qs
-
-    def _detail_serializer_class(self):
-        user = self.request.user
-        if user.is_staff:
-            return StaffBookingDetailSerializer
-        if hasattr(user, "rider_profile"):
-            return RiderBookingDetailSerializer
-        return BookingDetailSerializer
-
-    def get_serializer_class(self):
-        if self.action == "list":
-            return BookingListSerializer
-        if self.action == "create":
-            return BookingCreateSerializer
-        if self.action == "update_status":
-            return BookingStatusUpdateSerializer
-        if self.action == "cancel":
-            return BookingCancelSerializer
-        if self.action == "stop_event":
-            return BookingStopEventSerializer
-        return self._detail_serializer_class()
-
-    def _detail_response(self, booking_id, http_status=status.HTTP_200_OK):
-        booking = (
-            Booking.objects.select_related("customer", "rider__user")
-            .prefetch_related("history", "stops").get(pk=booking_id)
-        )
-        return Response(
-            self._detail_serializer_class()(booking, context=self.get_serializer_context()).data,
-            status=http_status,
-        )
-
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        booking, created = services.create_booking(
-            customer=request.user, data=serializer.validated_data
-        )
-        return self._detail_response(
-            booking.pk, status.HTTP_201_CREATED if created else status.HTTP_200_OK
-        )
-
-    @action(detail=True, methods=["patch"], url_path="status")
-    def update_status(self, request, booking_ref=None):
-        booking = self.get_object()  # 404 if the user can't see it
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        services.transition_booking(
-            booking_id=booking.pk,
-            new_status=serializer.validated_data["status"],
-            actor=request.user,
-            note=serializer.validated_data.get("note", ""),
-        )
-        return self._detail_response(booking.pk)
-
-    @action(detail=True, methods=["post"])
-    def cancel(self, request, booking_ref=None):
-        booking = self.get_object()
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        services.cancel_booking(
-            booking_id=booking.pk,
-            actor=request.user,
-            reason=serializer.validated_data.get("reason", ""),
-        )
-        return self._detail_response(booking.pk)
-
-    @action(detail=True, methods=["post"], url_path=r"stops/(?P<sequence>\d+)")
-    def stop_event(self, request, booking_ref=None, sequence=None):
-        booking = self.get_object()
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        services.record_stop_event(
-            booking_id=booking.pk, sequence=int(sequence),
-            event=serializer.validated_data["event"], actor=request.user,
-        )
-        return self._detail_response(booking.pk)
+    def get_payment(self, obj):
+        # Riders need the method (cash vs digital) but not provider references.
+        payment = _payment_of(obj)
+        return None if payment is None else {"method": payment.method, "status": payment.status}
 
 
-class NearbyRidersView(APIView):
-    """GET /dispatch/rider/nearby/?lat=..&lng=..&radius_km=5&service_type=okada&limit=20"""
+class StaffBookingDetailSerializer(BookingDetailSerializer):
+    """Everything, including the stored fare snapshot and revenue split."""
+    customer = serializers.SerializerMethodField()
+    fare = serializers.SerializerMethodField()
 
-    permission_classes = [permissions.IsAuthenticated]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = "riders_nearby"
+    class Meta(BookingDetailSerializer.Meta):
+        fields = BookingDetailSerializer.Meta.fields + ["customer", "fare"]
+        read_only_fields = fields
 
-    def get(self, request):
-        query = NearbyRidersQuerySerializer(data=request.query_params)
-        query.is_valid(raise_exception=True)
-        params = query.validated_data
-        riders = services.list_nearby_riders(
-            lat=float(params["lat"]),
-            lng=float(params["lng"]),
-            radius_km=params["radius_km"],
-            service_type=params.get("service_type"),
-            limit=params["limit"],
-        )
-        return Response(
-            {"count": len(riders), "results": NearbyRiderSerializer(riders, many=True).data}
-        )
+    def get_customer(self, obj):
+        profile = getattr(obj.customer, "customer_profile", None)
+        return {
+            "id": obj.customer_id,
+            "name": (profile.full_name if profile and profile.full_name else _display_name(obj.customer)),
+            "phone": (str(profile.mobile) if profile and profile.mobile else (profile.phone if profile else "")),
+        }
 
-
-# ---------------------------------------------------------------------------
-# Webhook
-# ---------------------------------------------------------------------------
-class BookingWebhookView(APIView):
-    """
-    POST /booking/webhook/
-    Header: X-Signature: hex(HMAC_SHA256(BOOKING_WEBHOOK_SECRET, raw_body))
-    Idempotent: replays of the same event_id are acknowledged and skipped.
-    payment.succeeded must carry `amount` and `currency`; both are checked
-    against the stored booking price before it is marked paid.
-    """
-
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
-    throttle_classes = []
-
-    def post(self, request):
-        if not self._valid_signature(request):
-            return Response({"detail": "Invalid signature."}, status=status.HTTP_401_UNAUTHORIZED)
-
-        serializer = BookingWebhookSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        payload = serializer.validated_data
-
-        try:
-            with transaction.atomic():
-                # Row lock makes two simultaneous deliveries of one event run one at a time.
-                event, _ = WebhookEvent.objects.select_for_update().get_or_create(
-                    event_id=payload["event_id"],
-                    defaults={"event_type": payload["event_type"], "payload": request.data},
-                )
-                if event.processed:
-                    return Response({"status": "duplicate"}, status=status.HTTP_200_OK)
-                try:
-                    with transaction.atomic():
-                        self._handle(payload["event_type"], payload["data"])
-                except (APIException, Booking.DoesNotExist) as exc:
-                    # Business-level rejection: record it and ack so the provider stops retrying.
-                    event.error = str(exc)
-                    event.save(update_fields=["error"])
-                    logger.warning("Webhook %s ignored: %s", event.event_id, exc)
-                    return Response(
-                        {"status": "ignored", "reason": str(exc)}, status=status.HTTP_200_OK
-                    )
-                event.processed, event.error = True, ""
-                event.save(update_fields=["processed", "error"])
-            return Response({"status": "processed"}, status=status.HTTP_200_OK)
-        except Exception:
-            # Unexpected -> 500 so the provider retries.
-            logger.exception("Webhook %s failed", payload["event_id"])
-            raise
-
-    @staticmethod
-    def _valid_signature(request) -> bool:
-        secret = getattr(settings, "BOOKING_WEBHOOK_SECRET", "")
-        signature = request.headers.get("X-Signature", "")
-        if not secret or not signature:
-            return False
-        expected = hmac.new(secret.encode(), request.body, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected, signature)
-
-    @staticmethod
-    def _handle(event_type: str, data: dict):
-        booking = Booking.objects.get(reference=data["booking_reference"])
-        if event_type.startswith("payment."):
-            services.apply_payment_event(event_type=event_type, booking=booking, data=data)
-        elif event_type == "booking.status_changed":
-            services.transition_booking(
-                booking_id=booking.pk,
-                new_status=data["status"],
-                actor=None,  # system actor
-                note=data.get("note", "Updated via webhook"),
-                source="webhook",
-            )
-
-
-# ---------------------------------------------------------------------------
-# Admin revenue report
-# ---------------------------------------------------------------------------
-class RevenueReportView(APIView):
-    """GET /booking/admin/revenue/?start=YYYY-MM-DD&end=YYYY-MM-DD  (staff only)
-    Company revenue: commission + booking fees - promo discounts + cancellation fees."""
-
-    permission_classes = [permissions.IsAdminUser]
-
-    def get(self, request):
-        today = datetime.now(pricing.LOCAL_TZ).date()
-        end_date = parse_date(request.query_params.get("end", "")) or today
-        start_date = parse_date(request.query_params.get("start", "")) or (end_date - timedelta(days=29))
-        if start_date > end_date or (end_date - start_date).days > 366:
-            return Response({"detail": "Invalid date range."}, status=status.HTTP_400_BAD_REQUEST)
-        start = datetime.combine(start_date, time.min, tzinfo=pricing.LOCAL_TZ)
-        end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=pricing.LOCAL_TZ)
-        return Response({
-            "currency": pricing.CURRENCY,
-            "start": start_date.isoformat(),
-            "end": end_date.isoformat(),
-            **services.revenue_summary(start=start, end=end),
-        })
+    def get_fare(self, obj):
+        payment = _payment_of(obj)
+        return (payment.metadata or {}).get("fare") if payment else None
 

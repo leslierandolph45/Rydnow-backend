@@ -3928,6 +3928,48 @@ class Refund(models.Model):
         self.refresh_from_db()
         return self
 
+class PaymentEvent(AppendOnlyModel):
+    """Audit trail of every Payment status change."""
+
+    payment = models.ForeignKey("Payment", on_delete=models.PROTECT, related_name="events")
+    from_status = models.CharField(max_length=20, blank=True, default="")
+    to_status = models.CharField(max_length=20)
+    amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    note = models.CharField(max_length=255, blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "payment_events"
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["payment", "-created_at"], name="payevt_payment_idx")]
+
+    def __str__(self):
+        return f"{self.payment_id}: {self.from_status or '-'} → {self.to_status}"
+
+
+class RefundEvent(AppendOnlyModel):
+    """Audit trail of every Refund status change."""
+
+    refund = models.ForeignKey("Refund", on_delete=models.PROTECT, related_name="events")
+    from_status = models.CharField(max_length=20, blank=True, default="")
+    to_status = models.CharField(max_length=20)
+    note = models.CharField(max_length=255, blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "refund_events"
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["refund", "-created_at"], name="refevt_refund_idx")]
+
+    def __str__(self):
+        return f"{self.refund_id}: {self.from_status or '-'} → {self.to_status}"
+
 
 class Referral(models.Model):
     """One referral invite: who sent it, who signed up with it, and the rewards.
