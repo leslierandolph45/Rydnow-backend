@@ -22,8 +22,8 @@ def create_default_admin(sender, **kwargs):
     
     if not User.objects.filter(username=username).exists():
         User.objects.create_superuser(
-            username=username
-            email=email
+            username=username,
+            email=email,
             password=password
         )
         print(f"✅ Admin user '{username}' created successfully!")
