@@ -87,8 +87,8 @@ from rest_framework.permissions import AllowAny, BasePermission, IsAdminUser, Is
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
-from decimal import InvalidOperation (or extend your existing decimal import)
-from django.http import Http404, StreamingHttpResponse (Http404 is new)
+from decimal import InvalidOperation
+from django.http import Http404, StreamingHttpResponse #(Http404 is new)
 
 
 from . import pricing
