@@ -1,4 +1,3 @@
-# Auto-create admin user on first startup
 from django.contrib.auth import get_user_model
 from django.db.models.signals import post_migrate
 from django.dispatch import receiver
@@ -19,13 +18,13 @@ def create_default_admin(sender, **kwargs):
     User = get_user_model()
     username = 'rydnow_admin'
     email = 'admin@rydnow.com'
-    password = 'YourStrongPassword123!'  # ⚠️ CHANGE THIS to YOUR password!
+    password = 'admin12377'  # ⚠️ CHANGE THIS to YOUR password!
     
     if not User.objects.filter(username=username).exists():
         User.objects.create_superuser(
-            username=rydnow_admin
-            email=Leslierandolph45@gmail.com
-            password=admin12377
+            username=username
+            email=email
+            password=password
         )
         print(f"✅ Admin user '{username}' created successfully!")
     else:
