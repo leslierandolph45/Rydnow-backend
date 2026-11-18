@@ -277,8 +277,20 @@ def haversine_km(lat1, lng1, lat2, lng2) -> float:
 
 
 def build_route(pickup, stops, destination):
-    """pickup/destination are (lat, lng) Decimals; stops are mappings with lat/lng."""
-    return [pickup, *[(s["lat"], s["lng"]) for s in stops], destination]
+    """Build route coordinates, accepting both 'lat/lng' and 'latitude/longitude' key styles."""
+    def get_coords(point):
+        lat = point.get("lat") or point.get("latitude")
+        lng = point.get("lng") or point.get("longitude")
+        if lat is None or lng is None:
+            raise ValueError(f"Missing coordinates in point: {point}")
+        return (float(lat), float(lng))
+    
+    route = [get_coords(pickup)]
+    for stop in stops:
+        route.append(get_coords(stop))
+    route.append(get_coords(destination))
+    return route
+
 
 
 def route_distance_km(points) -> Decimal:
