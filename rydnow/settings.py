@@ -88,7 +88,7 @@ if not SECRET_KEY:
 
 ALLOWED_HOSTS = env_list(
     "ALLOWED_HOSTS",
-    default=["rydnow-backend.onrender.com", "localhost", "127.0.0.1"],
+    default=["rydnow-backend.onrender.com", "localhost", "127.0.0.1", "vercel.app", "rydnow.app"],
 )
 _render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 if _render_host and _render_host not in ALLOWED_HOSTS:
