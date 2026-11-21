@@ -2,7 +2,8 @@
 Django settings for the Rydnow project (rides, delivery & waste collection).
 
 
-All environment-specific values come from environment variables.
+All environment-specific values come from environment variables (a local .env file is read
+in development). Nothing secret is stored in this file.
 
 
 Required in production:
@@ -15,12 +16,16 @@ REQUIRED for rider documents to survive deploys (Render's disk is wiped on every
 
 
 Recommended in production:
-    PAYSTACK_SECRET_KEY, SENTRY_DSN, REDIS_URL
+    PAYSTACK_SECRET_KEY, BOOKING_WEBHOOK_SECRET, SENTRY_DSN, REDIS_URL
 
 
 Optional:
     DEBUG, ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS,
-    LOG_LEVEL, EMAIL_*, SECURE_HSTS_SECONDS, ADMIN_SESSION_HOURS,
+    LOG_LEVEL, EMAIL_*, SECURE_SSL_REDIRECT, SECURE_HSTS_SECONDS, ADMIN_SESSION_HOURS,
+    DATABASE_SSL_REQUIRE, NUM_PROXIES,
+    PRICING_QUOTE_VALIDITY_MINUTES, PRICING_SIGNING_KEY, LEGACY_QUOTE_SUNSET,
+    PAYSTACK_CALLBACK_URL, WALLET_MIN_BALANCE,
+    SENTRY_TRACES_SAMPLE_RATE,
     MEDIA_ROOT (only if you mount a persistent disk instead of using a bucket),
     AWS_S3_ADDRESSING_STYLE ("path" or "virtual"), AWS_QUERYSTRING_EXPIRE,
     STATIC_MANIFEST (set to True to re-enable hashed static filenames),
@@ -43,11 +48,6 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# NOTE: the old hard-coded CLOUDINARY_STORAGE block was removed on purpose.
-# It was never wired into STORAGES / INSTALLED_APPS (so it did nothing), and it
-# exposed an API secret in source code. Rotate that secret in the Cloudinary dashboard.
-
-
 
 
 # ────────────────────────── Env helpers ──────────────────────────
@@ -65,6 +65,18 @@ def env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ImproperlyConfigured(f"{name} must be an integer, got {raw!r}.") from exc
+
+
+
+
+def env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be a number, got {raw!r}.") from exc
 
 
 
@@ -102,24 +114,9 @@ if _render_host and _render_host not in ALLOWED_HOSTS:
 ROOT_URLCONF = "rydnow.urls"
 WSGI_APPLICATION = "rydnow.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-
+APPEND_SLASH = True  # the API relies on trailing slashes; the frontend proxy adds them back
 
 # AUTH_USER_MODEL = "api.User"
-
-
-
-
-# ─────────────────────── Admin dashboard (Unfold) ───────────────────────
-# DASHBOARD_CALLBACK feeds data into the admin home page. It is only used when the home
-# page template is yours: put your file at   <templates folder>/admin/index.html
-# (see TEMPLATE_DIRS below). The callback is api/dashboard.py -> dashboard_callback(request, context).
-UNFOLD = {
-    "SITE_TITLE": "Rydnow Admin",
-    "SITE_HEADER": "Rydnow",
-    "DASHBOARD_CALLBACK": "api.dashboard.dashboard_callback",
-}
-
-
 
 
 
@@ -147,6 +144,34 @@ INSTALLED_APPS = [
 ]
 
 
+MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+]
+
+
+
+
+# ─────────────────────── Admin dashboard (Unfold) ───────────────────────
+# DASHBOARD_CALLBACK feeds data into the admin home page. It is only used when the home
+# page template is yours: put your file at   <templates folder>/admin/index.html
+# (see TEMPLATE_DIRS below). The callback is api/dashboard.py -> dashboard_callback(request, context).
+UNFOLD = {
+    "SITE_TITLE": "Rydnow Admin",
+    "SITE_HEADER": "Rydnow",
+    "DASHBOARD_CALLBACK": "api.dashboard.dashboard_callback",
+}
+
+
+
+
 # ─────────────────────── Templates ───────────────────────
 # Django searches TEMPLATES["DIRS"] BEFORE any app's templates folder, so a file here named
 # admin/index.html replaces the admin home page (including Unfold's own).
@@ -171,6 +196,8 @@ def _find_template_dirs():
                 seen.add(real)
                 found.append(str(real))
     return found
+
+
 
 
 TEMPLATE_DIRS = _find_template_dirs()
@@ -201,34 +228,6 @@ TEMPLATES = [
 
 
 
-MIDDLEWARE = [
-    "corsheaders.middleware.CorsMiddleware",
-    "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
-    "django.contrib.sessions.middleware.SessionMiddleware",
-    "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
-    "django.contrib.auth.middleware.AuthenticationMiddleware",
-    "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",
-]
-
-
-
-
-# ─────────────────────── Payments ───────────────────────
-# Never hard-code keys. If a real Paystack key was ever committed to git, rotate it now.
-PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
-PAYSTACK_CALLBACK_URL = os.environ.get(
-    "PAYSTACK_CALLBACK_URL", "https://rydnow.app/rider/wallet/callback"
-)
-WALLET_MIN_BALANCE = os.environ.get("WALLET_MIN_BALANCE", "50.00")
-if not DEBUG and not PAYSTACK_SECRET_KEY:
-    warnings.warn("PAYSTACK_SECRET_KEY is not set: card/MoMo payments will fail.", RuntimeWarning)
-
-
-
-
 # ─────────────────────── Database ───────────────────────
 DATABASES = {
     "default": dj_database_url.config(
@@ -236,6 +235,8 @@ DATABASES = {
         default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
         conn_max_age=600,
         conn_health_checks=True,
+        # Needed for an EXTERNAL Postgres URL. Render's internal URL does not require it.
+        ssl_require=env_bool("DATABASE_SSL_REQUIRE", False),
     )
 }
 if not DEBUG and DATABASES["default"]["ENGINE"].endswith("sqlite3"):
@@ -245,6 +246,9 @@ if not DEBUG and DATABASES["default"]["ENGINE"].endswith("sqlite3"):
 
 
 # ───────────────────────── Cache ─────────────────────────
+# The cache holds API throttle counters and the surge / demand counters used by pricing.
+# Without REDIS_URL every gunicorn worker keeps its OWN counters (local memory), so limits
+# and surge are not shared between workers. Set REDIS_URL in production.
 if os.environ.get("REDIS_URL"):
     CACHES = {
         "default": {
@@ -259,6 +263,12 @@ else:
             "LOCATION": "rydnow-local",
         }
     }
+    if not DEBUG:
+        warnings.warn(
+            "REDIS_URL is not set: throttling and surge counters are per-process and not shared "
+            "between workers.",
+            RuntimeWarning,
+        )
 
 
 
@@ -274,14 +284,76 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-
 # Admins are logged out after this many hours (default 12).
 SESSION_COOKIE_AGE = env_int("ADMIN_SESSION_HOURS", 12) * 3600
 
 
 
 
+# ──────────────────── Django REST Framework ────────────────────
+# API errors go through api/exception_handler.py when that file exists. If it is missing, DRF's
+# standard handler is used instead of crashing every error response with an ImportError.
+if (BASE_DIR / "api" / "exception_handler.py").is_file():
+    _EXCEPTION_HANDLER = "api.exception_handler.rydnow_exception_handler"
+else:
+    _EXCEPTION_HANDLER = "rest_framework.views.exception_handler"
+    warnings.warn(
+        "api/exception_handler.py not found: using DRF's default exception handler.",
+        RuntimeWarning,
+    )
+
+REST_FRAMEWORK = {
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+    "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.TokenAuthentication"]
+    + (["rest_framework.authentication.SessionAuthentication"] if DEBUG else []),
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"]
+    + (["rest_framework.renderers.BrowsableAPIRenderer"] if DEBUG else []),
+    "DEFAULT_PARSER_CLASSES": [
+        "rest_framework.parsers.JSONParser",
+        "rest_framework.parsers.MultiPartParser",
+        "rest_framework.parsers.FormParser",
+    ],
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.ScopedRateThrottle",
+    ],
+    # Every `throttle_scope` used by a view MUST have a rate here. A view whose scope is missing
+    # raises ImproperlyConfigured on every request (a 500).
+    "DEFAULT_THROTTLE_RATES": {
+        # Global
+        "anon": "60/min",
+        "user": "300/min",
+        # Auth
+        "login": "5/min",
+        "otp": "3/min",
+        "register": "10/hour",
+        # Wallet
+        "wallet_read": "60/min",
+        # Booking API (api/booking_views.py)
+        "quote": "60/min",           # QuoteView: re-quotes while the customer edits the trip
+        "booking": "120/min",        # BookingViewSet: list / detail / cancel (polled while active)
+        "booking_create": "10/min",  # BookingViewSet.create
+        "riders_nearby": "60/min",   # NearbyRidersView (polled about every 20 s)
+        "promo_validate": "20/min",  # promo_validate: stops code guessing
+    },
+    "EXCEPTION_HANDLER": _EXCEPTION_HANDLER,
+}
+# Number of reverse proxies in front of the app (read from X-Forwarded-For for throttling).
+# Leave unset unless you know the exact number.
+_num_proxies = env_int("NUM_PROXIES", 0)
+if _num_proxies:
+    REST_FRAMEWORK["NUM_PROXIES"] = _num_proxies
+
+
+
+
 # ────────────────────── CORS / CSRF ──────────────────────
+# Browser calls from the website go through the Next.js proxy (server to server), so CORS only
+# matters for direct browser calls (the login and signup pages). If a mobile web view calls the
+# API directly, add its origin through CORS_ALLOWED_ORIGINS (for example capacitor://localhost).
 CORS_ALLOWED_ORIGINS = env_list(
     "CORS_ALLOWED_ORIGINS",
     default=[
@@ -293,7 +365,6 @@ CORS_ALLOWED_ORIGINS = env_list(
     ],
 )
 CORS_ALLOW_CREDENTIALS = True
-
 
 CSRF_TRUSTED_ORIGINS = env_list(
     "CSRF_TRUSTED_ORIGINS",
@@ -322,15 +393,13 @@ STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"] if (BASE_DIR / "static").is_dir() else []
 
-
 MEDIA_URL = "/media/"
 # Only used when NO bucket is configured (local dev, or a Render persistent disk mounted
 # at e.g. /var/data/media -> set MEDIA_ROOT=/var/data/media). Never public: rider documents
 # are streamed to staff only through the admin (see RiderDocumentAdmin.file_view).
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT") or (BASE_DIR / "media"))
 
-
-# FIX for the /admin/ 500 error:
+# Fix for the /admin/ 500 error:
 # CompressedManifestStaticFilesStorage makes static("css/x.css") look the file up on disk and
 # raise ValueError if it is missing. That ValueError is what crashed the admin page
 # (static("css/rydnow_admin.css") from the Unfold config). WHITENOISE_MANIFEST_STRICT=False does
@@ -343,12 +412,10 @@ if env_bool("STATIC_MANIFEST", False):
 else:
     _STATICFILES_BACKEND = "whitenoise.storage.CompressedStaticFilesStorage"
 
-
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {"BACKEND": _STATICFILES_BACKEND},
 }
-
 
 if os.environ.get("AWS_STORAGE_BUCKET_NAME"):
     # Any S3-compatible bucket works: AWS S3, Cloudflare R2, Backblaze B2, Supabase Storage.
@@ -373,47 +440,43 @@ elif not DEBUG:
         stacklevel=1,
     )
 
-
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 
 
 
 
-# ──────────────────── Django REST Framework ────────────────────
-REST_FRAMEWORK = {
-    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
-    "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.TokenAuthentication"]
-    + (["rest_framework.authentication.SessionAuthentication"] if DEBUG else []),
-    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"]
-    + (["rest_framework.renderers.BrowsableAPIRenderer"] if DEBUG else []),
-    "DEFAULT_PARSER_CLASSES": [
-        "rest_framework.parsers.JSONParser",
-        "rest_framework.parsers.MultiPartParser",
-        "rest_framework.parsers.FormParser",
-    ],
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
-    "PAGE_SIZE": 20,
-    "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
-        "rest_framework.throttling.ScopedRateThrottle",
-    ],
-    "DEFAULT_THROTTLE_RATES": {
-        "anon": "60/min",
-        "user": "300/min",
-        "login": "5/min",
-        "otp": "3/min",
-        "register": "10/hour",
-        "wallet_read": "60/min",
-        "quote": "60/min",
-        "booking": "120/min",
-        "booking_create":"10/min",
-        "riders_nearby": "60/min",
-        "promo_validate": "20/min",
-    },
-    "EXCEPTION_HANDLER": "api.exception_handler.rydnow_exception_handler",
-}
+# ─────────────────────── Payments & wallet ───────────────────────
+# Never hard-code keys. If a real Paystack key was ever committed to git, rotate it now.
+PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
+PAYSTACK_CALLBACK_URL = os.environ.get(
+    "PAYSTACK_CALLBACK_URL", "https://rydnow.app/rider/wallet/callback"
+)
+WALLET_MIN_BALANCE = os.environ.get("WALLET_MIN_BALANCE", "50.00")
+if not DEBUG and not PAYSTACK_SECRET_KEY:
+    warnings.warn("PAYSTACK_SECRET_KEY is not set: card/MoMo payments will fail.", RuntimeWarning)
+
+# Shared secret for POST /booking/webhook/ (X-Signature = hex HMAC-SHA256 of the raw body).
+# While this is empty the endpoint rejects every call with 401.
+BOOKING_WEBHOOK_SECRET = os.environ.get("BOOKING_WEBHOOK_SECRET", "")
+if not DEBUG and not BOOKING_WEBHOOK_SECRET:
+    warnings.warn(
+        "BOOKING_WEBHOOK_SECRET is not set: the booking webhook will reject every request.",
+        RuntimeWarning,
+    )
+
+
+
+
+# ─────────────────────── Pricing ───────────────────────
+# Read by api/pricing.py. The website's fallback price-lock timer assumes 5 minutes
+# (QUOTE_FALLBACK_TTL_SECONDS in lib/rydnow/config.ts), so change both together.
+PRICING_QUOTE_VALIDITY_MINUTES = env_int("PRICING_QUOTE_VALIDITY_MINUTES", 5)
+# Optional separate key for signing quotes. Falls back to SECRET_KEY when unset.
+# Changing either key invalidates quotes that are already issued (they live a few minutes).
+PRICING_SIGNING_KEY = os.environ.get("PRICING_SIGNING_KEY") or None
+# HTTP-date sent in the Sunset header of the deprecated /bookings/quote/ endpoint (optional).
+LEGACY_QUOTE_SUNSET = os.environ.get("LEGACY_QUOTE_SUNSET", "")
 
 
 
@@ -428,7 +491,6 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = env_int("SECURE_HSTS_SECONDS", 3600)
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", True)
     SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
-
 
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
@@ -459,7 +521,6 @@ DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Rydnow <no-reply@rydn
 # ─────────────────────── Logging ───────────────────────
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG" if DEBUG else "INFO")
 
-
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -477,4 +538,26 @@ LOGGING = {
         "api": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
     },
 }
+
+
+
+
+# ─────────────────── Error monitoring (optional) ───────────────────
+# Set SENTRY_DSN to enable. Needs: pip install sentry-sdk (add it to requirements.txt).
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            environment="development" if DEBUG else "production",
+            traces_sample_rate=env_float("SENTRY_TRACES_SAMPLE_RATE", 0.0),
+            send_default_pii=False,  # never send phone numbers, emails or tokens
+        )
+    except ImportError:
+        warnings.warn(
+            "SENTRY_DSN is set but sentry-sdk is not installed: errors will not be reported.",
+            RuntimeWarning,
+        )
 
