@@ -1,60 +1,52 @@
 """
 Django settings for the Rydnow project (rides, delivery & waste collection).
 
-
 All environment-specific values come from environment variables (a local .env file is read
 in development). Nothing secret is stored in this file.
-
 
 Required in production:
     DJANGO_SECRET_KEY, DATABASE_URL
 
-
 REQUIRED for rider documents to survive deploys (Render's disk is wiped on every deploy):
     AWS_STORAGE_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
     (+ AWS_S3_ENDPOINT_URL and AWS_S3_REGION_NAME for Cloudflare R2 / Backblaze B2 / Supabase)
-
+    and in requirements.txt:  django-storages[s3]  boto3
 
 Recommended in production:
     PAYSTACK_SECRET_KEY, BOOKING_WEBHOOK_SECRET, SENTRY_DSN, REDIS_URL
 
-
 Optional:
     DEBUG, ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS,
     LOG_LEVEL, EMAIL_*, SECURE_SSL_REDIRECT, SECURE_HSTS_SECONDS, ADMIN_SESSION_HOURS,
-    DATABASE_SSL_REQUIRE, NUM_PROXIES,
+    DATABASE_SSL_REQUIRE, NUM_PROXIES, ADMIN_URL,
     PRICING_QUOTE_VALIDITY_MINUTES, PRICING_SIGNING_KEY, LEGACY_QUOTE_SUNSET,
-    PAYSTACK_CALLBACK_URL, WALLET_MIN_BALANCE,
-    SENTRY_TRACES_SAMPLE_RATE,
+    PAYSTACK_CALLBACK_URL, WALLET_MIN_BALANCE, MIN_DEPOSIT, MAX_DEPOSIT, PAYMENT_CURRENCY,
+    REQUIRE_PHONE_VERIFICATION, SMS_BACKEND (dotted path of a function(phone, message)),
+    TRACKING_BASE_URL, SENTRY_TRACES_SAMPLE_RATE,
     MEDIA_ROOT (only if you mount a persistent disk instead of using a bucket),
     AWS_S3_ADDRESSING_STYLE ("path" or "virtual"), AWS_QUERYSTRING_EXPIRE,
     STATIC_MANIFEST (set to True to re-enable hashed static filenames),
     TEMPLATES_DIR (absolute path to your project templates folder, overrides the search below)
 
-
 Local development: set DEBUG=True in your shell or .env file.
 """
+import importlib.util
 import os
+import re
 import warnings
 from pathlib import Path
-
 
 import dj_database_url
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 
-
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
-
-
 
 
 # ────────────────────────── Env helpers ──────────────────────────
 def env_bool(name: str, default: bool = False) -> bool:
     return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
-
-
 
 
 def env_int(name: str, default: int) -> int:
@@ -67,8 +59,6 @@ def env_int(name: str, default: int) -> int:
         raise ImproperlyConfigured(f"{name} must be an integer, got {raw!r}.") from exc
 
 
-
-
 def env_float(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw in (None, ""):
@@ -79,20 +69,15 @@ def env_float(name: str, default: float) -> float:
         raise ImproperlyConfigured(f"{name} must be a number, got {raw!r}.") from exc
 
 
-
-
 def env_list(name: str, default=None) -> list:
     raw = os.environ.get(name, "")
     items = [item.strip() for item in raw.split(",") if item.strip()]
     return items or list(default or [])
 
 
-
-
 # ─────────────────────────── Core ───────────────────────────
 # Secure by default: DEBUG is OFF unless you explicitly turn it on (e.g. in a local .env).
 DEBUG = env_bool("DEBUG", False)
-
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
@@ -100,7 +85,6 @@ if not SECRET_KEY:
         SECRET_KEY = "dev-insecure-key"
     else:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DEBUG is False.")
-
 
 ALLOWED_HOSTS = env_list(
     "ALLOWED_HOSTS",
@@ -110,15 +94,15 @@ _render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 if _render_host and _render_host not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_render_host)
 
-
 ROOT_URLCONF = "rydnow.urls"
 WSGI_APPLICATION = "rydnow.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 APPEND_SLASH = True  # the API relies on trailing slashes; the frontend proxy adds them back
 
+# Read by rydnow/urls.py (getattr(settings, "ADMIN_URL", "admin/")). Must end with "/".
+ADMIN_URL = os.environ.get("ADMIN_URL", "admin/")
+
 # AUTH_USER_MODEL = "api.User"
-
-
 
 
 # ─────────────────────── Applications ───────────────────────
@@ -143,7 +127,6 @@ INSTALLED_APPS = [
     "api",
 ]
 
-
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
@@ -157,19 +140,15 @@ MIDDLEWARE = [
 ]
 
 
-
-
 # ─────────────────────── Admin dashboard (Unfold) ───────────────────────
 # DASHBOARD_CALLBACK feeds data into the admin home page. It is only used when the home
 # page template is yours: put your file at   <templates folder>/admin/index.html
-# (see TEMPLATE_DIRS below). The callback is api/dashboard.py -> dashboard_callback(request, context).
+# The callback is api/dashboard.py -> dashboard_callback(request, context).
 UNFOLD = {
     "SITE_TITLE": "Rydnow Admin",
     "SITE_HEADER": "Rydnow",
     "DASHBOARD_CALLBACK": "api.dashboard.dashboard_callback",
 }
-
-
 
 
 # ─────────────────────── Templates ───────────────────────
@@ -192,12 +171,10 @@ def _find_template_dirs():
     for path in candidates:
         if path.is_dir():
             real = path.resolve()
-            if real not in seen:  # case-insensitive systems (Windows/macOS) list the same folder twice
+            if real not in seen:  # case-insensitive systems list the same folder twice
                 seen.add(real)
                 found.append(str(real))
     return found
-
-
 
 
 TEMPLATE_DIRS = _find_template_dirs()
@@ -226,8 +203,6 @@ TEMPLATES = [
 ]
 
 
-
-
 # ─────────────────────── Database ───────────────────────
 DATABASES = {
     "default": dj_database_url.config(
@@ -243,12 +218,10 @@ if not DEBUG and DATABASES["default"]["ENGINE"].endswith("sqlite3"):
     raise ImproperlyConfigured("Set DATABASE_URL to a PostgreSQL database in production.")
 
 
-
-
 # ───────────────────────── Cache ─────────────────────────
-# The cache holds API throttle counters and the surge / demand counters used by pricing.
-# Without REDIS_URL every gunicorn worker keeps its OWN counters (local memory), so limits
-# and surge are not shared between workers. Set REDIS_URL in production.
+# The cache holds API throttle counters, OTP codes and the surge / demand counters used by
+# pricing. Without REDIS_URL every gunicorn worker keeps its OWN counters (local memory), so
+# limits, OTPs and surge are not shared between workers. Set REDIS_URL in production.
 if os.environ.get("REDIS_URL"):
     CACHES = {
         "default": {
@@ -265,12 +238,10 @@ else:
     }
     if not DEBUG:
         warnings.warn(
-            "REDIS_URL is not set: throttling and surge counters are per-process and not shared "
-            "between workers.",
+            "REDIS_URL is not set: throttling, OTP and surge counters are per-process and not "
+            "shared between workers.",
             RuntimeWarning,
         )
-
-
 
 
 # ─────────────────── Auth & Passwords ───────────────────
@@ -288,19 +259,40 @@ AUTH_PASSWORD_VALIDATORS = [
 SESSION_COOKIE_AGE = env_int("ADMIN_SESSION_HOURS", 12) * 3600
 
 
-
-
 # ──────────────────── Django REST Framework ────────────────────
-# API errors go through api/exception_handler.py when that file exists. If it is missing, DRF's
-# standard handler is used instead of crashing every error response with an ImportError.
-if (BASE_DIR / "api" / "exception_handler.py").is_file():
-    _EXCEPTION_HANDLER = "api.exception_handler.rydnow_exception_handler"
-else:
-    _EXCEPTION_HANDLER = "rest_framework.views.exception_handler"
+# API errors go through api/exception_handler.py. The handler's function name has changed
+# between versions of that file (rydnow_exception_handler / custom_exception_handler), and a
+# wrong name makes EVERY error response (401, 403, 405, validation...) crash with a 500.
+# So the file is scanned (not imported, which is unsafe while settings load) for a known name.
+# If none is found, DRF's standard handler is used.
+_DRF_DEFAULT_HANDLER = "rest_framework.views.exception_handler"
+_HANDLER_NAMES = ("rydnow_exception_handler", "custom_exception_handler", "exception_handler")
+
+
+def _pick_exception_handler() -> str:
+    path = BASE_DIR / "api" / "exception_handler.py"
+    if not path.is_file():
+        warnings.warn(
+            "api/exception_handler.py not found: using DRF's default exception handler.",
+            RuntimeWarning,
+        )
+        return _DRF_DEFAULT_HANDLER
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return _DRF_DEFAULT_HANDLER
+    for name in _HANDLER_NAMES:
+        if re.search(rf"^(?:def\s+{name}\s*\(|{name}\s*=)", source, re.MULTILINE):
+            return f"api.exception_handler.{name}"
     warnings.warn(
-        "api/exception_handler.py not found: using DRF's default exception handler.",
+        "api/exception_handler.py defines none of "
+        f"{', '.join(_HANDLER_NAMES)}: using DRF's default exception handler.",
         RuntimeWarning,
     )
+    return _DRF_DEFAULT_HANDLER
+
+
+_EXCEPTION_HANDLER = _pick_exception_handler()
 
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
@@ -322,6 +314,7 @@ REST_FRAMEWORK = {
     ],
     # Every `throttle_scope` used by a view MUST have a rate here. A view whose scope is missing
     # raises ImproperlyConfigured on every request (a 500).
+    # (Throttle classes in api/views.py that define their own `rate` do not need an entry.)
     "DEFAULT_THROTTLE_RATES": {
         # Global
         "anon": "60/min",
@@ -348,12 +341,10 @@ if _num_proxies:
     REST_FRAMEWORK["NUM_PROXIES"] = _num_proxies
 
 
-
-
 # ────────────────────── CORS / CSRF ──────────────────────
 # Browser calls from the website go through the Next.js proxy (server to server), so CORS only
-# matters for direct browser calls (the login and signup pages). If a mobile web view calls the
-# API directly, add its origin through CORS_ALLOWED_ORIGINS (for example capacitor://localhost).
+# matters for direct browser calls. If a mobile web view calls the API directly, add its
+# origin through CORS_ALLOWED_ORIGINS (for example capacitor://localhost).
 CORS_ALLOWED_ORIGINS = env_list(
     "CORS_ALLOWED_ORIGINS",
     default=[
@@ -376,16 +367,12 @@ CSRF_TRUSTED_ORIGINS = env_list(
 )
 
 
-
-
 # ─────────────────── Internationalization ───────────────────
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "Africa/Accra"  # same offset as UTC, but "today" is the Ghana day in the dashboard
 USE_I18N = True
 USE_TZ = True
 PHONENUMBER_DEFAULT_REGION = "GH"
-
-
 
 
 # ───────────────────── Static & Media ─────────────────────
@@ -399,12 +386,10 @@ MEDIA_URL = "/media/"
 # are streamed to staff only through the admin (see RiderDocumentAdmin.file_view).
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT") or (BASE_DIR / "media"))
 
-# Fix for the /admin/ 500 error:
-# CompressedManifestStaticFilesStorage makes static("css/x.css") look the file up on disk and
-# raise ValueError if it is missing. That ValueError is what crashed the admin page
-# (static("css/rydnow_admin.css") from the Unfold config). WHITENOISE_MANIFEST_STRICT=False does
-# NOT prevent it: the error comes from hashed_name(), not from the manifest-strict check.
-# CompressedStaticFilesStorage just builds the URL, so a missing file can no longer crash a page.
+# /admin/ 500 fix:
+# CompressedManifestStaticFilesStorage raises ValueError when static("css/x.css") points at a
+# file that was not collected, which crashed the admin page. CompressedStaticFilesStorage just
+# builds the URL, so a missing file can no longer crash a page.
 # Set STATIC_MANIFEST=True once rydnow_admin.css is confirmed to be collected, to get hashed names.
 if env_bool("STATIC_MANIFEST", False):
     _STATICFILES_BACKEND = "whitenoise.storage.CompressedManifestStaticFilesStorage"
@@ -417,9 +402,14 @@ STORAGES = {
     "staticfiles": {"BACKEND": _STATICFILES_BACKEND},
 }
 
-if os.environ.get("AWS_STORAGE_BUCKET_NAME"):
+_HAS_BUCKET = bool(os.environ.get("AWS_STORAGE_BUCKET_NAME"))
+_HAS_S3_LIBS = (
+    importlib.util.find_spec("storages") is not None
+    and importlib.util.find_spec("boto3") is not None
+)
+
+if _HAS_BUCKET and _HAS_S3_LIBS:
     # Any S3-compatible bucket works: AWS S3, Cloudflare R2, Backblaze B2, Supabase Storage.
-    # Needs: pip install "django-storages[s3]" boto3   (add both to requirements.txt)
     STORAGES["default"] = {"BACKEND": "storages.backends.s3.S3Storage"}
     AWS_STORAGE_BUCKET_NAME = os.environ["AWS_STORAGE_BUCKET_NAME"]
     AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")
@@ -432,18 +422,24 @@ if os.environ.get("AWS_STORAGE_BUCKET_NAME"):
     AWS_QUERYSTRING_AUTH = True  # private files (Ghana Cards, licences) use short-lived signed URLs
     AWS_QUERYSTRING_EXPIRE = env_int("AWS_QUERYSTRING_EXPIRE", 300)
     AWS_S3_FILE_OVERWRITE = False
+elif _HAS_BUCKET:
+    # A bucket is configured but the libraries are missing. Booting on local disk keeps the API
+    # up, but uploads are lost on the next deploy. Add them to requirements.txt to fix.
+    warnings.warn(
+        "AWS_STORAGE_BUCKET_NAME is set but django-storages and/or boto3 are not installed: "
+        'add "django-storages[s3]" and "boto3" to requirements.txt. '
+        "Uploads are being written to local disk and will be lost on deploy.",
+        RuntimeWarning,
+    )
 elif not DEBUG:
     warnings.warn(
         "No object storage configured (AWS_STORAGE_BUCKET_NAME). Uploaded rider documents are "
         "written to the server disk and WILL BE LOST on the next deploy or restart.",
         RuntimeWarning,
-        stacklevel=1,
     )
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
-
-
 
 
 # ─────────────────────── Payments & wallet ───────────────────────
@@ -452,7 +448,10 @@ PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
 PAYSTACK_CALLBACK_URL = os.environ.get(
     "PAYSTACK_CALLBACK_URL", "https://rydnow.app/rider/wallet/callback"
 )
+PAYMENT_CURRENCY = os.environ.get("PAYMENT_CURRENCY", "GHS")  # read by api/views.py
 WALLET_MIN_BALANCE = os.environ.get("WALLET_MIN_BALANCE", "50.00")
+MIN_DEPOSIT = os.environ.get("MIN_DEPOSIT", "10.00")          # read by api/views.py
+MAX_DEPOSIT = os.environ.get("MAX_DEPOSIT", "100000.00")      # read by api/views.py
 if not DEBUG and not PAYSTACK_SECRET_KEY:
     warnings.warn("PAYSTACK_SECRET_KEY is not set: card/MoMo payments will fail.", RuntimeWarning)
 
@@ -466,6 +465,18 @@ if not DEBUG and not BOOKING_WEBHOOK_SECRET:
     )
 
 
+# ─────────────────────── Phone verification & SMS ───────────────────────
+# Read by api/views.py. With REQUIRE_PHONE_VERIFICATION on, registration needs a verified
+# phone, so SMS_BACKEND must point at a working sender (dotted path to function(phone, message)).
+REQUIRE_PHONE_VERIFICATION = env_bool("REQUIRE_PHONE_VERIFICATION", False)
+SMS_BACKEND = os.environ.get("SMS_BACKEND") or None
+if REQUIRE_PHONE_VERIFICATION and not SMS_BACKEND and not DEBUG:
+    warnings.warn(
+        "REQUIRE_PHONE_VERIFICATION is on but SMS_BACKEND is not set: no verification codes "
+        "can be sent.",
+        RuntimeWarning,
+    )
+TRACKING_BASE_URL = os.environ.get("TRACKING_BASE_URL", "https://rydnow.app/track")
 
 
 # ─────────────────────── Pricing ───────────────────────
@@ -477,8 +488,6 @@ PRICING_QUOTE_VALIDITY_MINUTES = env_int("PRICING_QUOTE_VALIDITY_MINUTES", 5)
 PRICING_SIGNING_KEY = os.environ.get("PRICING_SIGNING_KEY") or None
 # HTTP-date sent in the Sunset header of the deprecated /bookings/quote/ endpoint (optional).
 LEGACY_QUOTE_SUNSET = os.environ.get("LEGACY_QUOTE_SUNSET", "")
-
-
 
 
 # ─────────────────────── Security ───────────────────────
@@ -501,8 +510,6 @@ SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 X_FRAME_OPTIONS = "DENY"
 
 
-
-
 # ───────────────────────── Email ─────────────────────────
 if DEBUG and not os.environ.get("EMAIL_HOST"):
     EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
@@ -514,8 +521,6 @@ else:
     EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
     EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", True)
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Rydnow <no-reply@rydnow.app>")
-
-
 
 
 # ─────────────────────── Logging ───────────────────────
@@ -538,8 +543,6 @@ LOGGING = {
         "api": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
     },
 }
-
-
 
 
 # ─────────────────── Error monitoring (optional) ───────────────────
