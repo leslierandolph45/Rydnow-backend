@@ -157,7 +157,7 @@ urlpatterns = [
     # Admin (custom pages FIRST, then the admin site)
     path("admin/live-map/", admin.site.admin_view(admin_dashboard.live_map_page), name="rn_live_map"),
     path("admin/live-map/data/", admin.site.admin_view(admin_dashboard.live_map_data), name="rn_live_map_data"),
-    path("admin/", admin.site.urls),
+    
 
 
     # Pricing, booking, webhook, revenue, nearby riders (see booking_urls.py). Included once.
