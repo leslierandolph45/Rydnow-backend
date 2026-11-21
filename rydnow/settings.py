@@ -406,6 +406,11 @@ REST_FRAMEWORK = {
         "otp": "3/min",
         "register": "10/hour",
         "wallet_read": "60/min",
+        "quote": "60/min",
+        "booking": "120/min",
+        "booking_create":"10/min",
+        "riders_nearby": "60/min",
+        "promo_validate": "20/min",
     },
     "EXCEPTION_HANDLER": "api.exception_handler.rydnow_exception_handler",
 }

@@ -1,9 +1,11 @@
 """
 pricing.py - the ONLY place trip prices are computed. No views, no DB access.
 
+
     ride_fare = max((base + distance_fare) * surge, minimum_fare)
     gross     = ride_fare + stop_fees + waiting + booking_fee
     total     = gross - discount
+
 
 Money flow per trip:
     trip_earnings    = ride_fare + stop_fees + waiting     (the rider's side)
@@ -13,11 +15,13 @@ Money flow per trip:
     platform_revenue = commission + booking_fee - discount
     total            = rider_earnings + platform_revenue
 
+
 Anti-tamper design:
   * Clients never send an amount. A quote is a signed, expiring, user-bound token;
     booking creation trusts the token, never the request body.
   * The token signs the service and route, so a quote for 2 km cannot book 20 km.
   * Surge, commission and fees are never accepted from the client.
+
 
 Service keys
   Pricing, Service and ServiceQualification use: okada | parcel | waste-bin.
@@ -27,18 +31,23 @@ Service keys
 """
 import logging
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from math import asin, ceil, cos, radians, sin, sqrt
+from math import asin, ceil, cos, isfinite, radians, sin, sqrt
 from zoneinfo import ZoneInfo
+
 
 from django.conf import settings
 from django.core import signing
 from django.core.cache import cache
 
 
+
+
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -52,6 +61,7 @@ COORD = Decimal("0.000001")
 ONE = Decimal("1.0")
 ZERO = Decimal("0.00")
 
+
 ROAD_DISTANCE_FACTOR = Decimal("1.25")
 MAX_DISTANCE_KM = Decimal("100")
 # Long enough for a customer to review the price, pick a payment method and confirm.
@@ -59,7 +69,10 @@ QUOTE_VALIDITY = timedelta(minutes=getattr(settings, "PRICING_QUOTE_VALIDITY_MIN
 MAX_WAIT_INPUT_MINUTES = 240
 QUOTE_SALT = "rydnow.pricing.quote.v1"
 
+
 _REQUIRED_QUOTE_KEYS = frozenset({"qid", "uid", "svc", "route", "fare"})
+
+
 
 
 class QuoteError(Exception):
@@ -67,6 +80,8 @@ class QuoteError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -81,13 +96,19 @@ def _dec(value, default: Decimal = ZERO) -> Decimal:
     return result if result.is_finite() else default
 
 
+
+
 def _aware(value: datetime) -> datetime:
     """Naive datetimes are treated as Africa/Accra local time."""
     return value if value.tzinfo is not None else value.replace(tzinfo=LOCAL_TZ)
 
 
+
+
 def money(value: Decimal) -> Decimal:
     return value.quantize(MONEY, rounding=ROUND_HALF_UP)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +131,8 @@ class Rate:
     cancel_grace_minutes: int     # free cancellation window after acceptance
     cancel_fee_accepted: Decimal  # fee if cancelled after the grace window
     cancel_fee_arrived: Decimal   # fee if cancelled after the rider arrived
+
+
 
 
 # Keys MUST equal SERVICE_CHOICES in models.py (models.py asserts this at import).
@@ -143,6 +166,7 @@ RATES = {
     ),
 }
 
+
 # ---------------------------------------------------------------------------
 # Service key mapping (pricing key <-> Booking.service_type value)
 # ---------------------------------------------------------------------------
@@ -156,6 +180,8 @@ SERVICE_ALIASES = {
 }
 
 
+
+
 def normalize_service_type(value) -> str:
     """Any accepted spelling -> pricing key. Raises ValueError if unknown."""
     key = SERVICE_ALIASES.get(str(value or "").strip().lower())
@@ -164,14 +190,20 @@ def normalize_service_type(value) -> str:
     return key
 
 
+
+
 def booking_service_value(key: str) -> str:
     """Pricing key -> value stored in Booking.service_type."""
     return BOOKING_SERVICE_VALUES[key]
 
 
+
+
 def service_key_for_booking(value: str) -> str:
     """Booking.service_type value -> pricing key."""
     return _KEY_FOR_BOOKING_VALUE[value]
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -190,14 +222,19 @@ PEAK_WINDOWS = (
 PEAK_MULTIPLIER = Decimal("1.2")
 
 
+
+
 @dataclass(frozen=True)
 class DemandSnapshot:
     open_requests: int
     available_riders: int
 
+
     @property
     def ratio(self) -> Decimal:
         return Decimal(self.open_requests) / Decimal(max(self.available_riders, 1))
+
+
 
 
 @dataclass(frozen=True)
@@ -205,9 +242,12 @@ class SurgeResult:
     multiplier: Decimal
     reason: str  # none | demand | peak_hours | override | disabled
 
+
     @property
     def active(self) -> bool:
         return self.multiplier > ONE
+
+
 
 
 def get_demand_snapshot(service_type: str) -> DemandSnapshot:
@@ -219,8 +259,12 @@ def get_demand_snapshot(service_type: str) -> DemandSnapshot:
     )
 
 
+
+
 def _quantize_multiplier(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+
+
 
 
 def _is_peak(now: datetime) -> bool:
@@ -230,11 +274,15 @@ def _is_peak(now: datetime) -> bool:
     return any(start <= local.time() < end for start, end in PEAK_WINDOWS)
 
 
+
+
 def _demand_multiplier(snapshot: DemandSnapshot) -> Decimal:
     for threshold, multiplier in DEMAND_TIERS:
         if snapshot.ratio >= threshold:
             return multiplier
     return ONE
+
+
 
 
 def resolve_surge(service_type: str, now: datetime | None = None) -> SurgeResult:
@@ -248,6 +296,7 @@ def resolve_surge(service_type: str, now: datetime | None = None) -> SurgeResult
         if override is not None:
             value = min(max(Decimal(str(override)), ONE), rate.max_surge)
             return SurgeResult(_quantize_multiplier(value), "override")
+
 
         demand = _demand_multiplier(get_demand_snapshot(service_type))
         peak = PEAK_MULTIPLIER if _is_peak(now) else ONE
@@ -263,11 +312,15 @@ def resolve_surge(service_type: str, now: datetime | None = None) -> SurgeResult
     return SurgeResult(ONE, "none")
 
 
+
+
 # ---------------------------------------------------------------------------
 # Geometry helpers
 # ---------------------------------------------------------------------------
 def coord_str(value) -> str:
     return format(_dec(value).quantize(COORD, rounding=ROUND_HALF_UP), "f")
+
+
 
 
 def haversine_km(lat1, lng1, lat2, lng2) -> float:
@@ -276,20 +329,57 @@ def haversine_km(lat1, lng1, lat2, lng2) -> float:
     return 2 * EARTH_RADIUS_KM * asin(sqrt(a))
 
 
+
+
+def _point_coords(point):
+    """One route point -> (lat, lng) floats.
+
+    Accepts a (lat, lng) pair (what QuoteView passes for pickup and destination) or a
+    mapping with lat/lng or latitude/longitude (what the validated stops look like).
+    Explicit None checks, so a coordinate of exactly 0 (the equator or the prime
+    meridian) is valid and never treated as missing.
+    """
+    if isinstance(point, Mapping):
+        lat = point.get("lat")
+        if lat is None:
+            lat = point.get("latitude")
+        lng = point.get("lng")
+        if lng is None:
+            lng = point.get("longitude")
+    else:
+        try:
+            lat, lng = point[0], point[1]
+        except (TypeError, IndexError, KeyError):
+            raise ValueError(f"Invalid route point: {point!r}") from None
+
+
+    if lat is None or lng is None:
+        raise ValueError(f"Missing coordinates in route point: {point!r}")
+    try:
+        lat, lng = float(lat), float(lng)
+    except (TypeError, ValueError):
+        raise ValueError(f"Non-numeric coordinates in route point: {point!r}") from None
+    if not (isfinite(lat) and isfinite(lng)) or abs(lat) > 90 or abs(lng) > 180:
+        raise ValueError(f"Coordinates out of range in route point: {point!r}")
+    return (lat, lng)
+
+
+
+
 def build_route(pickup, stops, destination):
-    """Build route coordinates, accepting both 'lat/lng' and 'latitude/longitude' key styles."""
-    def get_coords(point):
-        lat = point.get("lat") or point.get("latitude")
-        lng = point.get("lng") or point.get("longitude")
-        if lat is None or lng is None:
-            raise ValueError(f"Missing coordinates in point: {point}")
-        return (float(lat), float(lng))
-    
-    route = [get_coords(pickup)]
-    for stop in stops:
-        route.append(get_coords(stop))
-    route.append(get_coords(destination))
-    return route
+    """Route as [(lat, lng), ...]: pickup, each stop in order, then destination.
+
+    pickup / destination may be (lat, lng) pairs or mappings; each stop may be a mapping
+    or a pair. Raises ValueError on a missing, non-numeric or out-of-range coordinate.
+    """
+    return [
+        _point_coords(pickup),
+        *(_point_coords(stop) for stop in (stops or [])),
+        _point_coords(destination),
+    ]
+
+
+
 
 
 
@@ -298,8 +388,12 @@ def route_distance_km(points) -> Decimal:
     return money(Decimal(str(straight)) * ROAD_DISTANCE_FACTOR)
 
 
+
+
 def route_signature(route) -> list:
     return [[coord_str(a), coord_str(b)] for a, b in route]
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +405,8 @@ class PromoTerms:
     percent_off: Decimal = ZERO
     flat_off: Decimal = ZERO
     max_discount: Decimal | None = None
+
+
 
 
 def _promo_discount(promo, ride_fare: Decimal, ceiling: Decimal) -> Decimal:
@@ -325,6 +421,8 @@ def _promo_discount(promo, ride_fare: Decimal, ceiling: Decimal) -> Decimal:
     if cap is not None:
         raw = min(raw, max(_dec(cap), ZERO))
     return money(max(min(raw, ride_fare, ceiling), ZERO))
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -351,13 +449,18 @@ def calculate_waiting(service_type: str, wait_minutes: list) -> dict:
     }
 
 
+
+
 def max_billable_wait_minutes(service_type: str) -> int:
     rate = RATES[service_type]
     return max(rate.max_wait_minutes - rate.free_wait_minutes, 0)
 
 
+
+
 def calculate_fare(service_type, distance_km, surge, wait_minutes, promo=None) -> dict:
     rate = RATES[service_type]
+
 
     distance_km = max(_dec(distance_km), ZERO)
     distance_fare = money(distance_km * rate.per_km)
@@ -365,13 +468,16 @@ def calculate_fare(service_type, distance_km, surge, wait_minutes, promo=None) -
     surge_amount = money(subtotal * (surge.multiplier - ONE))
     ride_fare = money(max(subtotal + surge_amount, rate.minimum))
 
+
     stop_fees = money(rate.stop_fee * len(wait_minutes))
     waiting = calculate_waiting(service_type, wait_minutes)
+
 
     trip_earnings = ride_fare + stop_fees + waiting["charge"]
     commission = money(trip_earnings * rate.commission_rate)
     discount = _promo_discount(promo, ride_fare, commission + rate.booking_fee)
     total = money(trip_earnings + rate.booking_fee - discount)
+
 
     return {
         "base_fare": rate.base,
@@ -395,11 +501,15 @@ def calculate_fare(service_type, distance_km, surge, wait_minutes, promo=None) -
     }
 
 
+
+
 _SNAPSHOT_MONEY = (
     "base_fare", "distance_fare", "subtotal", "surge_amount", "minimum_fare",
     "ride_fare", "stop_fees", "waiting_charge", "booking_fee", "discount",
     "total", "platform_commission", "rider_earnings", "platform_revenue",
 )
+
+
 
 
 def fare_snapshot(fare: dict, surge: SurgeResult) -> dict:
@@ -416,6 +526,8 @@ def fare_snapshot(fare: dict, surge: SurgeResult) -> dict:
     return snap
 
 
+
+
 def finalize_fare(service_type: str, snapshot: dict, wait_minutes: list) -> dict:
     """Re-price a completed trip from SERVER-measured waits. Ride fare, stop fees,
     surge and commission rate stay as quoted. Not wired in yet: BookingStop has no
@@ -425,10 +537,12 @@ def finalize_fare(service_type: str, snapshot: dict, wait_minutes: list) -> dict
     stop_fees = Decimal(snapshot["stop_fees"])
     booking_fee = Decimal(snapshot["booking_fee"])
 
+
     trip_earnings = ride_fare + stop_fees + waiting["charge"]
     commission = money(trip_earnings * Decimal(snapshot["commission_rate"]))
     discount = min(Decimal(snapshot["discount"]), commission + booking_fee)
     total = money(trip_earnings + booking_fee - discount)
+
 
     final = dict(snapshot)
     final.update({
@@ -443,6 +557,8 @@ def finalize_fare(service_type: str, snapshot: dict, wait_minutes: list) -> dict
     return final
 
 
+
+
 def cancellation_fee(service_type: str, *, status: str, accepted_at, now) -> Decimal:
     """Fee a CUSTOMER owes for cancelling after a rider has committed.
     `status` uses Booking.Status values; only "accepted" and "arrived" carry a fee."""
@@ -455,11 +571,15 @@ def cancellation_fee(service_type: str, *, status: str, accepted_at, now) -> Dec
     return ZERO
 
 
+
+
 # ---------------------------------------------------------------------------
 # Signed quotes
 # ---------------------------------------------------------------------------
 def _signing_key() -> str:
     return getattr(settings, "PRICING_SIGNING_KEY", None) or settings.SECRET_KEY
+
+
 
 
 def issue_quote(*, user_id, service_type, route, wait_minutes, distance_km, surge, fare):
@@ -477,6 +597,8 @@ def issue_quote(*, user_id, service_type, route, wait_minutes, distance_km, surg
     return token, qid
 
 
+
+
 def read_quote(token: str, *, user_id) -> dict:
     try:
         data = signing.loads(
@@ -492,6 +614,8 @@ def read_quote(token: str, *, user_id) -> dict:
     if data.get("uid") != str(user_id):
         raise QuoteError("quote_invalid", "Invalid price quote.")
     return data
+
+
 
 
 def quote_matches_trip(data: dict, *, service_type: str, route) -> bool:
