@@ -123,6 +123,7 @@ urlpatterns = [
     path("bookings/", include ("api.booking_urls")),
     path("quote/", QuoteView.as_view(), name= "booking-quote"),
     path("calculate-price/"  , QuoteView.as_view(), name= "calculate-price"),
+    path("", include ("api.booking_urls")),
 
     # Pricing, booking, webhook, revenue, nearby riders
     path("", include("api.booking_urls")),
