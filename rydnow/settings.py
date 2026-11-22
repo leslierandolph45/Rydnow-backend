@@ -1,22 +1,28 @@
 """
 Django settings for the Rydnow project (rides, delivery & waste collection).
 
+
 All environment-specific values come from environment variables (a local .env file is read
 in development). Nothing secret is stored in this file.
 
+
 Required in production:
     DJANGO_SECRET_KEY, DATABASE_URL
+
 
 REQUIRED for rider documents to survive deploys (Render's disk is wiped on every deploy):
     AWS_STORAGE_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
     (+ AWS_S3_ENDPOINT_URL and AWS_S3_REGION_NAME for Cloudflare R2 / Backblaze B2 / Supabase)
     and in requirements.txt:  django-storages[s3]  boto3
 
+
 Recommended in production:
     PAYSTACK_SECRET_KEY, BOOKING_WEBHOOK_SECRET, SENTRY_DSN, REDIS_URL
 
+
 Optional:
-    DEBUG, ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, CSRF_TRUSTED_ORIGINS,
+    DEBUG, ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, CORS_ALLOWED_ORIGIN_REGEXES,
+    CSRF_TRUSTED_ORIGINS,
     LOG_LEVEL, EMAIL_*, SECURE_SSL_REDIRECT, SECURE_HSTS_SECONDS, ADMIN_SESSION_HOURS,
     DATABASE_SSL_REQUIRE, NUM_PROXIES, ADMIN_URL,
     PRICING_QUOTE_VALIDITY_MINUTES, PRICING_SIGNING_KEY, LEGACY_QUOTE_SUNSET,
@@ -28,6 +34,12 @@ Optional:
     STATIC_MANIFEST (set to True to re-enable hashed static filenames),
     TEMPLATES_DIR (absolute path to your project templates folder, overrides the search below)
 
+
+IMPORTANT: ALLOWED_HOSTS, CORS_ALLOWED_ORIGINS, CORS_ALLOWED_ORIGIN_REGEXES and
+CSRF_TRUSTED_ORIGINS REPLACE the defaults below when set as environment variables. If you set
+any of them on Render, include every origin you need, or delete the variable to use the defaults.
+
+
 Local development: set DEBUG=True in your shell or .env file.
 """
 import importlib.util
@@ -36,17 +48,23 @@ import re
 import warnings
 from pathlib import Path
 
+
 import dj_database_url
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
+
 
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+
+
 # ────────────────────────── Env helpers ──────────────────────────
 def env_bool(name: str, default: bool = False) -> bool:
     return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
 
 
 def env_int(name: str, default: int) -> int:
@@ -59,6 +77,8 @@ def env_int(name: str, default: int) -> int:
         raise ImproperlyConfigured(f"{name} must be an integer, got {raw!r}.") from exc
 
 
+
+
 def env_float(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw in (None, ""):
@@ -69,15 +89,20 @@ def env_float(name: str, default: float) -> float:
         raise ImproperlyConfigured(f"{name} must be a number, got {raw!r}.") from exc
 
 
+
+
 def env_list(name: str, default=None) -> list:
     raw = os.environ.get(name, "")
     items = [item.strip() for item in raw.split(",") if item.strip()]
     return items or list(default or [])
 
 
+
+
 # ─────────────────────────── Core ───────────────────────────
 # Secure by default: DEBUG is OFF unless you explicitly turn it on (e.g. in a local .env).
 DEBUG = env_bool("DEBUG", False)
+
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
@@ -86,23 +111,38 @@ if not SECRET_KEY:
     else:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DEBUG is False.")
 
+
+# A leading dot matches the domain and all its subdomains (".vercel.app" matches
+# "my-app.vercel.app"). A bare "vercel.app" would match only that exact host.
 ALLOWED_HOSTS = env_list(
     "ALLOWED_HOSTS",
-    default=["rydnow-backend.onrender.com", "localhost", "127.0.0.1", "vercel.app", "rydnow.app"],
+    default=[
+        "rydnow-backend.onrender.com",
+        "localhost",
+        "127.0.0.1",
+        "rydnow.app",
+        ".rydnow.app",
+        ".vercel.app",
+    ],
 )
 _render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 if _render_host and _render_host not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_render_host)
+
 
 ROOT_URLCONF = "rydnow.urls"
 WSGI_APPLICATION = "rydnow.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 APPEND_SLASH = True  # the API relies on trailing slashes; the frontend proxy adds them back
 
+
 # Read by rydnow/urls.py (getattr(settings, "ADMIN_URL", "admin/")). Must end with "/".
 ADMIN_URL = os.environ.get("ADMIN_URL", "admin/")
 
+
 # AUTH_USER_MODEL = "api.User"
+
+
 
 
 # ─────────────────────── Applications ───────────────────────
@@ -127,6 +167,7 @@ INSTALLED_APPS = [
     "api",
 ]
 
+
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
@@ -140,6 +181,8 @@ MIDDLEWARE = [
 ]
 
 
+
+
 # ─────────────────────── Admin dashboard (Unfold) ───────────────────────
 # DASHBOARD_CALLBACK feeds data into the admin home page. It is only used when the home
 # page template is yours: put your file at   <templates folder>/admin/index.html
@@ -149,6 +192,8 @@ UNFOLD = {
     "SITE_HEADER": "Rydnow",
     "DASHBOARD_CALLBACK": "api.dashboard.dashboard_callback",
 }
+
+
 
 
 # ─────────────────────── Templates ───────────────────────
@@ -177,6 +222,8 @@ def _find_template_dirs():
     return found
 
 
+
+
 TEMPLATE_DIRS = _find_template_dirs()
 if not TEMPLATE_DIRS:
     warnings.warn(
@@ -185,6 +232,7 @@ if not TEMPLATE_DIRS:
         "Set TEMPLATES_DIR to the folder's absolute path.",
         RuntimeWarning,
     )
+
 
 TEMPLATES = [
     {
@@ -203,6 +251,8 @@ TEMPLATES = [
 ]
 
 
+
+
 # ─────────────────────── Database ───────────────────────
 DATABASES = {
     "default": dj_database_url.config(
@@ -216,6 +266,8 @@ DATABASES = {
 }
 if not DEBUG and DATABASES["default"]["ENGINE"].endswith("sqlite3"):
     raise ImproperlyConfigured("Set DATABASE_URL to a PostgreSQL database in production.")
+
+
 
 
 # ───────────────────────── Cache ─────────────────────────
@@ -244,6 +296,8 @@ else:
         )
 
 
+
+
 # ─────────────────── Auth & Passwords ───────────────────
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -255,8 +309,11 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
+
 # Admins are logged out after this many hours (default 12).
 SESSION_COOKIE_AGE = env_int("ADMIN_SESSION_HOURS", 12) * 3600
+
+
 
 
 # ──────────────────── Django REST Framework ────────────────────
@@ -267,6 +324,8 @@ SESSION_COOKIE_AGE = env_int("ADMIN_SESSION_HOURS", 12) * 3600
 # If none is found, DRF's standard handler is used.
 _DRF_DEFAULT_HANDLER = "rest_framework.views.exception_handler"
 _HANDLER_NAMES = ("rydnow_exception_handler", "custom_exception_handler", "exception_handler")
+
+
 
 
 def _pick_exception_handler() -> str:
@@ -292,7 +351,10 @@ def _pick_exception_handler() -> str:
     return _DRF_DEFAULT_HANDLER
 
 
+
+
 _EXCEPTION_HANDLER = _pick_exception_handler()
+
 
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
@@ -341,6 +403,8 @@ if _num_proxies:
     REST_FRAMEWORK["NUM_PROXIES"] = _num_proxies
 
 
+
+
 # ────────────────────── CORS / CSRF ──────────────────────
 # Browser calls from the website go through the Next.js proxy (server to server), so CORS only
 # matters for direct browser calls. If a mobile web view calls the API directly, add its
@@ -355,16 +419,27 @@ CORS_ALLOWED_ORIGINS = env_list(
         "https://rydnow-backend.onrender.com",
     ],
 )
+# django-cors-headers does NOT accept wildcards in CORS_ALLOWED_ORIGINS, so Vercel preview
+# deployments (https://<name>.vercel.app) are matched with a regex instead.
+CORS_ALLOWED_ORIGIN_REGEXES = env_list(
+    "CORS_ALLOWED_ORIGIN_REGEXES",
+    default=[r"^https://[a-z0-9-]+\.vercel\.app$"],
+)
 CORS_ALLOW_CREDENTIALS = True
 
+
+# CSRF_TRUSTED_ORIGINS DOES accept a leading wildcard ("https://*.vercel.app").
 CSRF_TRUSTED_ORIGINS = env_list(
     "CSRF_TRUSTED_ORIGINS",
     default=[
         "https://rydnow-backend.onrender.com",
         "https://rydnow.app",
         "https://www.rydnow.app",
+        "https://*.vercel.app",
     ],
 )
+
+
 
 
 # ─────────────────── Internationalization ───────────────────
@@ -375,16 +450,20 @@ USE_TZ = True
 PHONENUMBER_DEFAULT_REGION = "GH"
 
 
+
+
 # ───────────────────── Static & Media ─────────────────────
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"] if (BASE_DIR / "static").is_dir() else []
+
 
 MEDIA_URL = "/media/"
 # Only used when NO bucket is configured (local dev, or a Render persistent disk mounted
 # at e.g. /var/data/media -> set MEDIA_ROOT=/var/data/media). Never public: rider documents
 # are streamed to staff only through the admin (see RiderDocumentAdmin.file_view).
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT") or (BASE_DIR / "media"))
+
 
 # /admin/ 500 fix:
 # CompressedManifestStaticFilesStorage raises ValueError when static("css/x.css") points at a
@@ -397,16 +476,19 @@ if env_bool("STATIC_MANIFEST", False):
 else:
     _STATICFILES_BACKEND = "whitenoise.storage.CompressedStaticFilesStorage"
 
+
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {"BACKEND": _STATICFILES_BACKEND},
 }
+
 
 _HAS_BUCKET = bool(os.environ.get("AWS_STORAGE_BUCKET_NAME"))
 _HAS_S3_LIBS = (
     importlib.util.find_spec("storages") is not None
     and importlib.util.find_spec("boto3") is not None
 )
+
 
 if _HAS_BUCKET and _HAS_S3_LIBS:
     # Any S3-compatible bucket works: AWS S3, Cloudflare R2, Backblaze B2, Supabase Storage.
@@ -438,8 +520,11 @@ elif not DEBUG:
         RuntimeWarning,
     )
 
+
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
+
+
 
 
 # ─────────────────────── Payments & wallet ───────────────────────
@@ -455,6 +540,7 @@ MAX_DEPOSIT = os.environ.get("MAX_DEPOSIT", "100000.00")      # read by api/view
 if not DEBUG and not PAYSTACK_SECRET_KEY:
     warnings.warn("PAYSTACK_SECRET_KEY is not set: card/MoMo payments will fail.", RuntimeWarning)
 
+
 # Shared secret for POST /booking/webhook/ (X-Signature = hex HMAC-SHA256 of the raw body).
 # While this is empty the endpoint rejects every call with 401.
 BOOKING_WEBHOOK_SECRET = os.environ.get("BOOKING_WEBHOOK_SECRET", "")
@@ -463,6 +549,8 @@ if not DEBUG and not BOOKING_WEBHOOK_SECRET:
         "BOOKING_WEBHOOK_SECRET is not set: the booking webhook will reject every request.",
         RuntimeWarning,
     )
+
+
 
 
 # ─────────────────────── Phone verification & SMS ───────────────────────
@@ -479,6 +567,8 @@ if REQUIRE_PHONE_VERIFICATION and not SMS_BACKEND and not DEBUG:
 TRACKING_BASE_URL = os.environ.get("TRACKING_BASE_URL", "https://rydnow.app/track")
 
 
+
+
 # ─────────────────────── Pricing ───────────────────────
 # Read by api/pricing.py. The website's fallback price-lock timer assumes 5 minutes
 # (QUOTE_FALLBACK_TTL_SECONDS in lib/rydnow/config.ts), so change both together.
@@ -488,6 +578,8 @@ PRICING_QUOTE_VALIDITY_MINUTES = env_int("PRICING_QUOTE_VALIDITY_MINUTES", 5)
 PRICING_SIGNING_KEY = os.environ.get("PRICING_SIGNING_KEY") or None
 # HTTP-date sent in the Sunset header of the deprecated /bookings/quote/ endpoint (optional).
 LEGACY_QUOTE_SUNSET = os.environ.get("LEGACY_QUOTE_SUNSET", "")
+
+
 
 
 # ─────────────────────── Security ───────────────────────
@@ -501,6 +593,7 @@ if not DEBUG:
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", True)
     SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
 
+
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SAMESITE = "Lax"
@@ -508,6 +601,8 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 # "same-origin" would stop the live map's OpenStreetMap tiles loading (OSM requires a Referer).
 SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 X_FRAME_OPTIONS = "DENY"
+
+
 
 
 # ───────────────────────── Email ─────────────────────────
@@ -523,8 +618,11 @@ else:
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Rydnow <no-reply@rydnow.app>")
 
 
+
+
 # ─────────────────────── Logging ───────────────────────
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG" if DEBUG else "INFO")
+
 
 LOGGING = {
     "version": 1,
@@ -545,12 +643,15 @@ LOGGING = {
 }
 
 
+
+
 # ─────────────────── Error monitoring (optional) ───────────────────
 # Set SENTRY_DSN to enable. Needs: pip install sentry-sdk (add it to requirements.txt).
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 if SENTRY_DSN:
     try:
         import sentry_sdk
+
 
         sentry_sdk.init(
             dsn=SENTRY_DSN,
