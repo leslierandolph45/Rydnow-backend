@@ -8,6 +8,10 @@ Matched to models.Booking, BookingStop, BookingStatusHistory and Payment:
   * BookingStatusHistory uses `status` / `notes` and related_name="status_history".
   * Fare breakdown, rider earnings and platform fee live on the Payment row created with the
     booking (Payment.metadata["fare"]); Booking itself stores subtotal / discount / total.
+  * Booking's own column names differ from the names clients see. Output serializers map them
+    with source=:  total_fare -> total_price,  destination_address -> dropoff_address,
+    pickup_lat / pickup_lng -> pickup_latitude / pickup_longitude,
+    destination_lat / destination_lng -> dropoff_latitude / dropoff_longitude.
 
 Clients may send either spelling of the service ("okada"/"ride", "parcel"/"delivery",
 "waste-bin"/"waste_collection") and either coordinate naming; both are normalised here.
@@ -26,8 +30,10 @@ from rest_framework import serializers
 from . import pricing
 from .models import Booking, BookingStatusHistory, BookingStop, Payment
 
-# Money / coordinates are rendered as JSON numbers, like the quote endpoint.
+
+# Money is rendered as JSON numbers, like the quote endpoint.
 JSON_NUMBER = {"coerce_to_string": False}
+
 
 PAYMENT_METHOD_ALIASES = {
     "mobile_money": "momo", "mobile-money": "momo", "mtn": "momo", "momo": "momo",
@@ -36,6 +42,7 @@ PAYMENT_METHOD_ALIASES = {
     "cash": "cash", "wallet": "wallet",
 }
 BOOKING_PAYMENT_METHODS = ("cash", "momo", "card", "wallet")
+
 
 QUOTE_ALIASES = {
     "pickup_latitude": "pickup_lat", "pickup_longitude": "pickup_lng",
@@ -65,11 +72,11 @@ def _with_aliases(data, aliases):
 
 def _rider_status_choices():
     """
-    Statuses a rider may move a booking to. Resolved against the Booking.Status enum so the
-    serializer keeps working whichever name the model uses for the "trip underway" state
-    (IN_PROGRESS or EN_ROUTE); unknown names are skipped rather than raising at import time.
+    Statuses a rider may move a booking to. Booking.TRANSITIONS only allows
+    ACCEPTED -> EN_ROUTE -> ARRIVED -> COMPLETED (plus CANCELLED), so ARRIVED must be here or
+    a rider can never finish a trip. Unknown names are skipped rather than raising at import.
     """
-    names = ("ACCEPTED", "IN_PROGRESS", "EN_ROUTE", "COMPLETED", "CANCELLED")
+    names = ("ACCEPTED", "EN_ROUTE", "ARRIVED", "COMPLETED", "CANCELLED")
     return [getattr(Booking.Status, n) for n in names if hasattr(Booking.Status, n)]
 
 
@@ -117,8 +124,11 @@ class TripStopSerializer(serializers.Serializer):
     address = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
     lat = LatField()
     lng = LngField()
+    # Decimal default so a missing value has the same type as a validated one
+    # (DRF skips validate_<field> when the default is used).
     wait_minutes = serializers.FloatField(
-        min_value=0, max_value=pricing.MAX_WAIT_INPUT_MINUTES, required=False, default=0
+        min_value=0, max_value=pricing.MAX_WAIT_INPUT_MINUTES, required=False,
+        default=Decimal("0"),
     )
 
     def to_internal_value(self, data):
@@ -303,7 +313,9 @@ class BookingStopSerializer(serializers.ModelSerializer):
         model = BookingStop
         fields = ["sequence", "address", "latitude", "longitude"]
         read_only_fields = fields
-        extra_kwargs = {"latitude": JSON_NUMBER, "longitude": JSON_NUMBER}
+        # BookingStop.latitude/longitude are model FloatFields, which already render as JSON
+        # numbers. coerce_to_string is a DecimalField-only argument and raises TypeError on a
+        # FloatField, so no extra_kwargs here.
 
 
 class BookingStatusHistorySerializer(serializers.ModelSerializer):
@@ -319,6 +331,16 @@ class BookingListSerializer(serializers.ModelSerializer):
     service_key = serializers.SerializerMethodField()
     status_label = serializers.CharField(source="get_status_display", read_only=True)
 
+    # Map frontend names -> actual model fields
+    dropoff_address = serializers.CharField(source="destination_address", read_only=True)
+    total_price = serializers.DecimalField(
+        source="total_fare",
+        max_digits=10,
+        decimal_places=2,
+        read_only=True,
+        coerce_to_string=False,
+    )
+
     class Meta:
         model = Booking
         fields = [
@@ -327,7 +349,8 @@ class BookingListSerializer(serializers.ModelSerializer):
             "subtotal", "discount_amount", "total_price", "currency", "created_at",
         ]
         read_only_fields = fields
-        extra_kwargs = {f: JSON_NUMBER for f in ("subtotal", "discount_amount", "total_price")}
+        # subtotal / discount_amount are DecimalFields. total_price is declared above.
+        extra_kwargs = {f: JSON_NUMBER for f in ("subtotal", "discount_amount")}
 
     def get_service_key(self, obj):
         return pricing.service_key_for_booking(obj.service_type)
@@ -335,10 +358,11 @@ class BookingListSerializer(serializers.ModelSerializer):
 
 class BookingDetailSerializer(BookingListSerializer):
     """What the booking's customer sees."""
-    pickup_latitude = serializers.FloatField(read_only=True)
-    pickup_longitude = serializers.FloatField(read_only=True)
-    dropoff_latitude = serializers.FloatField(read_only=True)
-    dropoff_longitude = serializers.FloatField(read_only=True)
+    # Model columns are pickup_lat / pickup_lng / destination_lat / destination_lng.
+    pickup_latitude = serializers.FloatField(source="pickup_lat", read_only=True)
+    pickup_longitude = serializers.FloatField(source="pickup_lng", read_only=True)
+    dropoff_latitude = serializers.FloatField(source="destination_lat", read_only=True)
+    dropoff_longitude = serializers.FloatField(source="destination_lng", read_only=True)
     stops = BookingStopSerializer(many=True, read_only=True)
     history = BookingStatusHistorySerializer(source="status_history", many=True, read_only=True)
     rider = serializers.SerializerMethodField()
@@ -347,7 +371,7 @@ class BookingDetailSerializer(BookingListSerializer):
     class Meta(BookingListSerializer.Meta):
         fields = BookingListSerializer.Meta.fields + [
             "pickup_latitude", "pickup_longitude", "dropoff_latitude", "dropoff_longitude",
-            "notes", "accepted_at", "started_at", "completed_at", "cancelled_at",
+            "notes", "accepted_at", "started_at", "arrived_at", "completed_at", "cancelled_at",
             "cancellation_reason", "stops", "history", "rider", "payment",
         ]
         read_only_fields = fields
